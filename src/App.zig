@@ -1,0 +1,477 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const types = @import("types.zig");
+const config_mod = @import("config.zig");
+const provider_mod = @import("io/provider.zig");
+const registry_mod = @import("tool/registry.zig");
+const session_mod = @import("core/session.zig");
+const agent_mod = @import("core/agent.zig");
+const render = @import("render/cli.zig");
+const signal = @import("util/signal.zig");
+
+const Io = std.Io;
+
+const BASE_PROMPT =
+    "You are z-agent-core, an interactive CLI agent that helps users with software engineering tasks.";
+
+/// CLI application orchestrator. init() loads config + tools + session,
+/// initAgent() binds agent to session, run() enters single-turn or REPL.
+pub const App = struct {
+    allocator: std.mem.Allocator,
+    io: Io,
+
+    cfg: config_mod.Config,
+    provider: provider_mod.Provider,
+    registry: registry_mod.Registry,
+    tools: []types.Tool,
+    session: session_mod.Session,
+    agent: agent_mod.AgentLoop,
+
+    project_root: []const u8,
+    project_context: ?[]const u8,
+    single_prompt: ?[]const u8,
+    session_dir: []const u8,
+
+    /// Initialize App: render.init, signal.init, findZagentRoot, load config/dotenv,
+    /// create Provider/Tools/Session, inject system prompt. Agent created separately
+    /// via initAgent() to avoid self-referential pointer issues.
+    /// Returns error.NoProjectRoot or error.ProviderNotFound on fatal config issues.
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: Io,
+        single_prompt: ?[]const u8,
+        model_override: ?[]const u8,
+    ) !App {
+        render.init();
+        signal.init(io);
+
+        const project_root = config_mod.findZagentRoot(allocator, io) orelse blk: {
+            var pr_buf: [4096]u8 = undefined;
+            const len = Io.Dir.cwd().realPath(io, &pr_buf) catch return error.NoProjectRoot;
+            break :blk try allocator.dupe(u8, pr_buf[0..len]);
+        };
+
+        var project_context: ?[]const u8 = null;
+        readAgents: {
+            const ap = std.fs.path.join(allocator, &.{ project_root, "AGENTS.md" }) catch break :readAgents;
+            defer allocator.free(ap);
+            const f = Io.Dir.cwd().openFile(io, ap, .{ .mode = .read_only }) catch break :readAgents;
+            defer f.close(io);
+            const s = f.stat(io) catch break :readAgents;
+            if (s.size <= 0 or s.size > 65536) break :readAgents;
+            const sz = @as(usize, @intCast(s.size));
+            const content = allocator.alloc(u8, sz) catch break :readAgents;
+            const n = f.readPositionalAll(io, content, 0) catch {
+                allocator.free(content);
+                break :readAgents;
+            };
+            project_context = content[0..n];
+        }
+
+        var cfg = try config_mod.Config.load(allocator, project_root, io);
+        if (model_override) |spec| {
+            const duped = try allocator.dupe(u8, spec);
+            cfg.default_model = duped;
+        }
+
+        _ = config_mod.loadDotEnv(allocator, project_root, io) catch {}; // .env is optional
+
+        const model = try config_mod.resolveModel(&cfg, cfg.default_model);
+        const entry = findProviderEntry(cfg.providers, cfg.default_model) orelse {
+            var sbuf: [256]u8 = undefined;
+            var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
+            sw.interface.print("z-agent-core: Error: provider for '{s}' not found\n", .{cfg.default_model}) catch {}; // stderr gone
+            sw.interface.flush() catch {};
+            return error.ProviderNotFound;
+        };
+
+        const provider = provider_mod.Provider.init(allocator, entry, model, null, io) catch |err| {
+            if (err == error.ApiKeyNotSet) {
+                var sbuf: [256]u8 = undefined;
+                var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
+                sw.interface.print("z-agent-core: Error: {s} environment variable not set\n", .{entry.api_key_env}) catch {};
+                sw.interface.flush() catch {};
+            }
+            return err;
+        };
+        const registry = registry_mod.buildRegistry();
+        const tools = try registry.toTools(allocator);
+        errdefer allocator.free(tools);
+
+        var session = try session_mod.Session.init(allocator, io, cfg.default_model);
+        errdefer session.deinit();
+
+        try buildSystemPrompt(allocator, io, project_root, project_context, &session);
+
+        const session_dir = try std.fs.path.join(allocator, &.{ project_root, ".zagent", "sessions" });
+
+        return App{
+            .allocator = allocator,
+            .io = io,
+            .cfg = cfg,
+            .provider = provider,
+            .registry = registry,
+            .tools = tools,
+            .session = session,
+            .agent = undefined,
+            .project_root = project_root,
+            .project_context = project_context,
+            .single_prompt = single_prompt,
+            .session_dir = session_dir,
+        };
+    }
+
+    /// Bind agent loop to session for tool-execution. Must call after init(), before run().
+    pub fn initAgent(self: *App) void {
+        self.agent = agent_mod.AgentLoop.init(
+            self.allocator, self.io,
+            &self.provider, self.registry, &self.session,
+            self.cfg.max_tool_rounds, self.project_root,
+        );
+    }
+
+    /// Dispatch: singleTurn() if --prompt given, otherwise enter REPL loop.
+    pub fn run(self: *App) !void {
+        if (self.single_prompt) |prompt| {
+            try self.singleTurn(prompt);
+            return;
+        }
+        try self.replLoop();
+    }
+
+    fn singleTurn(self: *App, prompt: []const u8) !void {
+        var obuf: [4096]u8 = undefined;
+        var stdout: Io.File.Writer = .init(.stdout(), self.io, &obuf);
+        var pw = render.PhaseWriter.init(&stdout.interface);
+
+        try render.writeLabeled(&stdout.interface, .user, prompt);
+        try stdout.interface.flush();
+
+        const pre_count = self.session.messages().len;
+        try self.session.append(.{ .role = .user, .content = prompt });
+        _ = stdout.interface.write("\n") catch {};
+
+        const result = self.agent.runTurn(&stdout.interface, &pw) catch |err| {
+            switch (err) {
+                error.OutOfMemory => {
+                    self.session.truncateTo(pre_count);
+                    try self.session.flush();
+                    return err;
+                },
+                else => {
+                    self.session.truncateTo(pre_count);
+                    try self.session.flush();
+                    return;
+                },
+            }
+        };
+        _ = stdout.interface.write("\n") catch {};
+        if (result.finish == .interrupted) {
+            try render.writeLabeled(&stdout.interface, .warning, "interrupted");
+        }
+        if (result.finish == .api_error or result.finish == .interrupted) {
+            self.session.truncateTo(pre_count);
+        }
+        try self.session.flush();
+    }
+
+    fn replLoop(self: *App) !void {
+        var obuf: [4096]u8 = undefined;
+        var stdout: Io.File.Writer = .init(.stdout(), self.io, &obuf);
+        var pw = render.PhaseWriter.init(&stdout.interface);
+
+        var line_buf: std.ArrayListAligned(u8, null) = .empty;
+        defer line_buf.deinit(self.allocator);
+
+        if (builtin.os.tag == .windows) {
+            const con_in = wincon.GetStdHandle(STD_INPUT_HANDLE) orelse return;
+            while (true) {
+                render.writePrompt(&stdout.interface) catch continue;
+                _ = stdout.interface.flush() catch {};
+
+                const line_opt = winReadLine(con_in, &line_buf, self.allocator) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    error.Interrupted => {
+                        _ = stdout.interface.write("^C\n") catch {};
+                        try render.writeLabeled(&stdout.interface, .warning, "interrupted");
+                        signal.reset();
+                        continue;
+                    },
+                    else => continue,
+                };
+                const line = line_opt orelse break;
+                defer self.allocator.free(line);
+                self.processLine(&stdout, line, &pw) catch |err| {
+                    if (err == error.ExitRepl) break;
+                    return err;
+                };
+            }
+        } else {
+            var rbuf: [4096]u8 = undefined;
+            var stdin_file = Io.File.stdin();
+            var stdin_reader = stdin_file.reader(self.io, rbuf[0..]);
+
+            while (true) {
+                render.writePrompt(&stdout.interface) catch continue;
+                _ = stdout.interface.flush() catch {};
+
+                const line_opt = readLine(&stdin_reader.interface, &line_buf, self.allocator) catch |err| switch (err) {
+                    error.EndOfStream => break,
+                    error.Interrupted => {
+                        _ = stdout.interface.write("^C\n") catch {};
+                        try render.writeLabeled(&stdout.interface, .warning, "interrupted");
+                        signal.reset();
+                        continue;
+                    },
+                    else => continue,
+                };
+                const line = line_opt orelse break;
+                defer self.allocator.free(line);
+                self.processLine(&stdout, line, &pw) catch |err| {
+                    if (err == error.ExitRepl) break;
+                    return err;
+                };
+            }
+        }
+    }
+
+    fn processLine(self: *App, stdout: *Io.File.Writer, line: []const u8, pw: *render.PhaseWriter) !void {
+        if (line.len == 0) return;
+        if (std.mem.eql(u8, line, "/exit") or std.mem.eql(u8, line, "/quit")) return error.ExitRepl;
+        if (std.mem.eql(u8, line, "/new")) {
+            try self.resetSession();
+            return;
+        }
+        if (std.mem.startsWith(u8, line, "/name ")) {
+            try self.renameSession(line["/name ".len..]);
+            return;
+        }
+        if (std.mem.eql(u8, line, "/list")) {
+            try self.listSessions(stdout);
+            return;
+        }
+        if (std.mem.eql(u8, line, "/help")) {
+            try self.showHelp(stdout);
+            return;
+        }
+
+        const pre_count = self.session.messages().len;
+        try self.session.append(.{ .role = .user, .content = line });
+        _ = stdout.interface.write("\n") catch {};
+
+        const result = self.agent.runTurn(&stdout.interface, pw) catch |err| {
+            switch (err) {
+                error.OutOfMemory => {
+                    self.session.truncateTo(pre_count);
+                    return err;
+                },
+                else => {
+                    try render.writeLabeled(&stdout.interface, .err, @errorName(err));
+                    self.session.truncateTo(pre_count);
+                    try self.session.flush();
+                    return;
+                },
+            }
+        };
+
+        _ = stdout.interface.write("\n") catch {};
+
+        switch (result.finish) {
+            .api_error => {
+                try render.writeLabeled(&stdout.interface, .err, "API error");
+                self.session.truncateTo(pre_count);
+            },
+            .interrupted => {
+                try render.writeLabeled(&stdout.interface, .warning, "interrupted");
+                self.session.truncateTo(pre_count);
+            },
+            else => {},
+        }
+
+        try self.session.flush();
+    }
+
+    fn winReadLine(
+        con_in: ?*anyopaque,
+        buf: *std.ArrayListAligned(u8, null),
+        allocator: std.mem.Allocator,
+    ) !?[]const u8 {
+        _ = buf;
+        var utf16_buf: [4096]u16 = undefined;
+        var chars_read: u32 = 0;
+        if (wincon.ReadConsoleW(con_in, &utf16_buf, @intCast(utf16_buf.len), &chars_read, null) == 0) {
+            if (signal.isInterrupted()) return error.Interrupted;
+            return error.EndOfStream;
+        }
+        if (chars_read == 0) return null;
+        const trimmed = std.mem.trimEnd(u16, utf16_buf[0..chars_read], &[_]u16{ '\r', '\n' });
+        return @as(?[]const u8, try std.unicode.utf16LeToUtf8Alloc(allocator, trimmed));
+    }
+
+    const STD_INPUT_HANDLE: u32 = @bitCast(@as(i32, -10));
+
+    const wincon = if (builtin.os.tag == .windows)
+        struct {
+            extern "kernel32" fn GetStdHandle(nStdHandle: u32) callconv(.winapi) ?*anyopaque;
+            extern "kernel32" fn ReadConsoleW(
+                hConsoleInput: ?*anyopaque,
+                lpBuffer: [*]u16,
+                nNumberOfCharsToRead: u32,
+                lpNumberOfCharsRead: *u32,
+                pInputControl: ?*anyopaque,
+            ) callconv(.winapi) i32;
+        }
+    else
+        struct {};
+
+    fn resetSession(self: *App) !void {
+        self.session.deinit();
+        self.session = try session_mod.Session.init(self.allocator, self.io, self.cfg.default_model);
+        try buildSystemPrompt(self.allocator, self.io, self.project_root, self.project_context, &self.session);
+        self.initAgent();
+    }
+
+    fn renameSession(self: *App, new_name: []const u8) !void {
+        const trimmed = std.mem.trim(u8, new_name, " \t");
+        if (trimmed.len == 0) {
+            var ebuf: [256]u8 = undefined;
+            var ew: Io.File.Writer = .init(.stderr(), self.io, &ebuf);
+            try ew.interface.print("Usage: /name <new-name>\n", .{});
+            return;
+        }
+        try self.session.rename(trimmed);
+        try self.session.flush();
+        var ebuf: [256]u8 = undefined;
+        var ew: Io.File.Writer = .init(.stderr(), self.io, &ebuf);
+        try ew.interface.print("Session renamed to: {s}\n", .{trimmed});
+    }
+
+    fn listSessions(self: *App, stdout: *Io.File.Writer) !void {
+        const sessions = try session_mod.list(self.allocator, self.io, self.session_dir);
+        defer session_mod.freeSessionInfoList(self.allocator, sessions);
+
+        if (sessions.len == 0) {
+            try stdout.interface.print("No saved sessions.\n", .{});
+            return;
+        }
+
+        try stdout.interface.print("Saved sessions ({d}):\n", .{sessions.len});
+        for (sessions) |s| {
+            try stdout.interface.print("  {s}  {s}  ~{d} msgs\n", .{ s.name, s.model, s.msg_count });
+        }
+    }
+
+    fn showHelp(self: *App, stdout: *Io.File.Writer) !void {
+        _ = self;
+        try stdout.interface.print(
+            \\z-agent-core commands:
+            \\  /exit, /quit    Exit the REPL
+            \\  /new            Start a new session
+            \\  /name <name>    Rename current session
+            \\  /list           List saved sessions
+            \\  /help           Show this help
+            \\
+        , .{});
+    }
+
+    /// Free session, config, and all heap-allocated fields. Safe to call on zero-value App.
+    pub fn deinit(self: *App) void {
+        if (self.project_context) |ctx| self.allocator.free(@constCast(ctx));
+        self.allocator.free(self.tools);
+        self.allocator.free(self.session_dir);
+        self.session.deinit();
+        self.cfg.deinit();
+    }
+};
+
+fn findProviderEntry(providers: []const types.ProviderEntry, spec: []const u8) ?types.ProviderEntry {
+    const slash = std.mem.indexOfScalar(u8, spec, '/') orelse return null;
+    const provider_name = spec[0..slash];
+    for (providers) |p| {
+        if (std.mem.eql(u8, p.name, provider_name)) return p;
+    }
+    return null;
+}
+
+fn buildSystemPrompt(
+    allocator: std.mem.Allocator,
+    io: Io,
+    project_root: []const u8,
+    project_context: ?[]const u8,
+    session: *session_mod.Session,
+) !void {
+    const cwd_alloc = std.process.currentPathAlloc(io, allocator) catch null;
+    defer if (cwd_alloc) |p| allocator.free(p);
+    const cwd: []const u8 = if (cwd_alloc) |p| p else ".";
+
+    const os_tag = @tagName(builtin.os.tag);
+
+    const clock_ts = Io.Clock.Timestamp.now(io, .real);
+    const now_secs = Io.Timestamp.toSeconds(clock_ts.raw);
+    const date = try formatDate(allocator, now_secs);
+    defer allocator.free(date);
+
+    const prompt = try std.fmt.allocPrint(allocator,
+        \\{s}
+        \\
+        \\<env>
+        \\  Working directory: {s}
+        \\  Workspace root: {s}
+        \\  Platform: {s}
+        \\  Today's date: {s}
+        \\</env>
+        \\
+    , .{ BASE_PROMPT, cwd, project_root, os_tag, date });
+    defer allocator.free(prompt);
+
+    if (project_context) |ctx| {
+        const full = try std.fmt.allocPrint(allocator, "{s}\n<project_context>\n{s}\n</project_context>\n", .{ prompt, ctx });
+        defer allocator.free(full);
+        try session.append(.{ .role = .system, .content = full });
+    } else {
+        try session.append(.{ .role = .system, .content = prompt });
+    }
+}
+
+fn formatDate(allocator: std.mem.Allocator, epoch_s: i64) ![]const u8 {
+    const z = @divFloor(epoch_s, 86400) + 719468;
+    const era = @divFloor(if (z >= 0) z else z - 146096, 146097);
+    const doe = @as(u64, @intCast(z - era * 146097));
+    const yoe = @as(u64, @intCast((doe - doe / 1460 + doe / 36524 - doe / 146096) / 365));
+    const y = @as(i64, @intCast(yoe)) + @as(i64, @intCast(era * 400));
+    const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const mp = (5 * doy + 2) / 153;
+    const d = doy - (153 * mp + 2) / 5 + 1;
+    const m = if (mp < 10) mp + 3 else mp - 9;
+    const year = if (m <= 2) y + 1 else y;
+    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, m, d });
+}
+
+fn readLine(
+    reader: *Io.Reader,
+    buf: *std.ArrayListAligned(u8, null),
+    allocator: std.mem.Allocator,
+) !?[]const u8 {
+    buf.clearRetainingCapacity();
+    while (true) {
+        const byte = reader.takeByte() catch |err| {
+            switch (err) {
+                error.EndOfStream => {
+                    if (buf.items.len > 0) return @as(?[]const u8, try buf.toOwnedSlice(allocator));
+                    return null;
+                },
+                else => {
+                    if (signal.isInterrupted()) return error.Interrupted;
+                    return err;
+                },
+            }
+        };
+        if (byte == '\n') return @as(?[]const u8, try buf.toOwnedSlice(allocator));
+        if (byte == 0x08 or byte == 0x7F) {
+            if (buf.items.len > 0) _ = buf.pop();
+            continue;
+        }
+        if (buf.items.len >= 4096) return error.LineTooLong;
+        try buf.append(allocator, byte);
+    }
+}

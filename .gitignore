@@ -1,0 +1,12 @@
+node_modules/
+.zig-cache/
+zig-out/
+.zagent/
+*.jsonl
+.env
+depgraph.html
+.zig-test-config-*/
+.opencode/
+*.exe
+*.obj
+*.pdb
