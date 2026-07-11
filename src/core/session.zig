@@ -166,13 +166,6 @@ pub const Session = struct {
 
     /// Remove and return the last message. Keeps at least 1 message (system prompt guard).
     /// Used for rollback on failed runTurn (api_error/interrupted).
-    pub fn popLast(self: *Session) ?types.Message {
-        if (self._messages.items.len > 1) {
-            return self._messages.pop();
-        }
-        return null;
-    }
-
     /// Truncate message list to at most `keep` items. Scope: error rollback only.
     /// App records pre_count before appending user message, calls truncateTo(pre_count)
     /// on runTurn error to remove user + any partial assistant/tool messages from agent.
@@ -873,35 +866,6 @@ test "session: load skips invalid message lines" {
     defer loaded2.deinit();
 
     try std.testing.expectEqual(@as(usize, 2), loaded2.messages().len);
-}
-
-test "session: popLast removes last message" {
-    const io = std.testing.io;
-    var sess = try Session.init(std.testing.allocator, io, "deepseek/model");
-    defer sess.deinit();
-
-    try sess.append(.{ .role = .system, .content = "system prompt" });
-    try sess.append(.{ .role = .user, .content = "hello" });
-    try sess.append(.{ .role = .assistant, .content = "hi" });
-
-    const removed = sess.popLast().?;
-    try std.testing.expectEqualStrings("hi", removed.content);
-    try std.testing.expectEqual(@as(usize, 2), sess.messages().len);
-}
-
-test "session: popLast preserves system prompt" {
-    const io = std.testing.io;
-    var sess = try Session.init(std.testing.allocator, io, "deepseek/model");
-    defer sess.deinit();
-
-    try sess.append(.{ .role = .system, .content = "system prompt" });
-    try sess.append(.{ .role = .user, .content = "hello" });
-
-    _ = sess.popLast();
-    const removed = sess.popLast();
-    try std.testing.expect(removed == null);
-    try std.testing.expectEqual(@as(usize, 1), sess.messages().len);
-    try std.testing.expectEqualStrings("system prompt", sess.messages()[0].content);
 }
 
 test "session: truncateTo shrinks" {

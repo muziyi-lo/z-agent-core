@@ -1,6 +1,6 @@
 # z-agent-core
 
-An experiment exploring DeepSeek's coding capabilities through a pure agent loop implementation in Zig. Stripped from [z-agent](https://github.com/muziyi-lo/z-agent) -- which grew too complex to maintain -- this project preserves the essential core: prompt, parse, execute, render. No TUI, no permissions, no hooks, no memory system.
+An experiment exploring DeepSeek's coding capabilities through a pure agent loop implementation in Zig. Stripped from z-agent -- which grew too complex to maintain -- this project preserves the essential core: prompt, parse, execute, render. No TUI, no permissions, no hooks, no memory system.
 
 ## Motivation: AI knowledge lag and Zig 0.16.0
 
