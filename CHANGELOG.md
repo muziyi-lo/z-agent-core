@@ -32,6 +32,7 @@
 - **Agent 中断机制**
   - `core/agent.zig`：移除 `signal` import（零 BIDIR），`_aborted` 替代 `signal.isInterrupted()`
   - `util/signal.zig`：保持不变；App 层桥接信号到 agent.abort()
+- **工具标签统一**：`frontends/cli/render.zig` `labelFromValue` 所有 6 个工具统一显示工具名前缀（`Read`/`Write`/`$`/`Grep`/`Glob`/`Skill`），grep/glob 同时显示 pattern + path
 
 ### Fixed
 - `io/provider.zig`：`params_json = ""` 空字符串导致 JSON 双逗号 `,,` 非法请求体（加 `len > 0` 守卫）
@@ -44,6 +45,16 @@
 - `tool/bash.zig`：`action` 字段包含完整命令字符串（可能极长）→ 截断到 60 字符
 - `tool/grep.zig, write.zig, glob.zig, skill.zig`：`summary` 错误路径 echo raw `args_json` → 改为 null
 
+- **Frontend 显示间隙**（PLAN-DISPLAY-GAPS.md）
+  - `frontends/cli/render.zig`：`labelFromValue` grep/glob 同时显示 pattern + path（`Grep "pattern" path` / `Glob pattern [path]`）
+  - `frontends/cli/render.zig`：所有 6 个工具的标签统一显示工具名前缀（`Read`/`Write`/`$`/`Grep`/`Glob`/`Skill`）
+  - `core/agent.zig`：达到 `max_tool_rounds` 时向 session 追加 system 消息告知 LLM 约束
+  - `frontends/cli/App.zig`：`processLine` + `singleTurn` 中添加 `.max_rounds` 警告显示
+  - `types.zig`：`ToolResult` 新增 `user_output: ?[]const u8` 字段（零拷贝借用视图，deinit 不释放）
+  - `frontends/cli/render.zig`：`ToolDisplay.render` 打印 `user_output`（非 null 时）
+  - `tool/bash.zig`：设置 `.user_output` 为前 4096 字节输出；删除死代码 `shortCmd`
+  - `tool/bash.zig`：`MAX_USER_OUTPUT = 4096` 命名常量替代魔数
+
 ### Changed
 - **ToolResult 字段重命名**：`display_label` → `action`，`display_summary` → `summary`（消除 display_ 对渲染职责的误导）
 - **ToolResult 数据-展示分离**：移除 `action`/`summary` 字段，工具只返回 `session_content` + `err_msg`。`ToolDisplayCb.render` 改为接收 `tool_name` + `tool_args` + `had_error`，前端 `toolLabel()` 从 args JSON 提取显示文案
@@ -53,9 +64,11 @@
 - **配置模板**：`DEFAULT_TEMPLATE` 添加完整字段注释、`params_json` 格式说明、Ollama 添加示例、损坏恢复提示
 
 ### Refactored
-- `documentation`：`CORE-FRONTEND.md`（前后端分离架构规范）、`PLAN-PHASE2.md`（Phase 2 实施规格）、`PLAN-TOOLRESULT-SPLIT.md`（数据-展示分离方案）
+- `documentation`：`CORE-FRONTEND.md`（前后端分离架构规范）、`PLAN-PHASE2.md`（Phase 2 实施规格）、`PLAN-TOOLRESULT-SPLIT.md`（数据-展示分离方案）、`PLAN-DISPLAY-GAPS.md`（前端显示间隙修复方案）、`REMAINING.md`（剩余工作跟踪）
 - `core/agent.zig`：移除 `tool_display` 死字段；`ToolDisplayCb.render` 不再传递 `ToolResult`
 - 消除 `core/ → util/` 目录级 BIDIR（agent.zig 不再 import signal.zig）
+- 文档同步：`CORE-FRONTEND.md` ToolDisplayCb 签名更新为当前解构参数；`PLAN-PHASE2.md` 修正 6 处过时行号引用；`render.zig` 移除 `stdout_dead` 残留注释
+- `tool/bash.zig`：移除死代码 `shortCmd`（工具不再构建 action/summary 字符串）
 
 ### Tests
 - agent.zig：新增 7 个 test block（hooks before blocks/allows、hooks after fires、abort before runTurn/abort resets、lifecycle on_turn_start/on_turn_end fires）
