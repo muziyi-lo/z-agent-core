@@ -10,6 +10,21 @@ pub const Message = struct {
     tool_call_id: ?[]const u8 = null,
     timestamp: i64 = 0,
     model: ?[]const u8 = null,
+    usage: ?TokenUsage = null,
+};
+
+/// Token usage captured from SSE [DONE] frame. Null for user/tool messages.
+pub const TokenUsage = struct {
+    input: u32,
+    output: u32,
+    total: u32,
+};
+
+/// Data-only API endpoint info passed to tools that need LLM access (e.g. compact).
+pub const ApiEndpoint = struct {
+    base_url: []const u8,
+    api_key: []const u8,
+    model: []const u8,
 };
 
 pub const Role = enum { system, user, assistant, tool };
@@ -26,8 +41,20 @@ pub const ToolContext = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     project_root: []const u8,
-    /// Writer for tool confirmation messages (stderr).
-    display_writer: *std.Io.Writer,
+    api_endpoint: ?ApiEndpoint = null,
+    abort_target: ?*bool = null,
+};
+
+pub const ToolResult = struct {
+    session_content: []const u8,
+    err_msg: ?[]const u8 = null,
+    /// Zero-copy view into session_content — NOT freed by deinit.
+    user_output: ?[]const u8 = null,
+
+    pub fn deinit(self: *ToolResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.session_content);
+        if (self.err_msg) |e| allocator.free(e);
+    }
 };
 
 /// Registered tool descriptor exposed to LLM via OpenAI tools API.
@@ -35,8 +62,7 @@ pub const Tool = struct {
     name: []const u8,
     description: []const u8,
     params: []const u8,
-    /// Execute the tool. Returns allocator-owned slice, caller must free.
-    execute: *const fn (ctx: ToolContext, args: []const u8) anyerror![]const u8,
+    execute: *const fn (ctx: ToolContext, args: []const u8) anyerror!ToolResult,
 };
 
 pub const InputModality = enum { text, image };
@@ -50,7 +76,7 @@ pub const Model = struct {
     provider: []const u8 = "",
     context_window: u32,
     max_tokens: u32,
-    reasoning: bool,
+    params_json: ?[]const u8 = null,
     input: []const InputModality,
 };
 
@@ -68,6 +94,7 @@ pub const ProviderResponse = struct {
     content: ?[]const u8,
     tool_calls: ?[]ToolCall,
     finish_reason: FinishReason,
+    usage: ?TokenUsage = null,
 };
 
 /// Per-request LLM finish reason. Distinct from agent-level TurnFinish.

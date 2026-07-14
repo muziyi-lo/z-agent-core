@@ -10,62 +10,80 @@ pub const tool_params =
 
 const MAX_OUTPUT: usize = 50 * 1024;
 const MAX_STREAM: usize = 25 * 1024;
+const MAX_USER_OUTPUT: usize = 4096;
 
-/// Execute a shell command via powershell/sh. Returns allocator-owned stdout/stderr output.
-pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u8 {
+/// Execute a shell command via powershell/sh. Returns allocator-owned ToolResult.
+pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.ToolResult {
     const args = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     defer args.deinit();
 
     const cmd_val = args.value.object.get("command") orelse {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: missing 'command' argument", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'command' argument", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     if (cmd_val != .string) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: 'command' must be a string", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: 'command' must be a string", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     }
 
-    const shell = if (builtin.os.tag == .windows) "powershell.exe" else "sh";
-    const shell_flag = if (builtin.os.tag == .windows) "-Command" else "-c";
-
-    const argv = [_][]const u8{ shell, shell_flag, cmd_val.string };
+    const shell = if (builtin.os.tag == .windows) "pwsh.exe" else "sh";
+    const cmd = if (builtin.os.tag == .windows)
+        try std.fmt.allocPrint(ctx.allocator, "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);$OutputEncoding=[System.Text.UTF8Encoding]::new($false);{s}", .{cmd_val.string})
+    else
+        cmd_val.string;
+    defer if (builtin.os.tag == .windows) ctx.allocator.free(cmd);
 
     const limit: std.Io.Limit = @enumFromInt(MAX_STREAM);
-    const result = std.process.run(ctx.allocator, ctx.io, .{
-        .argv = &argv,
-        .stdout_limit = limit,
-        .stderr_limit = limit,
-    }) catch |err| {
-        return std.fmt.allocPrint(ctx.allocator, "Error: execution failed: {s}", .{@errorName(err)}) catch "Error: execution failed";
+    const proc_result = (if (builtin.os.tag == .windows)
+        std.process.run(ctx.allocator, ctx.io, .{
+            .argv = &[_][]const u8{ shell, "-NoProfile", "-Command", cmd },
+            .stdout_limit = limit,
+            .stderr_limit = limit,
+        })
+    else
+        std.process.run(ctx.allocator, ctx.io, .{
+            .argv = &[_][]const u8{ shell, "-c", cmd },
+            .stdout_limit = limit,
+            .stderr_limit = limit,
+        })) catch |err| {
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: execution failed: {s}", .{@errorName(err)});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
-    defer ctx.allocator.free(result.stdout);
-    defer ctx.allocator.free(result.stderr);
+    defer ctx.allocator.free(proc_result.stdout);
+    defer ctx.allocator.free(proc_result.stderr);
 
-    try ctx.display_writer.print("> {s}\n", .{cmd_val.string});
-
-    const exit_code: i32 = switch (result.term) {
+    const exit_code: i32 = switch (proc_result.term) {
         .exited => |code| @intCast(code),
         else => -1,
     };
 
-    const out_len = @min(result.stdout.len, MAX_STREAM);
-    const err_len = @min(result.stderr.len, MAX_STREAM);
+    const out_len = @min(proc_result.stdout.len, MAX_STREAM);
+    const err_len = @min(proc_result.stderr.len, MAX_STREAM);
     const total = out_len + err_len;
 
     var result_buf = std.ArrayListAligned(u8, null).empty;
     if (total > 0) {
         if (total > MAX_OUTPUT) {
             const half = MAX_OUTPUT / 2;
-            if (out_len > half) try result_buf.appendSlice(ctx.allocator, result.stdout[0..half]) else try result_buf.appendSlice(ctx.allocator, result.stdout[0..out_len]);
-            if (err_len > half) try result_buf.appendSlice(ctx.allocator, result.stderr[0..half]) else try result_buf.appendSlice(ctx.allocator, result.stderr[0..err_len]);
+            if (out_len > half) try result_buf.appendSlice(ctx.allocator, proc_result.stdout[0..half]) else try result_buf.appendSlice(ctx.allocator, proc_result.stdout[0..out_len]);
+            if (err_len > half) try result_buf.appendSlice(ctx.allocator, proc_result.stderr[0..half]) else try result_buf.appendSlice(ctx.allocator, proc_result.stderr[0..err_len]);
             try result_buf.appendSlice(ctx.allocator, "\n[truncated]");
         } else {
-            try result_buf.appendSlice(ctx.allocator, result.stdout[0..out_len]);
-            try result_buf.appendSlice(ctx.allocator, result.stderr[0..err_len]);
+            try result_buf.appendSlice(ctx.allocator, proc_result.stdout[0..out_len]);
+            try result_buf.appendSlice(ctx.allocator, proc_result.stderr[0..err_len]);
         }
     }
-    ctx.display_writer.print("{s}", .{result_buf.items}) catch {};
-    ctx.display_writer.flush() catch {};
 
     if (exit_code != 0) {
         var num_buf: [16]u8 = undefined;
@@ -73,7 +91,11 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u
         try result_buf.appendSlice(ctx.allocator, code_str);
     }
 
-    return result_buf.toOwnedSlice(ctx.allocator);
+    const session_content = try result_buf.toOwnedSlice(ctx.allocator);
+    return types.ToolResult{
+        .session_content = session_content,
+        .user_output = if (total > 0) session_content[0..@min(session_content.len, MAX_USER_OUTPUT)] else null,
+    };
 }
 
 const Io = std.Io;
@@ -82,37 +104,32 @@ test "bash: echo hello" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = ".",
-        .display_writer = &dw.interface,
     };
-    const result = try execute(ctx, "{\"command\":\"echo hello\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "hello") != null);
+    var result = try execute(ctx, "{\"command\":\"echo hello\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "hello") != null);
+    try std.testing.expect(result.user_output != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.user_output.?, "hello") != null);
 }
 
 test "bash: missing command" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
-    const ctx = types.ToolContext{ .allocator = allocator, .io = io, .project_root = ".", .display_writer = &dw.interface };
-    const result = try execute(ctx, "{}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "missing") != null);
+    const ctx = types.ToolContext{ .allocator = allocator, .io = io, .project_root = "." };
+    var result = try execute(ctx, "{}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "missing") != null);
 }
 
 test "bash: invalid JSON" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
-    const ctx = types.ToolContext{ .allocator = allocator, .io = io, .project_root = ".", .display_writer = &dw.interface };
-    const result = try execute(ctx, "not json");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "invalid") != null);
+    const ctx = types.ToolContext{ .allocator = allocator, .io = io, .project_root = "." };
+    var result = try execute(ctx, "not json");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "invalid") != null);
 }

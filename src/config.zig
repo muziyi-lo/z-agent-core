@@ -290,7 +290,7 @@ fn parseAllModels(a: std.mem.Allocator, root: ConfigToml) ![]const types.Model {
             .provider = try a.dupe(u8, provider_raw),
             .context_window = @intCast(cw_val),
             .max_tokens = @intCast(mt_val),
-            .reasoning = getBool(mt, "reasoning") orelse false,
+            .params_json = getString(mt, "params_json"),
             .input = try parseInputModality(a, mt),
         });
     }
@@ -407,37 +407,66 @@ fn writeDefaultConfig(allocator: std.mem.Allocator, project_root: []const u8, io
 }
 
 const DEFAULT_TEMPLATE =
-    \\# z-agent-core config
-    \\# Provider and models. API key goes in .zagent/.env or environment.
+    \\# z-agent-core configuration
+    \\# Set API key via environment or .zagent/.env: DEEPSEEK_API_KEY=sk-...
+    \\# If this file is corrupted, delete it and restart — a fresh copy will be regenerated.
     \\
-    \\default_model = "deepseek/deepseek-v4-pro"
+    \\# Default model: format is "provider/model_id". Used when --model is not specified.
+    \\default_model = "deepseek/deepseek-v4-flash"
+    \\# Maximum tokens per LLM response. Models have their own limits; this caps the request.
     \\max_tokens = 384000
+    \\# Maximum tool execution rounds per turn. Prevents infinite loops.
     \\max_tool_rounds = 10
     \\
+    \\# Provider: defines an API endpoint with auth and available models.
+    \\# Add multiple [[providers]] blocks for different services (openai, ollama, etc).
     \\[[providers]]
     \\name = "deepseek"
-    \\api = "openai_compat"
+    \\api = "openai_compat"           # openai_compat format (supports DeepSeek, OpenAI, Ollama)
     \\base_url = "https://api.deepseek.com"
-    \\api_key_env = "DEEPSEEK_API_KEY"
-    \\models = ["deepseek-v4-pro", "deepseek-v4-flash"]
+    \\api_key_env = "DEEPSEEK_API_KEY"  # environment variable holding the API key
+    \\models = ["deepseek-v4-pro", "deepseek-v4-flash"]  # model IDs available for this provider
     \\
+    \\# Model: defines an LLM model and its capabilities.
+    \\# Add one [[models]] block per model. Models are shared across providers.
     \\[[models]]
-    \\id = "deepseek-v4-pro"
-    \\name = "DeepSeek V4 Pro"
-    \\provider = "deepseek"
-    \\context_window = 1000000
-    \\max_tokens = 384000
-    \\reasoning = true
-    \\input = ["text"]
+    \\id = "deepseek-v4-pro"          # used in "provider/model_id" format
+    \\name = "DeepSeek V4 Pro"        # display name (shown in banner)
+    \\provider = "deepseek"           # links to [[providers]].name
+    \\context_window = 131072          # model's context window in tokens (informational)
+    \\max_tokens = 384000             # max tokens the model can generate per response
+    \\# params_json: vendor-specific JSON fragment pasted into the API request body.
+    \\# Format: key:value pairs WITHOUT outer braces. Provider blindly concatenates.
+    \\# Examples: "" (none), '"thinking":{"type":"enabled"}' (DeepSeek thinking mode),
+    \\#           '"reasoning_effort":"high"' (reasoning effort for supported models)
+    \\params_json = "\"thinking\":{\"type\":\"enabled\"}"
+    \\input = ["text"]               # supported input modalities: ["text"] or ["text", "image"]
     \\
     \\[[models]]
     \\id = "deepseek-v4-flash"
     \\name = "DeepSeek V4 Flash"
     \\provider = "deepseek"
-    \\context_window = 1000000
+    \\context_window = 131072
     \\max_tokens = 384000
-    \\reasoning = true
+    \\params_json = ""
     \\input = ["text"]
+    \\
+    \\# To add another provider (e.g. local Ollama), append:
+    \\# [[providers]]
+    \\# name = "ollama"
+    \\# api = "openai_compat"
+    \\# base_url = "http://localhost:11434"
+    \\# api_key_env = "OLLAMA_API_KEY"
+    \\# models = ["llama4"]
+    \\#
+    \\# [[models]]
+    \\# id = "llama4"
+    \\# name = "Llama 4"
+    \\# provider = "ollama"
+    \\# context_window = 131072
+    \\# max_tokens = 4096
+    \\# params_json = ""
+    \\# input = ["text"]
 ;
 
 test "config: parse default template" {
@@ -446,7 +475,7 @@ test "config: parse default template" {
     var config = try testParseConfig(allocator, DEFAULT_TEMPLATE);
     defer config.deinit();
 
-    try std.testing.expectEqualStrings("deepseek/deepseek-v4-pro", config.default_model);
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-flash", config.default_model);
     try std.testing.expectEqual(@as(u32, 384000), config.max_tokens);
     try std.testing.expectEqual(@as(u32, 10), config.max_tool_rounds);
     try std.testing.expect(config.providers.len >= 1);
@@ -458,12 +487,12 @@ test "config: parse default template" {
     try std.testing.expect(deepseek.api == .openai_compat);
     try std.testing.expectEqual(@as(usize, 2), deepseek.models.len);
     try std.testing.expectEqualStrings("deepseek-v4-pro", deepseek.models[0].id);
-    try std.testing.expect(deepseek.models[0].reasoning);
+    try std.testing.expect(deepseek.models[0].params_json != null);
     try std.testing.expectEqual(@as(usize, 1), deepseek.models[0].input.len);
     try std.testing.expect(deepseek.models[0].input[0] == .text);
 }
 
-test "config: model reasoning true" {
+test "config: model params_json present" {
     const allocator = std.testing.allocator;
 
     var config = try testParseConfig(allocator,
@@ -480,12 +509,12 @@ test "config: model reasoning true" {
         \\provider = "test"
         \\context_window = 100000
         \\max_tokens = 4096
-        \\reasoning = true
+        \\params_json = "\"thinking\":{\"type\":\"enabled\"}"
         \\input = ["text"]
     );
     defer config.deinit();
 
-    try std.testing.expect(config.providers[0].models[0].reasoning);
+    try std.testing.expect(config.providers[0].models[0].params_json != null);
 }
 
 test "config: model input text" {
@@ -548,7 +577,7 @@ test "config: resolveModel deepseek/v4-pro" {
 
     const model = try resolveModel(&config, "deepseek/deepseek-v4-pro");
     try std.testing.expectEqualStrings("deepseek-v4-pro", model.id);
-    try std.testing.expect(model.reasoning);
+    try std.testing.expect(model.params_json != null);
 }
 
 test "config: resolveModel unknown provider" {
@@ -863,7 +892,7 @@ test "config: missing file creates default" {
     var config = try Config.load(allocator, test_dir, io);
     defer config.deinit();
 
-    try std.testing.expectEqualStrings("deepseek/deepseek-v4-pro", config.default_model);
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-flash", config.default_model);
     try std.testing.expect(config.providers.len >= 1);
     try std.testing.expect(config.max_tokens > 0);
 }

@@ -1,16 +1,67 @@
 # Changelog
 
-## [0.1.0] - 未完成
+## [0.1.0] - 未发布
 
-本版本标志着项目核心已经可用可以进行进一步的功能优化。
+本版本引入前后端分离架构、回调 API 清理和核心功能增强。
 
 ### Added
-- Windows 应用图标（`src/Logo.ico` + `src/Logo.rc`，`build.zig` 通过 `addWin32ResourceFile` 嵌入）
-- 版本号统一：`build.zig` 单一定义，通过 `build_options` 模块注入运行时，支持 `-Dversion=` 覆盖
+- **Phase 2 核心 API**
+  - `core/agent.zig`：`ToolHooks`（before/after 工具拦截）、`abort()` 取消方法、`LifecycleCb`（on_turn_start/end）
+  - `core/agent.zig`：`finishTurn()` 统一退出点（生命周期回调 + abort 重置）
+  - `core/agent.zig`：`agent.abort()` 替代全局 `signal.isInterrupted()`，解除 `core/ → util/` BIDIR
+  - `core/session.zig`：`writeTo()` 方法（temp+rename 原子写入，供 /fork 使用）
+  - `core/session.zig`：`TokenUsage` JSONL 序列化/反序列化（input/output/total）
+  - `types.zig`：`TokenUsage` struct（input/output/total）、`ApiEndpoint` struct（base_url/api_key/model）
+  - `types.zig`：`ToolContext` 新增 `api_endpoint` + `abort_target` 字段
+  - `types.zig`：`ProviderResponse` + `Message` 新增 `usage: ?TokenUsage` 字段
+  - `io/provider.zig`：SSE [DONE] 帧 TokenUsage 解析（`parseFromSliceLeaky(Value, ...)` 安全访问）
+  - `frontends/cli/App.zig`：Ctrl+C → `agent.abort()` 桥接（Solution A: App 层轮询 + signal.reset）
+  - `frontends/cli/App.zig`：`/fork <name>` REPL 命令（原子写入 + 自动切换 + 文件名消毒）
+
+### Changed
+- **Phase 0 & 1: 前后端分离**
+  - CLI 文件从 `src/App.zig`, `src/main.zig`, `src/render/cli.zig` 移至 `src/frontends/cli/`
+  - `src/main.zig` 改为 4 行 shim 入口（Zig 0.16 module root 约束）
+  - `ToolDisplayCb.render` 移除 `*Io.Writer` 参数，返回 `!void`（`writer` 移至 `ToolDisplay.writer` 上下文）
+  - `TurnFinish` 新增 `render_error` 枚举值
+  - `stdout_dead_ptr` 全局标志已移除（由 `render_error` 替代）
+- **Phase 0D: 模型注册表**
+  - `Model.reasoning: bool` → `params_json: ?[]const u8`（TOML 配置 JSON 片段，Provider 盲拼）
+  - `io/provider.zig`：`buildJsonBody()` 无条件拼接 `model_params`，不再硬编码 thinking
+  - `.zagent/config.toml`：`reasoning = true` → `params_json = "\"thinking\":{\"type\":\"enabled\"}"`
+- **Agent 中断机制**
+  - `core/agent.zig`：移除 `signal` import（零 BIDIR），`_aborted` 替代 `signal.isInterrupted()`
+  - `util/signal.zig`：保持不变；App 层桥接信号到 agent.abort()
+
+### Fixed
+- `io/provider.zig`：`params_json = ""` 空字符串导致 JSON 双逗号 `,,` 非法请求体（加 `len > 0` 守卫）
+- `io/provider.zig`：TokenUsage SSE 解析 `.?` 不安全访问 → `if` 链安全读取
+- `core/session.zig`：TokenUsage JSONL 反序列化 `.?` → `if` 链安全读取
+- `core/agent.zig`：`LifecycleCb.on_turn_end` 在 `try` 错误路径不触发 → 加 `errdefer`
+- `frontends/cli/render.zig`：`ToolDisplay.render` null summary fallthrough 打印 `session_content` 全文 → 移除 else 分支
+- `frontends/cli/App.zig`：`processLine` 双重 flush（错误路径 flush 截断的 session）→ 删除多余 flush
+- `frontends/cli/App.zig`：`sanitizeForkName` 缺少 `errdefer buf.deinit()` → 已添加
+- `tool/bash.zig`：`action` 字段包含完整命令字符串（可能极长）→ 截断到 60 字符
+- `tool/grep.zig, write.zig, glob.zig, skill.zig`：`summary` 错误路径 echo raw `args_json` → 改为 null
+
+### Changed
+- **ToolResult 字段重命名**：`display_label` → `action`，`display_summary` → `summary`（消除 display_ 对渲染职责的误导）
+- **ToolResult 数据-展示分离**：移除 `action`/`summary` 字段，工具只返回 `session_content` + `err_msg`。`ToolDisplayCb.render` 改为接收 `tool_name` + `tool_args` + `had_error`，前端 `toolLabel()` 从 args JSON 提取显示文案
+- **工具标签颜色**：`bg_bright_cyan`（低对比度）→ `bg_bright_magenta`（105m 紫底白字）
+- **LLM 输出流式**：`LineBuffer.feed()` 尾部内容即时输出（不再等换行），typewriter 观感
+- **DeepSeek 模型**：`deepseek-chat` + `deepseek-reasoner` 已于 2026/07/24 弃用，模板仅保留 v4-pro + v4-flash
+- **配置模板**：`DEFAULT_TEMPLATE` 添加完整字段注释、`params_json` 格式说明、Ollama 添加示例、损坏恢复提示
+
+### Refactored
+- `documentation`：`CORE-FRONTEND.md`（前后端分离架构规范）、`PLAN-PHASE2.md`（Phase 2 实施规格）、`PLAN-TOOLRESULT-SPLIT.md`（数据-展示分离方案）
+- `core/agent.zig`：移除 `tool_display` 死字段；`ToolDisplayCb.render` 不再传递 `ToolResult`
+- 消除 `core/ → util/` 目录级 BIDIR（agent.zig 不再 import signal.zig）
+
+### Tests
+- agent.zig：新增 7 个 test block（hooks before blocks/allows、hooks after fires、abort before runTurn/abort resets、lifecycle on_turn_start/on_turn_end fires）
+- **合计**：148 个 test block（+8 vs 0.0.1-alpha）
 
 ## [0.0.1-alpha] - 2026.07.10
-
-本版本为项目初始创建版本
 
 ### Added
 - 项目脚手架：`main.zig`、`App.zig`、`build.zig`（编译 + `check-arch` 集成）

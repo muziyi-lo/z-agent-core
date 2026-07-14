@@ -12,25 +12,40 @@ pub const tool_params =
 const MAX_OUTPUT: usize = 50 * 1024;
 const MAX_MATCHES: usize = 500;
 
-/// Search file contents for a pattern. Returns allocator-owned match lines.
-pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u8 {
+/// Search file contents for a pattern. Returns allocator-owned ToolResult.
+pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.ToolResult {
     const args = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     defer args.deinit();
 
     const pattern_val = args.value.object.get("pattern") orelse {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: missing 'pattern' argument", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'pattern' argument", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     if (pattern_val != .string or pattern_val.string.len == 0) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: 'pattern' must be a non-empty string", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: 'pattern' must be a non-empty string", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     }
 
     const path_val = args.value.object.get("path") orelse {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: missing 'path' argument", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'path' argument", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     if (path_val != .string) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: 'path' must be a string", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: 'path' must be a string", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     }
 
     const include = if (args.value.object.get("include")) |inc|
@@ -39,26 +54,31 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u
         null;
 
     const resolved = path_util.resolvePath(ctx.allocator, ctx.project_root, path_val.string) catch |err| switch (err) {
-        error.PathEscape => return try std.fmt.allocPrint(ctx.allocator, "Error: path escapes project root", .{}),
+        error.PathEscape => {
+            const content = try std.fmt.allocPrint(ctx.allocator, "Error: path escapes project root", .{});
+            return types.ToolResult{
+                .session_content = content,
+            };
+        },
         else => return err,
     };
     defer ctx.allocator.free(resolved);
 
     if (Io.Dir.cwd().openDir(ctx.io, resolved, .{ .iterate = true })) |dir| {
         defer dir.close(ctx.io);
-        const result = try searchDir(ctx, dir, pattern_val.string, path_val.string, include);
-        const count = countMatches(result);
-        try writeDisplay(ctx, pattern_val.string, path_val.string, count);
-        return result;
+        const result_content = try searchDir(ctx, dir, pattern_val.string, path_val.string, include);
+        return types.ToolResult{
+            .session_content = result_content,
+        };
     } else |err| switch (err) {
         error.FileNotFound, error.NotDir, error.AccessDenied => {},
         else => return err,
     }
 
-    const result = try searchFile(ctx, resolved, pattern_val.string, path_val.string);
-    const count = countMatches(result);
-    try writeDisplay(ctx, pattern_val.string, path_val.string, count);
-    return result;
+    const result_content = try searchFile(ctx, resolved, pattern_val.string, path_val.string);
+    return types.ToolResult{
+        .session_content = result_content,
+    };
 }
 
 fn countMatches(result: []const u8) usize {
@@ -81,14 +101,14 @@ fn searchFile(ctx: types.ToolContext, abs_path: []const u8, pattern: []const u8,
         return try std.fmt.allocPrint(ctx.allocator, "Error: file too large for grep: {s} ({d} bytes)", .{ display_path, size });
     }
 
-    const content = try ctx.allocator.alloc(u8, size);
-    defer ctx.allocator.free(content);
-    const n = try file.readPositionalAll(ctx.io, content, 0);
+    const file_content = try ctx.allocator.alloc(u8, size);
+    defer ctx.allocator.free(file_content);
+    const n = try file.readPositionalAll(ctx.io, file_content, 0);
 
     var buf = std.ArrayListAligned(u8, null).empty;
 
     var matches: usize = 0;
-    var lines = std.mem.splitScalar(u8, content[0..n], '\n');
+    var lines = std.mem.splitScalar(u8, file_content[0..n], '\n');
     var line_num: usize = 1;
     while (lines.next()) |raw_line| : (line_num += 1) {
         const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r') raw_line[0 .. raw_line.len - 1] else raw_line;
@@ -142,12 +162,12 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, display_p
         const size: usize = @intCast((file.stat(ctx.io) catch continue).size);
         if (size > 512 * 1024) continue;
 
-        const content = ctx.allocator.alloc(u8, size) catch continue;
-        defer ctx.allocator.free(content);
-        const n = file.readPositionalAll(ctx.io, content, 0) catch continue;
+        const file_content = ctx.allocator.alloc(u8, size) catch continue;
+        defer ctx.allocator.free(file_content);
+        const n = file.readPositionalAll(ctx.io, file_content, 0) catch continue;
 
         var file_has_match = false;
-        var lines = std.mem.splitScalar(u8, content[0..n], '\n');
+        var lines = std.mem.splitScalar(u8, file_content[0..n], '\n');
         var line_num: usize = 1;
         while (lines.next()) |raw_line| : (line_num += 1) {
             const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r') raw_line[0 .. raw_line.len - 1] else raw_line;
@@ -201,13 +221,6 @@ fn globMatch(name: []const u8, pattern: []const u8) bool {
     return false;
 }
 
-fn writeDisplay(ctx: types.ToolContext, pattern: []const u8, path: []const u8, count: usize) !void {
-    const msg = try std.fmt.allocPrint(ctx.allocator, "grep \"{s}\" in {s} -> {d} matches", .{ pattern, path, count });
-    defer ctx.allocator.free(msg);
-    ctx.display_writer.print("{s}\n", .{msg}) catch {}; // display failures are non-fatal
-    ctx.display_writer.flush() catch {}; // display failures are non-fatal
-}
-
 const Io = std.Io;
 
 test "grep: finds matches in file" {
@@ -226,19 +239,16 @@ test "grep: finds matches in file" {
     defer f.close(io);
     try f.writeStreamingAll(io, "hello world\nfoo bar\nhello again\n");
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"pattern\":\"hello\",\"path\":\"search.txt\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "hello world") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "hello again") != null);
+    var result = try execute(ctx, "{\"pattern\":\"hello\",\"path\":\"search.txt\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "hello world") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "hello again") != null);
 }
 
 test "grep: no matches" {
@@ -257,16 +267,13 @@ test "grep: no matches" {
     defer f.close(io);
     try f.writeStreamingAll(io, "hello world\n");
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"pattern\":\"xyzzy\",\"path\":\"search.txt\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "No matches") != null);
+    var result = try execute(ctx, "{\"pattern\":\"xyzzy\",\"path\":\"search.txt\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "No matches") != null);
 }

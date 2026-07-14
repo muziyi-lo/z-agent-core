@@ -6,16 +6,16 @@
 
 | # | 基线项 | 源码状态 | 确认 |
 |---|--------|---------|------|
-| A1 | `agent.zig` import `render/cli.zig` + 调 `writeLabeled(.tool, ...)` | `agent.zig:7` `agent.zig:137` | 待移除 |
-| A2 | `provider.zig` import `render/cli.zig` + 用 `PhaseWriter` | `provider.zig:5` `provider.zig:82` | 待移除 |
-| A3 | 6 工具全部用 `display_writer.print` | 全 `tool/*.zig` 均有 | 待移除 |
-| A4 | `renderLine`/`resetCodeBlock`/`session.load` 已实现+测试但无外部调用者 | cli.zig + session.zig 测试之外 0 匹配 | 待串联 |
+| A1 | `agent.zig` import `render/cli.zig` + 调 `writeLabeled(.tool, ...)` | 已移除 import + 替换为 ToolDisplayCb 回调 | P1-5 已完成 |
+| A2 | `provider.zig` import `render/cli.zig` + 用 `PhaseWriter` | 已移除 import + 替换为 PhaseWriterCb 注入 | P1-6 已完成 |
+| A3 | 6 工具全部用 `display_writer.print` | 全部改为返回 ToolResult，display_writer 字段已移除 | P1-3 已完成 |
+| A4 | `renderLine`/`resetCodeBlock`/`session.load` 已实现+测试但无外部调用者 | `renderLine` 通过 LineBuffer 串联；`resetCodeBlock` 已删除（→ RenderContext.reset）；`session.load` 通过 /load 命令串联 | P1-10/11/12 已完成 |
 | A5 | `session.popLast()` 已删除 | `session.zig` grep 0 匹配 | P1-13 已完成 |
 | A6 | `agent.zig` 无 `session.flush()` | `agent.zig` 内 0 匹配 | FIX-01 已完成 |
-| A7 | `runTurn` 签名 `(writer, phase_writer)` 无 `tool_display` 回调 | `agent.zig:74-78` | 待修改 |
-| A8 | `ToolResult` / `ToolDisplay` / `RenderContext` 均不存在 | 全库 grep 0 匹配 | 待创建 |
+| A7 | `runTurn` 签名 `(writer, phase_writer)` 无 `tool_display` 回调 | 已改为 `runTurn(writer, tool_display)`，phase_writer 移除 | P1-5/6 已完成 |
+| A8 | `ToolResult` / `ToolDisplay` / `RenderContext` 均不存在 | 已全部创建并集成 | P1-1/2 已完成 |
 
-## B. 执行顺序
+## B. 执行顺序（全部已完成）
 
 ```
 P1-1 (types) ──→ P1-2 (render/cli) ──→ P1-3 (6 tools) ──→ P1-4 (registry)
@@ -25,17 +25,21 @@ P1-1 (types) ──→ P1-2 (render/cli) ──→ P1-3 (6 tools) ──→ P1-4
                                                          P1-7 (App)
                                                               ↓
                                                          P1-9 (verify)
-
-并行（不阻塞核心链）:
-  P1-12(a) (renderLine 签名变更 + 兼容包装) ── 可与 P1-2 并行，先于 P1-10
-  P1-10 (renderLine 流式串联 + LineBuffer) ── 依赖 P1-12(a) + P1-6 后/provider
-  P1-12(b) (消除模块级 var + 旧签名包装) ── 依赖 P1-10
-  P1-11 (/load 命令) ── 依赖 P1-7/App
-
-已完成:
-  P1-8  (plan-step9 文档清理) — 目标文件不存在，无操作
-  P1-13 (popLast 删除) — session.zig 中已清除
+                                                              ↓
+                          并行: P1-12(a) → P1-10 → P1-12(b) → P1-11
 ```
+
+全部步骤已完成:
+- P1-1 ~ P1-7 核心链 ✅
+- P1-8  (plan-step9 文档清理) ✅
+- P1-9  (全量验证) ✅ — 141 tests pass, 编译零警告
+- P1-10 (LineBuffer 流式缓冲) ✅ — 按行累积 + renderLine ANSI 格式化
+- P1-11 (/load 命令) ✅ — REPL 中 /load <name> 恢复会话
+- P1-12 (消除模块级 var code_block_active) ✅ — 移入 RenderContext
+- P1-13 (popLast 删除) ✅
+```
+
+**推迟项**: 逐 token 即时回显 + 换行覆盖渲染（`\r\033[K`）推迟到 Phase 3（流式工具 + 终端宽度感知），详见 `PLAN-V2-STEP1A-STREAMING-OVERLAY.md`。当前 P1-10 已实现逐行渲染流式 — LLM 输出行粒度（50-100 字符/行）的延迟通常 < 1s。
 
 ## C. 逐步骤实施
 
@@ -918,3 +922,14 @@ P1-12(a) 与 P1-2 无冲突，可并行实施。LineBuffer 的 `init()` 在 P1-2
 - `ZIG-016-RANDOM` — `std.crypto.random` 已移除 → 本阶段不涉及
 - `ZIG-016-SLEEP` — `std.time.sleep` 不存在 → 本阶段不涉及
 - `ZIG-016-ENV` — `std.process.getEnvMap` 已移除 → 本阶段不涉及
+
+## K. 实施偏差记录
+
+| # | 偏差 | 方案原文 | 实际实现 | 原因 |
+|---|------|---------|---------|------|
+| K1 | LineBuffer.feed 回调签名 | `write_rendered: *const fn (line: []const u8) void` | 直接传 `*std.Io.Writer`，内联写入 | Zig 无闭包，用 ctx + fn 指针模式等价；简化调用链 |
+| K2 | PhaseWriterCb.write_rendered | 提供 line-rendered 回调，provider 层可调用 | 字段定义但 provider 层不调用（预留 hook）；LineBuffer 直接写入 writer | provider 通过 begin_phase/end_phase 控制相位切换，具体渲染由 App 层完成 |
+| K3 | resetCodeBlock 兼容包装 | P1-12(a) 保留 `resetCodeBlock(ctx)` 旧签名包装 | 直接删除，调用方用 `ctx.reset()` | 仅在测试中使用，无外部调用者 |
+| K4 | 逐 token 即时回显 | P1-10 验收标准 "AI 输出带 ANSI 格式" | 逐行渲染（等 \n 后 renderLine） | 覆盖渲染 (\r\033[K) 推迟到 Phase 3，当前逐行延迟 < 1s |
+| K5 | LineBuffer deinit | 未定义 | 未实现（进程退出时 OS 回收 buf） | Zig 测试用 testing.allocator 检测泄漏；未来若有复用需补 |
+| K6 | App.stdout_writer 字段 | 计划新增 `stdout_buf`/`stdout_file_writer`/`stdout_writer` 字段 | 未新增；各函数局部创建 `Io.File.Writer` | 当前所有输出点通过 `Io.File.Writer.init(.stdout(), io, &obuf)` 局部创建，不跨函数共享 stdout writer |

@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const types = @import("../../types.zig");
 
 pub const Color = struct {
     reset: []const u8 = "\x1b[0m",
@@ -17,6 +18,8 @@ pub const Color = struct {
     bg_blue: []const u8 = "\x1b[44m",
     bg_gray: []const u8 = "\x1b[100m",
     bg_green: []const u8 = "\x1b[42m",
+    bg_bright_cyan: []const u8 = "\x1b[106m",
+    bg_bright_magenta: []const u8 = "\x1b[105m",
 };
 
 pub const C: Color = .{};
@@ -32,6 +35,10 @@ pub const MessageType = enum {
 };
 
 var colorize: bool = false;
+
+pub fn isColorized() bool {
+    return colorize;
+}
 
 pub fn init() void {
     if (checkNoColor()) {
@@ -113,7 +120,7 @@ pub fn writeLabeled(writer: *std.Io.Writer, mtype: MessageType, text: []const u8
         },
         .tool => {
             try writer.print("{s}{s} 工具 {s}{s}{s}{s}\n", .{
-                C.bg_gray, C.white, C.reset, C.dim, text, C.reset,
+                C.bg_bright_magenta, C.white, C.reset, C.dim, text, C.reset,
             });
         },
         .output => {
@@ -146,7 +153,7 @@ pub fn writeLabelBegin(writer: *std.Io.Writer, mtype: MessageType) !void {
             try writer.print("{s}{s} 思考 {s}{s}\n", .{ C.bg_gray, C.white, C.reset, C.dim });
         },
         .tool => {
-            try writer.print("{s}{s} 工具 {s}{s}\n", .{ C.bg_gray, C.white, C.reset, C.dim });
+            try writer.print("{s}{s} 工具 {s}{s}\n", .{ C.bg_bright_magenta, C.white, C.reset, C.dim });
         },
         .output => {
             try writer.print("{s}{s} 输出 {s}{s}\n", .{ C.bg_green, C.white, C.reset, C.reset });
@@ -213,6 +220,217 @@ pub const PhaseWriter = struct {
     }
 };
 
+pub const RenderContext = struct {
+    code_block_active: bool = false,
+    colorize: bool,
+
+    pub fn reset(self: *RenderContext) void {
+        self.code_block_active = false;
+    }
+};
+
+pub const LineBuffer = struct {
+    buf: std.ArrayListAligned(u8, null),
+    allocator: std.mem.Allocator,
+    render_ctx: *RenderContext,
+
+    pub fn init(allocator: std.mem.Allocator, render_ctx: *RenderContext) LineBuffer {
+        return .{
+            .buf = .empty,
+            .allocator = allocator,
+            .render_ctx = render_ctx,
+        };
+    }
+
+    pub fn feed(self: *LineBuffer, bytes: []const u8, writer: *std.Io.Writer) !void {
+        try self.buf.appendSlice(self.allocator, bytes);
+
+        while (true) {
+            const nl_pos = std.mem.indexOfScalar(u8, self.buf.items, '\n') orelse break;
+            const line_end = nl_pos + 1;
+
+            var line_start: usize = 0;
+            if (nl_pos > 0 and self.buf.items[nl_pos - 1] == '\r') {
+                line_start = @intCast(nl_pos - 1);
+            } else {
+                line_start = @intCast(nl_pos);
+            }
+
+            const line_raw = if (line_start > 0) blk: {
+                const idx = lastFullCodepoint(self.buf.items[0..line_start]);
+                if (idx < line_start) {
+                    break :blk idx;
+                }
+                break :blk line_start;
+            } else line_start;
+
+            if (line_raw == 0) break;
+
+            const line = self.buf.items[0..line_raw];
+
+            if (!std.unicode.utf8ValidateSlice(line)) {
+                drainBuf(&self.buf, line_end);
+                continue;
+            }
+
+            const styled = renderLine(self.render_ctx, self.allocator, line) catch {
+                drainBuf(&self.buf, line_end);
+                continue;
+            };
+            defer self.allocator.free(styled);
+
+            writer.print("{s}\n", .{styled}) catch {};
+            writer.flush() catch {};
+
+            drainBuf(&self.buf, line_end);
+        }
+
+        // Stream remaining partial content immediately, then clear for next feed
+        if (self.buf.items.len > 0 and std.unicode.utf8ValidateSlice(self.buf.items)) {
+            writer.print("{s}", .{self.buf.items}) catch {};
+            writer.flush() catch {};
+        }
+        self.buf.clearRetainingCapacity();
+    }
+
+    pub fn flush(self: *LineBuffer, writer: *std.Io.Writer) !void {
+        if (self.buf.items.len == 0) return;
+
+        const line = try self.allocator.dupe(u8, self.buf.items);
+        defer self.allocator.free(line);
+        self.buf.clearRetainingCapacity();
+
+        if (!std.unicode.utf8ValidateSlice(line)) return;
+
+        const styled = renderLine(self.render_ctx, self.allocator, line) catch return;
+        defer self.allocator.free(styled);
+
+        writer.print("{s}", .{styled}) catch {};
+    }
+
+    pub fn reset(self: *LineBuffer) void {
+        self.buf.clearRetainingCapacity();
+    }
+
+    fn lastFullCodepoint(data: []const u8) usize {
+        var i: usize = data.len;
+        while (i > 0) {
+            i -= 1;
+            const len = std.unicode.utf8ByteSequenceLength(data[i]) catch continue;
+            if (i + len <= data.len) return i + len;
+            if (i + len > data.len) return i;
+        }
+        return data.len;
+    }
+};
+
+fn drainBuf(buf: *std.ArrayListAligned(u8, null), keep_start: usize) void {
+    const rem_len = buf.items.len -| keep_start;
+    if (rem_len > 0) {
+        std.mem.copyForwards(u8, buf.items[0..rem_len], buf.items[keep_start..]);
+        buf.shrinkRetainingCapacity(rem_len);
+    } else {
+        buf.clearRetainingCapacity();
+    }
+}
+
+threadlocal var DISPLAY_BUF: [256]u8 = undefined;
+
+fn shorten(s: []const u8, max: usize) []const u8 {
+    return s[0..@min(s.len, max)];
+}
+
+fn labelFromValue(tool_name: []const u8, value: std.json.Value) []const u8 {
+    if (std.mem.eql(u8, tool_name, "read")) {
+        if (value.object.get("path")) |v| if (v == .string)
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Read {s}", .{v.string}) catch return tool_name;
+        return tool_name;
+    }
+    if (std.mem.eql(u8, tool_name, "write")) {
+        if (value.object.get("path")) |v| if (v == .string)
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Write {s}", .{v.string}) catch return tool_name;
+        return tool_name;
+    }
+    if (std.mem.eql(u8, tool_name, "bash")) {
+        if (value.object.get("command")) |v| if (v == .string)
+            return std.fmt.bufPrint(&DISPLAY_BUF, "$ {s}", .{shorten(v.string, 60)}) catch return tool_name;
+        return tool_name;
+    }
+    if (std.mem.eql(u8, tool_name, "grep")) {
+        const pattern = if (value.object.get("pattern")) |v| if (v == .string) v.string else "" else "";
+        const path = if (value.object.get("path")) |v| if (v == .string) v.string else "" else "";
+        if (pattern.len > 0 and path.len > 0) {
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Grep \"{s}\" {s}", .{ shorten(pattern, 40), shorten(path, 40) }) catch return tool_name;
+        }
+        return tool_name;
+    }
+    if (std.mem.eql(u8, tool_name, "glob")) {
+        const pattern = if (value.object.get("pattern")) |v| if (v == .string) v.string else "" else "";
+        const path = if (value.object.get("path")) |v| if (v == .string) v.string else "" else "";
+        if (pattern.len > 0) {
+            if (path.len > 0) {
+                return std.fmt.bufPrint(&DISPLAY_BUF, "Glob {s} [{s}]", .{ shorten(pattern, 40), shorten(path, 40) }) catch return tool_name;
+            }
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Glob {s}", .{shorten(pattern, 80)}) catch return tool_name;
+        }
+        return tool_name;
+    }
+    if (std.mem.eql(u8, tool_name, "skill")) {
+        if (value.object.get("name")) |v| if (v == .string)
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Skill {s}", .{v.string}) catch return tool_name;
+        return tool_name;
+    }
+    return tool_name;
+}
+
+pub const ToolDisplay = struct {
+    ctx: *RenderContext,
+    writer: *std.Io.Writer,
+
+        pub fn renderCb(context: ?*anyopaque, tool_name: []const u8, tool_args: []const u8, had_error: bool, user_output: ?[]const u8) anyerror!void {
+            const self: *ToolDisplay = @ptrCast(@alignCast(context orelse return error.NullContext));
+            try self.render(tool_name, tool_args, had_error, user_output);
+        }
+
+        pub fn render(self: *ToolDisplay, tool_name: []const u8, args_json: []const u8, had_error: bool, user_output: ?[]const u8) anyerror!void {
+            _ = had_error;
+            writeToolLabelOpen(self.writer);
+
+            const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
+                self.writer.print("{s}", .{tool_name}) catch |err| return err;
+                writeToolLabelClose(self.writer);
+                return;
+            };
+            defer parsed.deinit();
+
+            const label = labelFromValue(tool_name, parsed.value);
+            self.writer.print("{s}", .{label}) catch |err| {
+                return err;
+            };
+
+            writeToolLabelClose(self.writer);
+
+            if (user_output) |out| {
+                self.writer.print("\n{s}", .{out}) catch |err| {
+                    return err;
+                };
+            }
+        }
+
+    fn writeToolLabelOpen(writer: *std.Io.Writer) void {
+        if (colorize) {
+            writer.print("{s}{s} 工具 {s} ", .{ C.bg_bright_magenta, C.white, C.reset }) catch |err| {
+                if (err == error.BrokenPipe) return; // BrokenPipe non-fatal; best-effort display
+                // other IO errors non-fatal; best-effort display
+            };
+        }
+    }
+
+    fn writeToolLabelClose(writer: *std.Io.Writer) void {
+        _ = writer.print("\n", .{}) catch {}; // EPIPE non-fatal; other IO errors lost to stderr
+    }
+};
+
 pub fn writePrompt(writer: *std.Io.Writer) !void {
     if (!colorize) {
         try writer.print("> ", .{});
@@ -239,26 +457,20 @@ const LinkEntry = struct {
     url: []const u8,
 };
 
-var code_block_active: bool = false;
-
-pub fn resetCodeBlock() void {
-    code_block_active = false;
-}
-
-pub fn renderLine(allocator: std.mem.Allocator, line: []const u8) ![]const u8 {
+pub fn renderLine(ctx: *RenderContext, allocator: std.mem.Allocator, line: []const u8) ![]const u8 {
     if (line.len == 0) return try allocator.dupe(u8, "");
 
     // 0. code block boundary detection
     if (std.mem.startsWith(u8, line, "```")) {
-        code_block_active = !code_block_active;
-        if (!colorize) return try allocator.dupe(u8, line);
+        ctx.code_block_active = !ctx.code_block_active;
+        if (!ctx.colorize) return try allocator.dupe(u8, line);
         return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ C.dim, line, C.reset });
     }
 
-    if (!colorize) return try allocator.dupe(u8, line);
+    if (!ctx.colorize) return try allocator.dupe(u8, line);
 
     // Inside code block
-    if (code_block_active) {
+    if (ctx.code_block_active) {
         return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ C.dim, line, C.reset });
     }
 
@@ -540,6 +752,7 @@ test "render: Color constants" {
     try std.testing.expectEqualStrings("\x1b[44m", C.bg_blue);
     try std.testing.expectEqualStrings("\x1b[100m", C.bg_gray);
     try std.testing.expectEqualStrings("\x1b[42m", C.bg_green);
+    try std.testing.expectEqualStrings("\x1b[105m", C.bg_bright_magenta);
 }
 
 test "render: visibleWidth ASCII" {
@@ -582,7 +795,7 @@ test "render: writeLabeled tool" {
     var result = aw.toArrayList();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expect(std.mem.startsWith(u8, result.items, C.bg_gray));
+    try std.testing.expect(std.mem.startsWith(u8, result.items, C.bg_bright_magenta));
     try std.testing.expect(std.mem.indexOf(u8, result.items, "read.md") != null);
 }
 
@@ -667,10 +880,9 @@ test "render: writeLabeled success" {
 }
 
 test "render: renderLine heading" {
-    colorize = true;
-    defer colorize = false;
+    var ctx = RenderContext{ .colorize = true };
 
-    const result = try renderLine(std.testing.allocator, "## Title");
+    const result = try renderLine(&ctx, std.testing.allocator, "## Title");
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.startsWith(u8, result, C.bold));
@@ -679,29 +891,25 @@ test "render: renderLine heading" {
 }
 
 test "render: renderLine code block" {
-    colorize = true;
-    defer colorize = false;
-    resetCodeBlock();
-    defer resetCodeBlock();
+    var ctx = RenderContext{ .colorize = true };
 
-    const open = try renderLine(std.testing.allocator, "```zig");
+    const open = try renderLine(&ctx, std.testing.allocator, "```zig");
     defer std.testing.allocator.free(open);
 
-    const result = try renderLine(std.testing.allocator, "const x = 1;");
+    const result = try renderLine(&ctx, std.testing.allocator, "const x = 1;");
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.startsWith(u8, result, C.dim));
     try std.testing.expect(std.mem.endsWith(u8, result, C.reset));
 
-    const close = try renderLine(std.testing.allocator, "```");
+    const close = try renderLine(&ctx, std.testing.allocator, "```");
     defer std.testing.allocator.free(close);
 }
 
 test "render: renderLine bold" {
-    colorize = true;
-    defer colorize = false;
+    var ctx = RenderContext{ .colorize = true };
 
-    const result = try renderLine(std.testing.allocator, "hello **world** here");
+    const result = try renderLine(&ctx, std.testing.allocator, "hello **world** here");
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.indexOf(u8, result, C.bold) != null);
@@ -709,20 +917,18 @@ test "render: renderLine bold" {
 }
 
 test "render: renderLine inline code" {
-    colorize = true;
-    defer colorize = false;
+    var ctx = RenderContext{ .colorize = true };
 
-    const result = try renderLine(std.testing.allocator, "use `foo()` for that");
+    const result = try renderLine(&ctx, std.testing.allocator, "use `foo()` for that");
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.indexOf(u8, result, C.dim) != null);
 }
 
 test "render: renderLine link" {
-    colorize = true;
-    defer colorize = false;
+    var ctx = RenderContext{ .colorize = true };
 
-    const result = try renderLine(std.testing.allocator, "click [here](https://example.com) now");
+    const result = try renderLine(&ctx, std.testing.allocator, "click [here](https://example.com) now");
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.indexOf(u8, result, C.blue) != null);
@@ -730,10 +936,9 @@ test "render: renderLine link" {
 }
 
 test "render: renderLine link with bold" {
-    colorize = true;
-    defer colorize = false;
+    var ctx = RenderContext{ .colorize = true };
 
-    const result = try renderLine(std.testing.allocator, "see [**important**](url) pls");
+    const result = try renderLine(&ctx, std.testing.allocator, "see [**important**](url) pls");
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.indexOf(u8, result, C.blue) != null);
@@ -742,20 +947,18 @@ test "render: renderLine link with bold" {
 }
 
 test "render: renderLine list" {
-    colorize = true;
-    defer colorize = false;
+    var ctx = RenderContext{ .colorize = true };
 
-    const result = try renderLine(std.testing.allocator, "- item one");
+    const result = try renderLine(&ctx, std.testing.allocator, "- item one");
     defer std.testing.allocator.free(result);
 
     try std.testing.expectEqualStrings("- item one", result);
 }
 
 test "render: renderLine blockquote" {
-    colorize = true;
-    defer colorize = false;
+    var ctx = RenderContext{ .colorize = true };
 
-    const result = try renderLine(std.testing.allocator, "> a quote");
+    const result = try renderLine(&ctx, std.testing.allocator, "> a quote");
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.startsWith(u8, result, C.dim));
@@ -763,10 +966,9 @@ test "render: renderLine blockquote" {
 }
 
 test "render: renderLine mixed" {
-    colorize = true;
-    defer colorize = false;
+    var ctx = RenderContext{ .colorize = true };
 
-    const result = try renderLine(std.testing.allocator, "**bold** and `code` together");
+    const result = try renderLine(&ctx, std.testing.allocator, "**bold** and `code` together");
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.indexOf(u8, result, C.bold) != null);
@@ -774,24 +976,21 @@ test "render: renderLine mixed" {
 }
 
 test "render: code block auto-detect" {
-    colorize = true;
-    defer colorize = false;
-    resetCodeBlock();
-    defer resetCodeBlock();
+    var ctx = RenderContext{ .colorize = true };
 
-    const open = try renderLine(std.testing.allocator, "```");
+    const open = try renderLine(&ctx, std.testing.allocator, "```");
     defer std.testing.allocator.free(open);
     try std.testing.expect(std.mem.startsWith(u8, open, C.dim));
 
-    const inner = try renderLine(std.testing.allocator, "code inside");
+    const inner = try renderLine(&ctx, std.testing.allocator, "code inside");
     defer std.testing.allocator.free(inner);
     try std.testing.expect(std.mem.startsWith(u8, inner, C.dim));
 
-    const close = try renderLine(std.testing.allocator, "```");
+    const close = try renderLine(&ctx, std.testing.allocator, "```");
     defer std.testing.allocator.free(close);
     try std.testing.expect(std.mem.startsWith(u8, close, C.dim));
 
-    const after = try renderLine(std.testing.allocator, "normal text");
+    const after = try renderLine(&ctx, std.testing.allocator, "normal text");
     defer std.testing.allocator.free(after);
     try std.testing.expectEqualStrings("normal text", after);
 }
@@ -811,29 +1010,27 @@ test "render: writeLabeled no colorize" {
 }
 
 test "render: renderLine no colorize" {
-    colorize = false;
+    var ctx = RenderContext{ .colorize = false };
 
-    const result = try renderLine(std.testing.allocator, "**bold** text");
+    const result = try renderLine(&ctx, std.testing.allocator, "**bold** text");
     defer std.testing.allocator.free(result);
 
     try std.testing.expectEqualStrings("**bold** text", result);
 }
 
 test "render: renderLine empty" {
-    colorize = true;
-    defer colorize = false;
+    var ctx = RenderContext{ .colorize = true };
 
-    const result = try renderLine(std.testing.allocator, "");
+    const result = try renderLine(&ctx, std.testing.allocator, "");
     defer std.testing.allocator.free(result);
 
     try std.testing.expectEqualStrings("", result);
 }
 
 test "render: renderLine italic" {
-    colorize = true;
-    defer colorize = false;
+    var ctx = RenderContext{ .colorize = true };
 
-    const result = try renderLine(std.testing.allocator, "some *italic* text");
+    const result = try renderLine(&ctx, std.testing.allocator, "some *italic* text");
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.indexOf(u8, result, C.italic) != null);

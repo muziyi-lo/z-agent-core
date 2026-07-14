@@ -1,18 +1,51 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const types = @import("types.zig");
-const config_mod = @import("config.zig");
-const provider_mod = @import("io/provider.zig");
-const registry_mod = @import("tool/registry.zig");
-const session_mod = @import("core/session.zig");
-const agent_mod = @import("core/agent.zig");
-const render = @import("render/cli.zig");
-const signal = @import("util/signal.zig");
+const types = @import("../../types.zig");
+const config_mod = @import("../../config.zig");
+const provider_mod = @import("../../io/provider.zig");
+const registry_mod = @import("../../tool/registry.zig");
+const session_mod = @import("../../core/session.zig");
+const agent_mod = @import("../../core/agent.zig");
+const render = @import("render.zig");
+const signal = @import("../../util/signal.zig");
 
 const Io = std.Io;
 
 const BASE_PROMPT =
     "You are z-agent-core, an interactive CLI agent that helps users with software engineering tasks.";
+
+const WriterCtx = struct {
+    pw: *render.PhaseWriter,
+    lb: *render.LineBuffer,
+    writer: *Io.Writer,
+};
+
+fn pwBeginPhase(ctx: ?*anyopaque, mtype: provider_mod.PhaseType) void {
+    const wc: *WriterCtx = @ptrCast(@alignCast(ctx.?));
+    wc.lb.flush(wc.writer) catch {};
+    const mt: render.MessageType = switch (mtype) {
+        .thinking => .think,
+        .content => .output,
+        .none => return,
+    };
+    wc.pw.beginPhase(mt) catch {};
+}
+
+fn pwWriteRaw(ctx: ?*anyopaque, bytes: []const u8) void {
+    const wc: *WriterCtx = @ptrCast(@alignCast(ctx.?));
+    wc.lb.feed(bytes, wc.writer) catch {};
+}
+
+fn pwWriteRendered(ctx: ?*anyopaque, line: []const u8) void {
+    const wc: *WriterCtx = @ptrCast(@alignCast(ctx.?));
+    wc.writer.print("{s}", .{line}) catch {};
+}
+
+fn pwEndPhase(ctx: ?*anyopaque) void {
+    const wc: *WriterCtx = @ptrCast(@alignCast(ctx.?));
+    wc.lb.flush(wc.writer) catch {};
+    wc.pw.endPhase() catch {};
+}
 
 /// CLI application orchestrator. init() loads config + tools + session,
 /// initAgent() binds agent to session, run() enters single-turn or REPL.
@@ -31,6 +64,10 @@ pub const App = struct {
     project_context: ?[]const u8,
     single_prompt: ?[]const u8,
     session_dir: []const u8,
+
+    render_ctx: render.RenderContext,
+    tool_display: render.ToolDisplay,
+    line_buffer: render.LineBuffer,
 
     /// Initialize App: render.init, signal.init, findZagentRoot, load config/dotenv,
     /// create Provider/Tools/Session, inject system prompt. Agent created separately
@@ -85,7 +122,14 @@ pub const App = struct {
             return error.ProviderNotFound;
         };
 
-        const provider = provider_mod.Provider.init(allocator, entry, model, null, io) catch |err| {
+        const phase_writer_cb = provider_mod.PhaseWriterCb{
+            .context = null,
+            .begin_phase = pwBeginPhase,
+            .write_raw = pwWriteRaw,
+            .write_rendered = pwWriteRendered,
+            .end_phase = pwEndPhase,
+        };
+        const provider = provider_mod.Provider.init(allocator, entry, model, null, io, phase_writer_cb) catch |err| {
             if (err == error.ApiKeyNotSet) {
                 var sbuf: [256]u8 = undefined;
                 var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
@@ -118,16 +162,28 @@ pub const App = struct {
             .project_context = project_context,
             .single_prompt = single_prompt,
             .session_dir = session_dir,
+            .render_ctx = render.RenderContext{ .colorize = render.isColorized() },
+            .tool_display = render.ToolDisplay{ .ctx = undefined, .writer = undefined },
+            .line_buffer = undefined,
         };
     }
 
     /// Bind agent loop to session for tool-execution. Must call after init(), before run().
     pub fn initAgent(self: *App) void {
+        self.line_buffer = render.LineBuffer.init(self.allocator, &self.render_ctx);
+        self.tool_display.ctx = &self.render_ctx;
         self.agent = agent_mod.AgentLoop.init(
             self.allocator, self.io,
             &self.provider, self.registry, &self.session,
             self.cfg.max_tool_rounds, self.project_root,
+            .{},
         );
+    }
+
+    pub fn rollbackTurn(self: *App, pre_count: usize) void {
+        self.session.truncateTo(pre_count);
+        self.render_ctx.reset();
+        self.line_buffer.reset();
     }
 
     /// Dispatch: singleTurn() if --prompt given, otherwise enter REPL loop.
@@ -142,7 +198,12 @@ pub const App = struct {
     fn singleTurn(self: *App, prompt: []const u8) !void {
         var obuf: [4096]u8 = undefined;
         var stdout: Io.File.Writer = .init(.stdout(), self.io, &obuf);
+
         var pw = render.PhaseWriter.init(&stdout.interface);
+        var wc = WriterCtx{ .pw = &pw, .lb = &self.line_buffer, .writer = &stdout.interface };
+        if (self.provider.phase_writer) |*cb| {
+            cb.context = @ptrCast(@alignCast(&wc));
+        }
 
         try render.writeLabeled(&stdout.interface, .user, prompt);
         try stdout.interface.flush();
@@ -151,34 +212,40 @@ pub const App = struct {
         try self.session.append(.{ .role = .user, .content = prompt });
         _ = stdout.interface.write("\n") catch {};
 
-        const result = self.agent.runTurn(&stdout.interface, &pw) catch |err| {
-            switch (err) {
-                error.OutOfMemory => {
-                    self.session.truncateTo(pre_count);
-                    try self.session.flush();
-                    return err;
-                },
-                else => {
-                    self.session.truncateTo(pre_count);
-                    try self.session.flush();
-                    return;
-                },
+        const tool_cb = agent_mod.ToolDisplayCb{
+            .context = &self.tool_display,
+            .render = render.ToolDisplay.renderCb,
+        };
+        self.tool_display.writer = &stdout.interface;
+        const result = self.agent.runTurn(tool_cb) catch |err| {
+            if (err != error.OutOfMemory) {
+                self.rollbackTurn(pre_count);
             }
+            return err;
         };
         _ = stdout.interface.write("\n") catch {};
+        if (signal.isInterrupted()) {
+            self.agent.abort();
+            signal.reset();
+        }
         if (result.finish == .interrupted) {
             try render.writeLabeled(&stdout.interface, .warning, "interrupted");
         }
-        if (result.finish == .api_error or result.finish == .interrupted) {
-            self.session.truncateTo(pre_count);
+        if (result.finish == .max_rounds) {
+            try render.writeLabeled(&stdout.interface, .warning, "max tool rounds reached");
         }
-        try self.session.flush();
+        if (result.finish == .api_error or result.finish == .interrupted) {
+            self.rollbackTurn(pre_count);
+        } else {
+            try self.session.flush();
+        }
     }
 
     fn replLoop(self: *App) !void {
         var obuf: [4096]u8 = undefined;
         var stdout: Io.File.Writer = .init(.stdout(), self.io, &obuf);
         var pw = render.PhaseWriter.init(&stdout.interface);
+        var wc = WriterCtx{ .pw = &pw, .lb = &self.line_buffer, .writer = &stdout.interface };
 
         var line_buf: std.ArrayListAligned(u8, null) = .empty;
         defer line_buf.deinit(self.allocator);
@@ -201,7 +268,7 @@ pub const App = struct {
                 };
                 const line = line_opt orelse break;
                 defer self.allocator.free(line);
-                self.processLine(&stdout, line, &pw) catch |err| {
+                self.processLine(&stdout, line, &wc) catch |err| {
                     if (err == error.ExitRepl) break;
                     return err;
                 };
@@ -227,7 +294,7 @@ pub const App = struct {
                 };
                 const line = line_opt orelse break;
                 defer self.allocator.free(line);
-                self.processLine(&stdout, line, &pw) catch |err| {
+                self.processLine(&stdout, line, &wc) catch |err| {
                     if (err == error.ExitRepl) break;
                     return err;
                 };
@@ -235,7 +302,7 @@ pub const App = struct {
         }
     }
 
-    fn processLine(self: *App, stdout: *Io.File.Writer, line: []const u8, pw: *render.PhaseWriter) !void {
+    fn processLine(self: *App, stdout: *Io.File.Writer, line: []const u8, wc: *WriterCtx) !void {
         if (line.len == 0) return;
         if (std.mem.eql(u8, line, "/exit") or std.mem.eql(u8, line, "/quit")) return error.ExitRepl;
         if (std.mem.eql(u8, line, "/new")) {
@@ -254,41 +321,55 @@ pub const App = struct {
             try self.showHelp(stdout);
             return;
         }
+        if (std.mem.startsWith(u8, line, "/load ")) {
+            try self.loadSession(stdout, line["/load ".len..]);
+            return;
+        }
+        if (std.mem.startsWith(u8, line, "/fork ")) {
+            try self.forkSession(stdout, line["/fork ".len..]);
+            return;
+        }
 
         const pre_count = self.session.messages().len;
         try self.session.append(.{ .role = .user, .content = line });
         _ = stdout.interface.write("\n") catch {};
 
-        const result = self.agent.runTurn(&stdout.interface, pw) catch |err| {
-            switch (err) {
-                error.OutOfMemory => {
-                    self.session.truncateTo(pre_count);
-                    return err;
-                },
-                else => {
-                    try render.writeLabeled(&stdout.interface, .err, @errorName(err));
-                    self.session.truncateTo(pre_count);
-                    try self.session.flush();
-                    return;
-                },
+        if (self.provider.phase_writer) |*cb| {
+            cb.context = @ptrCast(@alignCast(wc));
+        }
+        const tool_cb = agent_mod.ToolDisplayCb{
+            .context = &self.tool_display,
+            .render = render.ToolDisplay.renderCb,
+        };
+        self.tool_display.writer = &stdout.interface;
+        const result = self.agent.runTurn(tool_cb) catch |err| {
+            if (err != error.OutOfMemory) {
+                self.rollbackTurn(pre_count);
             }
+            return err;
         };
 
         _ = stdout.interface.write("\n") catch {};
+        if (signal.isInterrupted()) {
+            self.agent.abort();
+            signal.reset();
+        }
 
         switch (result.finish) {
             .api_error => {
                 try render.writeLabeled(&stdout.interface, .err, "API error");
-                self.session.truncateTo(pre_count);
+                self.rollbackTurn(pre_count);
             },
             .interrupted => {
                 try render.writeLabeled(&stdout.interface, .warning, "interrupted");
-                self.session.truncateTo(pre_count);
+                self.rollbackTurn(pre_count);
             },
-            else => {},
+            .max_rounds => {
+                try render.writeLabeled(&stdout.interface, .warning, "max tool rounds reached");
+                try self.session.flush();
+            },
+            else => try self.session.flush(),
         }
-
-        try self.session.flush();
     }
 
     fn winReadLine(
@@ -323,6 +404,15 @@ pub const App = struct {
         }
     else
         struct {};
+
+    fn sanitizeForkName(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+        var buf: std.ArrayListAligned(u8, null) = .empty;
+        errdefer buf.deinit(allocator);
+        for (name) |c| {
+            try buf.append(allocator, if (c == ' ' or c == '\t') '_' else c);
+        }
+        return buf.toOwnedSlice(allocator);
+    }
 
     fn resetSession(self: *App) !void {
         self.session.deinit();
@@ -367,11 +457,89 @@ pub const App = struct {
             \\z-agent-core commands:
             \\  /exit, /quit    Exit the REPL
             \\  /new            Start a new session
+            \\  /load <name>    Load a saved session
             \\  /name <name>    Rename current session
             \\  /list           List saved sessions
+            \\  /fork <name>    Fork current session to new file
             \\  /help           Show this help
             \\
         , .{});
+    }
+
+    fn loadSession(self: *App, stdout: *Io.File.Writer, name: []const u8) !void {
+        const trimmed = std.mem.trim(u8, name, " \t");
+        if (trimmed.len == 0) {
+            try render.writeLabeled(&stdout.interface, .err, "Usage: /load <session-name>");
+            return;
+        }
+        const path = try std.fs.path.join(self.allocator, &.{ self.session_dir, trimmed });
+        defer self.allocator.free(path);
+        const load_path = try std.fmt.allocPrint(self.allocator, "{s}.jsonl", .{path});
+        defer self.allocator.free(load_path);
+
+        const new_session = session_mod.Session.load(self.allocator, self.io, load_path) catch |err| {
+            var ebuf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&ebuf, "Cannot load '{s}': {s}", .{ trimmed, @errorName(err) }) catch "Cannot load session";
+            try render.writeLabeled(&stdout.interface, .err, msg);
+            return;
+        };
+        self.session.deinit();
+        self.session = new_session;
+        self.initAgent();
+        self.render_ctx.reset();
+        try render.writeLabeled(&stdout.interface, .success, "Loaded session");
+    }
+
+    fn forkSession(self: *App, stdout: *Io.File.Writer, fork_name_raw: []const u8) !void {
+        const fork_name = std.mem.trim(u8, fork_name_raw, " \t");
+        if (fork_name.len == 0) {
+            try render.writeLabeled(&stdout.interface, .err, "Usage: /fork <name>");
+            return;
+        }
+        if (std.mem.indexOfAny(u8, fork_name, "/\\") != null) {
+            try render.writeLabeled(&stdout.interface, .err, "Fork name must not contain path separators");
+            return;
+        }
+
+        const safe_name = try sanitizeForkName(self.allocator, fork_name);
+        defer self.allocator.free(safe_name);
+
+        const target_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.jsonl", .{ self.session_dir, safe_name });
+        defer self.allocator.free(target_path);
+
+        // Check if target already exists
+        const f_check = Io.Dir.cwd().openFile(self.io, target_path, .{ .mode = .read_only }) catch null;
+        if (f_check) |f| {
+            f.close(self.io);
+            const msg = try std.fmt.allocPrint(self.allocator, "Session '{s}' already exists", .{fork_name});
+            defer self.allocator.free(msg);
+            try render.writeLabeled(&stdout.interface, .err, msg);
+            return;
+        }
+
+        // Write current session messages to new file (atomic via temp+rename)
+        self.session.writeTo(target_path, self.io) catch |err| {
+            const msg = try std.fmt.allocPrint(self.allocator, "Cannot create session '{s}': {s}", .{ fork_name, @errorName(err) });
+            defer self.allocator.free(msg);
+            try render.writeLabeled(&stdout.interface, .err, msg);
+            return;
+        };
+
+        // Auto-load the forked session
+        const new_session = session_mod.Session.load(self.allocator, self.io, target_path) catch |err| {
+            const msg = try std.fmt.allocPrint(self.allocator, "Cannot load forked session: {s}", .{@errorName(err)});
+            defer self.allocator.free(msg);
+            try render.writeLabeled(&stdout.interface, .err, msg);
+            return;
+        };
+        self.session.deinit();
+        self.session = new_session;
+        self.initAgent();
+        self.render_ctx.reset();
+
+        const msg = try std.fmt.allocPrint(self.allocator, "Forked to '{s}' (switched)", .{safe_name});
+        defer self.allocator.free(msg);
+        try render.writeLabeled(&stdout.interface, .success, msg);
     }
 
     /// Free session, config, and all heap-allocated fields. Safe to call on zero-value App.

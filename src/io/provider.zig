@@ -2,11 +2,21 @@ const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("../types.zig");
 const signal = @import("../util/signal.zig");
-const render = @import("../render/cli.zig");
+
+pub const PhaseType = enum { none, thinking, content };
+
+pub const PhaseWriterCb = struct {
+    context: ?*anyopaque,
+    begin_phase: *const fn (ctx: ?*anyopaque, mtype: PhaseType) void,
+    write_raw: *const fn (ctx: ?*anyopaque, bytes: []const u8) void,
+    write_rendered: *const fn (ctx: ?*anyopaque, line: []const u8) void,
+    end_phase: *const fn (ctx: ?*anyopaque) void,
+};
 
 /// OpenAI-compatible API provider. Owns api_key (allocated by init).
 pub const Provider = struct {
     config: Config,
+    phase_writer: ?PhaseWriterCb = null,
 
     pub const Config = struct {
         base_url: []const u8,
@@ -17,7 +27,7 @@ pub const Provider = struct {
         max_timeout_secs: u16 = 300,
         vendor: Vendor,
         vendor_override: ?Vendor = null,
-        reasoning: bool = false,
+        model_params: ?[]const u8 = null,
     };
 
     pub const Vendor = enum { deepseek, standard };
@@ -42,6 +52,7 @@ pub const Provider = struct {
         model: *const types.Model,
         vendor_override: ?Vendor,
         io: std.Io,
+        phase_writer: ?PhaseWriterCb,
     ) !Provider {
         _ = io;
         const vendor = if (vendor_override) |v| v else detectVendor(entry.base_url);
@@ -64,8 +75,9 @@ pub const Provider = struct {
                 .max_tokens = model.max_tokens,
                 .vendor = vendor,
                 .vendor_override = vendor_override,
-                .reasoning = model.reasoning,
+                .model_params = model.params_json,
             },
+            .phase_writer = phase_writer,
         };
     }
 
@@ -77,10 +89,8 @@ pub const Provider = struct {
         io: std.Io,
         messages: []const types.Message,
         tools: ?[]const types.Tool,
-        phase_writer: ?*anyopaque,
     ) !types.ProviderResponse {
-        const pw: *render.PhaseWriter = @ptrCast(@alignCast(phase_writer orelse return error.ApiError));
-        return callWithRetry(self, arena, io, messages, tools, pw);
+        return callWithRetry(self, arena, io, messages, tools);
     }
 
     fn callWithRetry(
@@ -89,7 +99,6 @@ pub const Provider = struct {
         io: std.Io,
         messages: []const types.Message,
         tools: ?[]const types.Tool,
-        pw: *render.PhaseWriter,
     ) !types.ProviderResponse {
         const max_retries: u32 = 3;
         var attempt: u32 = 0;
@@ -120,7 +129,7 @@ pub const Provider = struct {
                     _ = std.c.nanosleep(&ts, null);
                 }
             }
-            return chatCompletionStreamingOnce(self, arena, io, messages, tools, pw) catch |err| {
+            return chatCompletionStreamingOnce(self, arena, io, messages, tools) catch |err| {
                 if (attempt >= max_retries) return err;
                 switch (err) {
                     error.ApiError, error.Interrupted => return err,
@@ -137,9 +146,9 @@ pub const Provider = struct {
         io: std.Io,
         messages: []const types.Message,
         tools: ?[]const types.Tool,
-        pw: *render.PhaseWriter,
     ) !types.ProviderResponse {
         const alloc = arena.allocator();
+        const pw = self.phase_writer;
 
         const url = if (std.mem.endsWith(u8, self.config.base_url, "/chat/completions"))
             self.config.base_url
@@ -209,6 +218,7 @@ pub const Provider = struct {
 
         var seen_first_data = false;
         var finish_reason: types.FinishReason = .unknown;
+        var usage: ?types.TokenUsage = null;
 
         while (true) {
             if (signal.isInterrupted()) {
@@ -258,6 +268,25 @@ pub const Provider = struct {
                 }
             }
 
+            if (parsed.object.get("usage")) |usage_val| {
+                if (usage_val != .null) {
+                    const u = usage_val.object;
+                    if (u.get("prompt_tokens")) |in_val| {
+                        if (u.get("completion_tokens")) |out_val| {
+                            if (u.get("total_tokens")) |tot_val| {
+                                if (in_val != .null and out_val != .null and tot_val != .null) {
+                                    usage = .{
+                                        .input = @intCast(in_val.integer),
+                                        .output = @intCast(out_val.integer),
+                                        .total = @intCast(tot_val.integer),
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if (choice.get("delta")) |delta_val| {
                 if (delta_val == .null) continue;
                 const delta = delta_val.object;
@@ -265,23 +294,23 @@ pub const Provider = struct {
                 if (delta.get("reasoning_content")) |r_val| {
                     if (r_val != .null) {
                         const r = r_val.string;
-                        try pw.beginPhase(.think);
+                        if (pw) |p| p.begin_phase(p.context, .thinking);
                         try content_buf.appendSlice(alloc, r);
-                        try pw.writeRaw(r);
+                        if (pw) |p| p.write_raw(p.context, r);
                     }
                 }
 
                 if (delta.get("content")) |c_val| {
                     if (c_val != .null) {
                         const c = c_val.string;
-                        try pw.beginPhase(.output);
+                        if (pw) |p| p.begin_phase(p.context, .content);
                         try content_buf.appendSlice(alloc, c);
-                        try pw.writeRaw(c);
+                        if (pw) |p| p.write_raw(p.context, c);
                     }
                 }
 
                 if (delta.get("tool_calls")) |tc_array| {
-                    try pw.endPhase();
+                    if (pw) |p| p.end_phase(p.context);
                     for (tc_array.array.items) |tc_item| {
                         const tc_obj = tc_item.object;
                         const idx_val = tc_obj.get("index") orelse continue;
@@ -322,7 +351,7 @@ pub const Provider = struct {
             }
         }
 
-        try pw.endPhase();
+        if (pw) |p| p.end_phase(p.context);
 
         const term = try child.wait(io);
         child_finished = true;
@@ -346,6 +375,7 @@ pub const Provider = struct {
                 .content = null,
                 .tool_calls = tool_calls_buf.items,
                 .finish_reason = finish_reason,
+                .usage = usage,
             };
         }
 
@@ -353,6 +383,7 @@ pub const Provider = struct {
             .content = content_buf.items,
             .tool_calls = null,
             .finish_reason = finish_reason,
+            .usage = usage,
         };
     }
 
@@ -419,8 +450,11 @@ pub const Provider = struct {
             try buf.appendSlice(allocator, "]");
         }
 
-        if (self.config.reasoning) {
-            try buf.appendSlice(allocator, ",\"thinking\":{\"type\":\"enabled\"}");
+        if (self.config.model_params) |params| {
+            if (params.len > 0) {
+                try buf.appendSlice(allocator, ",");
+                try buf.appendSlice(allocator, params);
+            }
         }
 
         try buf.appendSlice(allocator, ",\"max_tokens\":");
@@ -595,7 +629,7 @@ test "buildJsonBody deepseek thinking" {
             .model = "deepseek-v4-pro",
             .max_tokens = 1000,
             .vendor = .deepseek,
-            .reasoning = true,
+            .model_params = "\"thinking\":{\"type\":\"enabled\"}",
         },
     };
     const msgs = [_]types.Message{
@@ -680,10 +714,10 @@ test "init missing key returns ApiKeyNotSet" {
         .name = "Test Model",
         .context_window = 100000,
         .max_tokens = 4096,
-        .reasoning = false,
+        .params_json = null,
         .input = &.{.text},
     };
-    try testing.expectError(error.ApiKeyNotSet, Provider.init(testing.allocator, entry, &model, null, testing.io));
+    try testing.expectError(error.ApiKeyNotSet, Provider.init(testing.allocator, entry, &model, null, testing.io, null));
 }
 
 test "SSE parse data:DONE" {

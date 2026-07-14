@@ -8,47 +8,66 @@ pub const tool_params =
     \\{"type":"object","properties":{"name":{"type":"string","description":"Name of the skill to load"}},"required":["name"]}
 ;
 
-/// Load a skill's SKILL.md from .zagent/skills/<name>/. Returns allocator-owned content.
-pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u8 {
+/// Load a skill's SKILL.md from .zagent/skills/<name>/. Returns allocator-owned ToolResult.
+pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.ToolResult {
     const args = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     defer args.deinit();
 
     const name_val = args.value.object.get("name") orelse {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: missing 'name' argument", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'name' argument", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     if (name_val != .string or name_val.string.len == 0) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: 'name' must be a non-empty string", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: 'name' must be a non-empty string", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     }
 
     const skill_rel = try std.fmt.allocPrint(ctx.allocator, ".zagent/skills/{s}/SKILL.md", .{name_val.string});
     defer ctx.allocator.free(skill_rel);
     const skill_path = path_util.resolvePath(ctx.allocator, ctx.project_root, skill_rel) catch |err| switch (err) {
-        error.PathEscape => return try std.fmt.allocPrint(ctx.allocator, "Error: path escapes project root", .{}),
+        error.PathEscape => {
+            const content = try std.fmt.allocPrint(ctx.allocator, "Error: path escapes project root", .{});
+            return types.ToolResult{
+                .session_content = content,
+            };
+        },
         else => return err,
     };
     defer ctx.allocator.free(skill_path);
 
     const file = Io.Dir.cwd().openFile(ctx.io, skill_path, .{ .mode = .read_only }) catch {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: skill '{s}' not found", .{name_val.string});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: skill '{s}' not found", .{name_val.string});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     defer file.close(ctx.io);
 
     const size: usize = @intCast((try file.stat(ctx.io)).size);
-    const content = try ctx.allocator.alloc(u8, size);
-    defer ctx.allocator.free(content);
-    _ = try file.readPositionalAll(ctx.io, content, 0);
-
-    try writeDisplay(ctx, name_val.string);
+    const file_content = try ctx.allocator.alloc(u8, size);
+    defer ctx.allocator.free(file_content);
+    _ = try file.readPositionalAll(ctx.io, file_content, 0);
 
     var buf = std.ArrayListAligned(u8, null).empty;
     try buf.appendSlice(ctx.allocator, "{\"name\":\"");
     try appendJsonStr(&buf, ctx.allocator, name_val.string);
     try buf.appendSlice(ctx.allocator, "\",\"content\":\"");
-    try appendJsonStr(&buf, ctx.allocator, content);
+    try appendJsonStr(&buf, ctx.allocator, file_content);
     try buf.appendSlice(ctx.allocator, "\"}");
-    return buf.toOwnedSlice(ctx.allocator);
+
+    const session_content = try buf.toOwnedSlice(ctx.allocator);
+    return types.ToolResult{
+        .session_content = session_content,
+    };
 }
 
 fn appendJsonStr(buf: *std.ArrayListAligned(u8, null), allocator: std.mem.Allocator, s: []const u8) !void {
@@ -69,13 +88,6 @@ fn appendJsonStr(buf: *std.ArrayListAligned(u8, null), allocator: std.mem.Alloca
     }
 }
 
-fn writeDisplay(ctx: types.ToolContext, name: []const u8) !void {
-    const msg = try std.fmt.allocPrint(ctx.allocator, "Loaded skill: {s}", .{name});
-    defer ctx.allocator.free(msg);
-    ctx.display_writer.print("{s}\n", .{msg}) catch {}; // display failures are non-fatal
-    ctx.display_writer.flush() catch {}; // display failures are non-fatal
-}
-
 const Io = std.Io;
 
 test "skill: missing skill error" {
@@ -88,18 +100,15 @@ test "skill: missing skill error" {
     const test_path = try std.fs.path.join(allocator, &.{ test_root });
     defer allocator.free(test_path);
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"name\":\"nonexistent\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "not found") != null);
+    var result = try execute(ctx, "{\"name\":\"nonexistent\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "not found") != null);
 }
 
 test "skill: loads skill file" {
@@ -122,17 +131,14 @@ test "skill: loads skill file" {
     defer f.close(io);
     try f.writeStreamingAll(io, "skill content here");
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"name\":\"test-skill\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "test-skill") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "skill content here") != null);
+    var result = try execute(ctx, "{\"name\":\"test-skill\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "test-skill") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "skill content here") != null);
 }

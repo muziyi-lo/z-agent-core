@@ -12,22 +12,40 @@ const MAX_BYTES: usize = 50 * 1024;
 const MAX_DIR_FILES: usize = 100;
 const BINARY_CHECK_SIZE: usize = 4096;
 
-/// Read a file or directory. Returns allocator-owned result; caller frees with ctx.allocator.
-pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u8 {
+/// Read a file or directory. Returns structured ToolResult.
+pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.ToolResult {
     const args = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        errdefer ctx.allocator.free(msg);
+        return types.ToolResult{
+            .session_content = msg,
+                    };
     };
     defer args.deinit();
 
     const path_val = args.value.object.get("path") orelse {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: missing 'path' argument", .{});
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'path' argument", .{});
+        errdefer ctx.allocator.free(msg);
+        return types.ToolResult{
+            .session_content = msg,
+                    };
     };
     if (path_val != .string) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: 'path' must be a string", .{});
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: 'path' must be a string", .{});
+        errdefer ctx.allocator.free(msg);
+        return types.ToolResult{
+            .session_content = msg,
+                    };
     }
 
     const path = path_util.resolvePath(ctx.allocator, ctx.project_root, path_val.string) catch |err| switch (err) {
-        error.PathEscape => return try std.fmt.allocPrint(ctx.allocator, "Error: path escapes project root", .{}),
+        error.PathEscape => {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Error: path escapes project root", .{});
+            errdefer ctx.allocator.free(msg);
+            return types.ToolResult{
+                .session_content = msg,
+            };
+        },
         else => return err,
     };
     defer ctx.allocator.free(path);
@@ -37,59 +55,92 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u
 
     if (Io.Dir.cwd().openDir(ctx.io, path, .{ .iterate = true })) |dir| {
         defer dir.close(ctx.io);
-        try writeDisplay(ctx, path_val.string, offset, limit);
-        return listDir(ctx, dir, offset, limit);
+        const dir_content = try listDir(ctx, dir, offset, limit);
+        return types.ToolResult{
+            .session_content = dir_content,
+        };
     } else |err| switch (err) {
         error.FileNotFound, error.NotDir, error.AccessDenied => {},
         else => return err,
     }
 
     const file = Io.Dir.cwd().openFile(ctx.io, path, .{ .mode = .read_only }) catch |err| {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: cannot open '{s}': {s}", .{ path_val.string, @errorName(err) });
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: cannot open '{s}': {s}", .{ path_val.string, @errorName(err) });
+        errdefer ctx.allocator.free(msg);
+        return types.ToolResult{
+            .session_content = msg,
+        };
     };
     defer file.close(ctx.io);
 
     const stat = file.stat(ctx.io) catch |err| {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: cannot stat '{s}': {s}", .{ path_val.string, @errorName(err) });
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: cannot stat '{s}': {s}", .{ path_val.string, @errorName(err) });
+        errdefer ctx.allocator.free(msg);
+        return types.ToolResult{
+            .session_content = msg,
+        };
     };
     const file_size: usize = @intCast(stat.size);
 
     if (file_size == 0) {
-        try writeDisplay(ctx, path_val.string, offset, limit);
-        return try std.fmt.allocPrint(ctx.allocator, "File is empty: {s}", .{path_val.string});
+        const msg = try std.fmt.allocPrint(ctx.allocator, "File is empty: {s}", .{path_val.string});
+        errdefer ctx.allocator.free(msg);
+        return types.ToolResult{
+            .session_content = msg,
+        };
     }
 
     const check_size = @min(file_size, BINARY_CHECK_SIZE);
     const head_buf = try ctx.allocator.alloc(u8, check_size);
     defer ctx.allocator.free(head_buf);
     _ = file.readPositionalAll(ctx.io, head_buf, 0) catch |err| {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: cannot read '{s}': {s}", .{ path_val.string, @errorName(err) });
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: cannot read '{s}': {s}", .{ path_val.string, @errorName(err) });
+        errdefer ctx.allocator.free(msg);
+        return types.ToolResult{
+            .session_content = msg,
+        };
     };
 
     if (isBinary(head_buf)) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: cannot read binary file '{s}'", .{path_val.string});
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: cannot read binary file '{s}'", .{path_val.string});
+        errdefer ctx.allocator.free(msg);
+        return types.ToolResult{
+            .session_content = msg,
+        };
     }
 
     if (!std.unicode.utf8ValidateSlice(head_buf)) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: file is not valid UTF-8 at '{s}'", .{path_val.string});
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: file is not valid UTF-8 at '{s}'", .{path_val.string});
+        errdefer ctx.allocator.free(msg);
+        return types.ToolResult{
+            .session_content = msg,
+        };
     }
 
     var content = try ctx.allocator.alloc(u8, file_size);
     defer ctx.allocator.free(content);
     const n = file.readPositionalAll(ctx.io, content, 0) catch |err| {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: cannot read '{s}': {s}", .{ path_val.string, @errorName(err) });
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: cannot read '{s}': {s}", .{ path_val.string, @errorName(err) });
+        errdefer ctx.allocator.free(msg);
+        return types.ToolResult{
+            .session_content = msg,
+        };
     };
     content = content[0..n];
 
-    try writeDisplay(ctx, path_val.string, offset, limit);
-
     const result = try readLines(ctx.allocator, content, offset, limit);
+
     if (result.len > MAX_BYTES) {
-        defer ctx.allocator.free(result);
         const truncated = result[0..MAX_BYTES];
-        return try std.fmt.allocPrint(ctx.allocator, "{s}\n[truncated: {d} more bytes]", .{ truncated, result.len - MAX_BYTES });
+        const content_with_note = try std.fmt.allocPrint(ctx.allocator, "{s}\n[truncated: {d} more bytes]", .{ truncated, result.len - MAX_BYTES });
+        ctx.allocator.free(result);
+        return types.ToolResult{
+            .session_content = content_with_note,
+        };
     }
-    return result;
+    return types.ToolResult{
+        .session_content = result,
+    };
 }
 
 fn isBinary(data: []const u8) bool {
@@ -166,16 +217,6 @@ fn listDir(ctx: types.ToolContext, dir: Io.Dir, offset: usize, limit: ?usize) ![
     return buf.toOwnedSlice(ctx.allocator);
 }
 
-fn writeDisplay(ctx: types.ToolContext, path_val: []const u8, offset: usize, limit: ?usize) !void {
-    const msg = if (limit) |l|
-        try std.fmt.allocPrint(ctx.allocator, "Read {s} [limit={d}, offset={d}]", .{ path_val, l, offset })
-    else
-        try std.fmt.allocPrint(ctx.allocator, "Read {s}", .{path_val});
-    defer ctx.allocator.free(msg);
-    ctx.display_writer.print("{s}\n", .{msg}) catch {}; // display failures are non-fatal
-    ctx.display_writer.flush() catch {}; // display failures are non-fatal
-}
-
 const Io = std.Io;
 
 test "read: reads text file" {
@@ -195,19 +236,18 @@ test "read: reads text file" {
     defer file.close(io);
     try file.writeStreamingAll(io, "hello\nworld\n");
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
+
+
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"path\":\"test_read.txt\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "hello") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "world") != null);
+    var result = try execute(ctx, "{\"path\":\"test_read.txt\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "hello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "world") != null);
 }
 
 test "read: detects binary" {
@@ -228,18 +268,17 @@ test "read: detects binary" {
     defer file.close(io);
     try file.writeStreamingAll(io, &data);
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
+
+
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"path\":\"test_binary.bin\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "binary") != null);
+    var result = try execute(ctx, "{\"path\":\"test_binary.bin\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "binary") != null);
 }
 
 test "read: directory listing" {
@@ -264,19 +303,18 @@ test "read: directory listing" {
         (try Io.Dir.cwd().createFile(io, p, .{})).close(io);
     }
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
+
+
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"path\":\".\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "foo.txt") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "bar.txt") != null);
+    var result = try execute(ctx, "{\"path\":\".\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "foo.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "bar.txt") != null);
 }
 
 test "read: offset/limit range" {
@@ -296,21 +334,20 @@ test "read: offset/limit range" {
     defer file.close(io);
     try file.writeStreamingAll(io, "line1\nline2\nline3\nline4\n");
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
+
+
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"path\":\"test_lines.txt\",\"offset\":2,\"limit\":2}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "line1") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "line2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "line3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "line4") == null);
+    var result = try execute(ctx, "{\"path\":\"test_lines.txt\",\"offset\":2,\"limit\":2}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "line1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "line2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "line3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "line4") == null);
 }
 
 test "read: missing path" {
@@ -324,18 +361,17 @@ test "read: missing path" {
     const test_path = try std.fs.path.join(allocator, &.{ test_root });
     defer allocator.free(test_path);
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
+
+
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "missing") != null);
+    var result = try execute(ctx, "{}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "missing") != null);
 }
 
 test "read: path escape rejected" {
@@ -349,18 +385,17 @@ test "read: path escape rejected" {
     const test_path = try std.fs.path.join(allocator, &.{ test_root });
     defer allocator.free(test_path);
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
+
+
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"path\":\"../outside\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "escapes") != null);
+    var result = try execute(ctx, "{\"path\":\"../outside\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "escapes") != null);
 }
 
 test "read: empty file" {
@@ -378,16 +413,15 @@ test "read: empty file" {
     defer allocator.free(file_path);
     (try Io.Dir.cwd().createFile(io, file_path, .{})).close(io);
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
+
+
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"path\":\"test_empty.txt\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "empty") != null);
+    var result = try execute(ctx, "{\"path\":\"test_empty.txt\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "empty") != null);
 }

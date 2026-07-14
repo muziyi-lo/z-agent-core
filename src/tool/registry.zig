@@ -12,23 +12,25 @@ pub const ToolEntry = struct {
     name: []const u8,
     description: []const u8,
     params: []const u8,
-    /// Returns allocator-owned result slice; caller must free with ctx.allocator.
-    execute: *const fn (ctx: types.ToolContext, args: []const u8) anyerror![]const u8,
+    execute: *const fn (ctx: types.ToolContext, args: []const u8) anyerror!types.ToolResult,
 };
 
 /// Tool registry dispatched by name. Holds compile-time array of ToolEntry.
 pub const Registry = struct {
     handlers: []const ToolEntry,
 
-    /// Look up tool by name and execute. Unknown names return error string.
-    /// Returns ctx.allocator-owned slice; caller must free.
-    pub fn execute(self: Registry, ctx: types.ToolContext, name: []const u8, args_json: []const u8) anyerror![]const u8 {
+    /// Look up tool by name and execute. Returns ToolResult (caller must deinit).
+    pub fn execute(self: Registry, ctx: types.ToolContext, name: []const u8, args_json: []const u8) anyerror!types.ToolResult {
         for (self.handlers) |h| {
             if (std.mem.eql(u8, h.name, name)) {
                 return h.execute(ctx, args_json);
             }
         }
-        return try std.fmt.allocPrint(ctx.allocator, "Error: unknown tool '{s}'", .{name});
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: unknown tool '{s}'", .{name});
+        errdefer ctx.allocator.free(msg);
+        return types.ToolResult{
+            .session_content = msg,
+        };
     }
 
     /// Convert handlers to Tool array for OpenAI API. Caller owns returned slice.
@@ -66,18 +68,15 @@ test "registry: match and execute" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    var dbuf: [256]u8 = undefined;
-    var dw: std.Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = ".",
-        .display_writer = &dw.interface,
     };
 
-    const result = try reg.execute(ctx, "read", "{}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "missing") != null);
+    var result = try reg.execute(ctx, "read", "{}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "missing") != null);
 }
 
 test "registry: unknown tool error" {
@@ -86,18 +85,15 @@ test "registry: unknown tool error" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
-    var dbuf: [256]u8 = undefined;
-    var dw: std.Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = ".",
-        .display_writer = &dw.interface,
     };
 
-    const result = try reg.execute(ctx, "nonexistent", "{}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "unknown") != null);
+    var result = try reg.execute(ctx, "nonexistent", "{}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "unknown") != null);
 }
 
 test "registry: toTools generates array" {

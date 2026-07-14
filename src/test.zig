@@ -14,5 +14,5 @@ test {
     _ = @import("util/path.zig");
     _ = @import("util/signal.zig");
     _ = @import("toml.zig");
-    _ = @import("render/cli.zig");
+    _ = @import("frontends/cli/render.zig");
 }

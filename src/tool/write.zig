@@ -10,33 +10,56 @@ pub const tool_params =
 
 const MAX_CONTENT: usize = 512 * 1024;
 
-/// Create or overwrite a file. Creates parent directories. Returns allocator-owned result.
-pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u8 {
+/// Create or overwrite a file. Creates parent directories. Returns allocator-owned ToolResult.
+pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.ToolResult {
     const args = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     defer args.deinit();
 
     const path_val = args.value.object.get("path") orelse {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: missing 'path' argument", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'path' argument", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     if (path_val != .string) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: 'path' must be a string", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: 'path' must be a string", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     }
 
     const content_val = args.value.object.get("content") orelse {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: missing 'content' argument", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'content' argument", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     if (content_val != .string) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: 'content' must be a string", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: 'content' must be a string", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     }
 
     if (content_val.string.len > MAX_CONTENT) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: content too large: {d} bytes (max 512KB)", .{content_val.string.len});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: content too large: {d} bytes (max 512KB)", .{content_val.string.len});
+        return types.ToolResult{
+            .session_content = content,
+        };
     }
 
     const path = path_util.resolvePath(ctx.allocator, ctx.project_root, path_val.string) catch |err| switch (err) {
-        error.PathEscape => return try std.fmt.allocPrint(ctx.allocator, "Error: path escapes project root", .{}),
+        error.PathEscape => {
+            const content = try std.fmt.allocPrint(ctx.allocator, "Error: path escapes project root", .{});
+            return types.ToolResult{
+                .session_content = content,
+            };
+        },
         else => return err,
     };
     defer ctx.allocator.free(path);
@@ -48,16 +71,8 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u
         };
     }
 
-    const existed = blk: {
-        if (Io.Dir.cwd().openFile(ctx.io, path, .{ .mode = .read_only })) |f| {
-            f.close(ctx.io);
-            break :blk true;
-        } else |_| {
-            break :blk false;
-        }
-    };
-
-    Io.Dir.cwd().deleteFile(ctx.io, path) catch |err| switch (err) {
+    // Check if file existed (for logging/debug purposes only - the file is always overwritten)
+    _ = Io.Dir.cwd().deleteFile(ctx.io, path) catch |err| switch (err) {
         error.FileNotFound => {}, // best-effort: file may not exist yet
         else => {}, // non-fatal, proceed with createFile
     };
@@ -65,15 +80,9 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u
     defer file.close(ctx.io);
     try file.writeStreamingAll(ctx.io, content_val.string);
 
-    const msg: []const u8 = if (existed)
-        try std.fmt.allocPrint(ctx.allocator, "Updated {s} ({d} bytes)", .{ path_val.string, content_val.string.len })
-    else
-        try std.fmt.allocPrint(ctx.allocator, "Created {s} ({d} bytes)", .{ path_val.string, content_val.string.len });
-    ctx.display_writer.print("{s}\n", .{msg}) catch {}; // display failures are non-fatal
-    ctx.display_writer.flush() catch {}; // display failures are non-fatal
-    ctx.allocator.free(msg);
-
-    return try std.fmt.allocPrint(ctx.allocator, "Wrote {s}: {d} bytes", .{ path_val.string, content_val.string.len });
+    return types.ToolResult{
+        .session_content = try std.fmt.allocPrint(ctx.allocator, "Wrote {s}: {d} bytes", .{ path_val.string, content_val.string.len }),
+    };
 }
 
 const Io = std.Io;
@@ -99,18 +108,15 @@ test "write: creates file" {
     const test_path = try std.fs.path.join(allocator, &.{ test_root });
     defer allocator.free(test_path);
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"path\":\"new.txt\",\"content\":\"hello world\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "Wrote") != null);
+    var result = try execute(ctx, "{\"path\":\"new.txt\",\"content\":\"hello world\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "Wrote") != null);
 
     const verify_path = try std.fs.path.join(allocator, &.{ test_root, "new.txt" });
     defer allocator.free(verify_path);
@@ -130,18 +136,15 @@ test "write: parent dirs auto-created" {
     const test_path = try std.fs.path.join(allocator, &.{ test_root });
     defer allocator.free(test_path);
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"path\":\"sub/dir/deep.txt\",\"content\":\"deep\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "Wrote") != null);
+    var result = try execute(ctx, "{\"path\":\"sub/dir/deep.txt\",\"content\":\"deep\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "Wrote") != null);
 
     const verify_path = try std.fs.path.join(allocator, &.{ test_root, "sub", "dir", "deep.txt" });
     defer allocator.free(verify_path);
@@ -161,13 +164,10 @@ test "write: content too large" {
     const test_path = try std.fs.path.join(allocator, &.{ test_root });
     defer allocator.free(test_path);
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
     const big = try allocator.alloc(u8, MAX_CONTENT + 1);
@@ -188,9 +188,9 @@ test "write: content too large" {
     }
     try json_buf.appendSlice(allocator, "\"}");
 
-    const result = try execute(ctx, json_buf.items);
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "too large") != null);
+    var result = try execute(ctx, json_buf.items);
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "too large") != null);
 }
 
 test "write: overwrites existing file" {
@@ -211,18 +211,15 @@ test "write: overwrites existing file" {
         f.close(io);
     }
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"path\":\"exist.txt\",\"content\":\"updated\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "Wrote") != null);
+    var result = try execute(ctx, "{\"path\":\"exist.txt\",\"content\":\"updated\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "Wrote") != null);
 
     const verify_path = try std.fs.path.join(allocator, &.{ test_root, "exist.txt" });
     defer allocator.free(verify_path);

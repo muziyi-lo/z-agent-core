@@ -112,6 +112,25 @@ pub const Session = struct {
             const tool_call_id: ?[]const u8 = if (obj.get("tool_call_id")) |v| if (v == .string) try arena.dupe(u8, v.string) else null else null;
             const ts = if (obj.get("timestamp")) |v| if (v == .integer) @as(i64, @intCast(v.integer)) else @as(i64, 0) else @as(i64, 0);
             const msg_model: ?[]const u8 = if (obj.get("model")) |v| if (v == .string) try arena.dupe(u8, v.string) else null else null;
+            const usage: ?types.TokenUsage = if (obj.get("usage")) |u_val| blk: {
+                if (u_val == .object) {
+                    const u = u_val.object;
+                    if (u.get("input")) |in_val| {
+                        if (u.get("output")) |out_val| {
+                            if (u.get("total")) |tot_val| {
+                                if (in_val != .null and out_val != .null and tot_val != .null) {
+                                    break :blk .{
+                                        .input = @intCast(in_val.integer),
+                                        .output = @intCast(out_val.integer),
+                                        .total = @intCast(tot_val.integer),
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+                break :blk null;
+            } else null;
 
             try self._messages.append(arena, .{
                 .role = role,
@@ -120,6 +139,7 @@ pub const Session = struct {
                 .tool_call_id = tool_call_id,
                 .timestamp = ts,
                 .model = msg_model,
+                .usage = usage,
             });
         }
 
@@ -227,6 +247,31 @@ pub const Session = struct {
             _ = dw.interface.writeAll(msg) catch {};
             _ = dw.interface.flush() catch {};
         }
+    }
+
+    /// Write current session messages to a JSONL file. Does not change internal path.
+    /// Uses temp-then-rename for atomicity.
+    pub fn writeTo(self: *Session, file_path: []const u8, io: Io) !void {
+        const arena = self._arena.allocator();
+        const cwd = Io.Dir.cwd();
+
+        const tmp_path = try std.fmt.allocPrint(arena, "{s}.tmp", .{file_path});
+        defer cwd.deleteFile(io, tmp_path) catch {};
+
+        {
+            const file = try cwd.createFile(io, tmp_path, .{});
+            defer file.close(io);
+
+            try writeHeader(arena, io, file, self.name, self.model);
+            for (self._messages.items) |msg| {
+                var buf = std.array_list.Managed(u8).init(arena);
+                defer buf.deinit();
+                try serializeMessage(&buf, msg);
+                try file.writeStreamingAll(io, buf.items);
+            }
+        }
+
+        try Io.Dir.rename(cwd, tmp_path, cwd, file_path, io);
     }
 
     /// Rename session and corresponding JSONL file. Creates new file, keeps old.
@@ -415,6 +460,22 @@ fn serializeMessage(buf: *std.array_list.Managed(u8), msg: types.Message) !void 
         var ts_buf: [32]u8 = undefined;
         const ts_str = try std.fmt.bufPrint(&ts_buf, ",\"timestamp\":{d}", .{msg.timestamp});
         try buf.appendSlice(ts_str);
+    }
+
+    if (msg.usage) |u| {
+        try buf.appendSlice(",\"usage\":{\"input\":");
+        var in_buf: [16]u8 = undefined;
+        const in_s = try std.fmt.bufPrint(&in_buf, "{d}", .{u.input});
+        try buf.appendSlice(in_s);
+        try buf.appendSlice(",\"output\":");
+        var out_buf: [16]u8 = undefined;
+        const out_s = try std.fmt.bufPrint(&out_buf, "{d}", .{u.output});
+        try buf.appendSlice(out_s);
+        try buf.appendSlice(",\"total\":");
+        var tot_buf: [16]u8 = undefined;
+        const tot_s = try std.fmt.bufPrint(&tot_buf, "{d}", .{u.total});
+        try buf.appendSlice(tot_s);
+        try buf.appendSlice("}");
     }
 
     try buf.appendSlice("}\n");

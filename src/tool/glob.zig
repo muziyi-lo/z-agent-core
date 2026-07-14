@@ -11,18 +11,27 @@ pub const tool_params =
 const MAX_OUTPUT: usize = 50 * 1024;
 const MAX_ENTRIES: usize = 1000;
 
-/// Find files matching a glob pattern. Supports recursive **. Returns allocator-owned result.
-pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u8 {
+/// Find files matching a glob pattern. Supports recursive **. Returns allocator-owned ToolResult.
+pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.ToolResult {
     const args = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     defer args.deinit();
 
     const pattern_val = args.value.object.get("pattern") orelse {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: missing 'pattern' argument", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'pattern' argument", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     if (pattern_val != .string or pattern_val.string.len == 0) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: 'pattern' must be a non-empty string", .{});
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: 'pattern' must be a non-empty string", .{});
+        return types.ToolResult{
+            .session_content = content,
+        };
     }
 
     const path_arg: []const u8 = if (args.value.object.get("path")) |p|
@@ -31,13 +40,21 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u
         ".";
 
     const resolved = path_util.resolvePath(ctx.allocator, ctx.project_root, path_arg) catch |err| switch (err) {
-        error.PathEscape => return try std.fmt.allocPrint(ctx.allocator, "Error: path escapes project root", .{}),
+        error.PathEscape => {
+            const content = try std.fmt.allocPrint(ctx.allocator, "Error: path escapes project root", .{});
+            return types.ToolResult{
+                .session_content = content,
+            };
+        },
         else => return err,
     };
     defer ctx.allocator.free(resolved);
 
     const dir = Io.Dir.cwd().openDir(ctx.io, resolved, .{ .iterate = true }) catch |err| {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: cannot open directory '{s}': {s}", .{ path_arg, @errorName(err) });
+        const content = try std.fmt.allocPrint(ctx.allocator, "Error: cannot open directory '{s}': {s}", .{ path_arg, @errorName(err) });
+        return types.ToolResult{
+            .session_content = content,
+        };
     };
     defer dir.close(ctx.io);
 
@@ -47,16 +64,20 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror![]const u
 
     try walkDir(ctx, &buf, dir, pattern_val.string, path_arg, &count, &truncated);
 
-    try writeDisplay(ctx, pattern_val.string, count);
-
     if (count == 0) {
-        return try std.fmt.allocPrint(ctx.allocator, "No files matched '{s}' in {s}", .{ pattern_val.string, path_arg });
+        const msg = try std.fmt.allocPrint(ctx.allocator, "No files matched '{s}' in {s}", .{ pattern_val.string, path_arg });
+        return types.ToolResult{
+            .session_content = msg,
+        };
     }
     if (truncated) {
         try buf.appendSlice(ctx.allocator, "[truncated]\n");
     }
 
-    return buf.toOwnedSlice(ctx.allocator);
+    const session_content = try buf.toOwnedSlice(ctx.allocator);
+    return types.ToolResult{
+        .session_content = session_content,
+    };
 }
 
 fn walkDir(ctx: types.ToolContext, buf: *std.ArrayListAligned(u8, null), dir: Io.Dir, pattern: []const u8, prefix: []const u8, count: *usize, truncated: *bool) !void {
@@ -121,13 +142,6 @@ fn globMatch(name: []const u8, pattern: []const u8) bool {
     return pi == pattern.len;
 }
 
-fn writeDisplay(ctx: types.ToolContext, pattern: []const u8, count: usize) !void {
-    const msg = try std.fmt.allocPrint(ctx.allocator, "glob \"{s}\" -> {d} matches", .{ pattern, count });
-    defer ctx.allocator.free(msg);
-    ctx.display_writer.print("{s}\n", .{msg}) catch {}; // display failures are non-fatal
-    ctx.display_writer.flush() catch {}; // display failures are non-fatal
-}
-
 const Io = std.Io;
 
 test "glob: finds files by extension" {
@@ -151,19 +165,16 @@ test "glob: finds files by extension" {
         (try Io.Dir.cwd().createFile(io, p, .{})).close(io);
     }
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"pattern\":\"*.zig\",\"path\":\".\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "a.zig") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "b.txt") == null);
+    var result = try execute(ctx, "{\"pattern\":\"*.zig\",\"path\":\".\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "a.zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "b.txt") == null);
 }
 
 test "glob: no matches" {
@@ -176,16 +187,13 @@ test "glob: no matches" {
     const test_path = try std.fs.path.join(allocator, &.{ test_root });
     defer allocator.free(test_path);
 
-    var dbuf: [256]u8 = undefined;
-    var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
     const ctx = types.ToolContext{
         .allocator = allocator,
         .io = io,
         .project_root = test_path,
-        .display_writer = &dw.interface,
     };
 
-    const result = try execute(ctx, "{\"pattern\":\"*.xyz\",\"path\":\".\"}");
-    defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "No files") != null);
+    var result = try execute(ctx, "{\"pattern\":\"*.xyz\",\"path\":\".\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "No files") != null);
 }
