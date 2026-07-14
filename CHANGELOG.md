@@ -45,7 +45,7 @@
 - `tool/bash.zig`：`action` 字段包含完整命令字符串（可能极长）→ 截断到 60 字符
 - `tool/grep.zig, write.zig, glob.zig, skill.zig`：`summary` 错误路径 echo raw `args_json` → 改为 null
 
-- **Frontend 显示间隙**（PLAN-DISPLAY-GAPS.md）
+- **Frontend 显示间隙**（PLAN-OPT-2-DISPLAY-GAPS.md）
   - `frontends/cli/render.zig`：`labelFromValue` grep/glob 同时显示 pattern + path（`Grep "pattern" path` / `Glob pattern [path]`）
   - `frontends/cli/render.zig`：所有 6 个工具的标签统一显示工具名前缀（`Read`/`Write`/`$`/`Grep`/`Glob`/`Skill`）
   - `core/agent.zig`：达到 `max_tool_rounds` 时向 session 追加 system 消息告知 LLM 约束
@@ -64,7 +64,7 @@
 - **配置模板**：`DEFAULT_TEMPLATE` 添加完整字段注释、`params_json` 格式说明、Ollama 添加示例、损坏恢复提示
 
 ### Refactored
-- `documentation`：`CORE-FRONTEND.md`（前后端分离架构规范）、`PLAN-PHASE2.md`（Phase 2 实施规格）、`PLAN-TOOLRESULT-SPLIT.md`（数据-展示分离方案）、`PLAN-DISPLAY-GAPS.md`（前端显示间隙修复方案）、`REMAINING.md`（剩余工作跟踪）
+- `documentation`：`CORE-FRONTEND.md`（前后端分离架构规范）、`PLAN-PHASE2.md`（Phase 2 实施规格）、`PLAN-OPT-1-TOOLRESULT-SPLIT.md`（数据-展示分离方案）、`PLAN-OPT-2-DISPLAY-GAPS.md`（前端显示间隙修复方案）、`REMAINING.md`（剩余工作跟踪）
 - `core/agent.zig`：移除 `tool_display` 死字段；`ToolDisplayCb.render` 不再传递 `ToolResult`
 - 消除 `core/ → util/` 目录级 BIDIR（agent.zig 不再 import signal.zig）
 - 文档同步：`CORE-FRONTEND.md` ToolDisplayCb 签名更新为当前解构参数；`PLAN-PHASE2.md` 修正 6 处过时行号引用；`render.zig` 移除 `stdout_dead` 残留注释

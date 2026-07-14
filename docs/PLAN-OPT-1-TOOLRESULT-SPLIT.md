@@ -1,4 +1,23 @@
-# Plan: ToolResult display-data separation
+# Plan OPT-1: ToolResult display-data separation
+
+## 状态: ✅ 已完成
+
+## 前置依赖
+
+| 阻塞者 | 状态 | 被阻塞 |
+|--------|------|--------|
+| — | — | OPT-3 (ToolMeta) 在 OPT-1 基础上前进 |
+
+OPT-1 建立了 core/frontend 分离方向，OPT-3 在此基础上加结构化 meta。
+
+## 不做
+
+| 项 | 理由 |
+|----|------|
+| DisplayHint (v2) | `ToolMeta` union 耦合 types.zig 到每个工具类型，OPT-3 已开始处理 |
+| ToolResult 回退到含 action/summary | 已完成的分离方向不回退 |
+
+---
 
 ## Problem
 
@@ -20,7 +39,6 @@ The frontend should decide what to show, using structured data from the tool. Th
 
 ```zig
 pub const ToolResult = struct {
-    session_content: []const u8,   // full content for LLM context
     /// Content for the LLM context. Must be allocated with the caller's allocator
     /// (ctx.allocator in tools). Never return static strings — the caller frees this
     /// via deinit with the same allocator.
@@ -78,18 +96,18 @@ The frontend receives `had_error: bool` instead of the full `ToolResult`. This p
 
 | File | Change |
 |------|--------|
-| `types.zig` | Remove `action`, `summary` from ToolResult; keep `session_content`, add `err_msg: ?[]const u8` |
-| `core/agent.zig` | ToolDisplayCb.render: pass `tool_name`, `tool_args`, `had_error`; call site passes `tc.name`, `tc.arguments`, `exec_result` err status |
-| `core/agent.zig` | runTurn: pass tc.name + tc.arguments to callback |
-| `core/agent.zig` | ToolHooks.after: update to new ToolResult fields (err_msg instead of inspecting content) |
-| `frontends/cli/render.zig` | ToolDisplay.renderCb + render: add tool_name/tool_args params; build display from args |
-| `tool/read.zig` | Remove action/summary allocations; set err_msg on failure |
-| `tool/write.zig` | Same |
-| `tool/bash.zig` | Same; drop shortCmd helper |
-| `tool/grep.zig` | Same |
-| `tool/glob.zig` | Same |
-| `tool/skill.zig` | Same |
-| `tool/registry.zig` | Same for unknown-tool path |
+| `src/types.zig` | Remove `action`, `summary` from ToolResult; keep `session_content`, add `err_msg: ?[]const u8` |
+| `src/core/agent.zig` | ToolDisplayCb.render: pass `tool_name`, `tool_args`, `had_error`; call site passes `tc.name`, `tc.arguments`, `exec_result` err status |
+| `src/core/agent.zig` | runTurn: pass tc.name + tc.arguments to callback |
+| `src/core/agent.zig` | ToolHooks.after: update to new ToolResult fields (err_msg instead of inspecting content) |
+| `src/frontends/cli/render.zig` | ToolDisplay.renderCb + render: add tool_name/tool_args params; build display from args |
+| `src/tool/read.zig` | Remove action/summary allocations; set err_msg on failure |
+| `src/tool/write.zig` | Same |
+| `src/tool/bash.zig` | Same; drop shortCmd helper |
+| `src/tool/grep.zig` | Same |
+| `src/tool/glob.zig` | Same |
+| `src/tool/skill.zig` | Same |
+| `src/tool/registry.zig` | Same for unknown-tool path |
 
 ## Frontend display mapping
 

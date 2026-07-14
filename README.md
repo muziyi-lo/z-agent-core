@@ -139,7 +139,7 @@ Add a tool: `tool/xxx.zig` + 1 line in `registry.zig` `buildRegistry()`.
 |------|---------|
 | `docs/CORE-FRONTEND.md` | Core definition, frontend integration, Phase 0/1/2 plan, architecture comparison with Pi Agent |
 | `docs/PLAN-PHASE2.md` | Phase 2 spec + implementation status: hooks, abort, lifecycle, TokenUsage, /fork |
-| `docs/PLAN-TOOLRESULT-SPLIT.md` | ToolResult data-display separation plan |
+| `docs/PLAN-OPT-1-TOOLRESULT-SPLIT.md` | ToolResult data-display separation plan |
 | `docs/0.0.1-alpha/` | v0.0.1-alpha step-by-step design docs (8 files) |
 
 ## Vibe Coding insights

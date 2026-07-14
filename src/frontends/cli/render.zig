@@ -393,20 +393,27 @@ pub const ToolDisplay = struct {
         }
 
         pub fn render(self: *ToolDisplay, tool_name: []const u8, args_json: []const u8, had_error: bool, user_output: ?[]const u8) anyerror!void {
-            _ = had_error;
             writeToolLabelOpen(self.writer);
 
             const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
                 self.writer.print("{s}", .{tool_name}) catch |err| return err;
+                if (had_error and colorize) self.writer.print("{s}", .{C.red}) catch |err| return err;
+                if (had_error) self.writer.print(" (err)", .{}) catch |err| return err;
                 writeToolLabelClose(self.writer);
                 return;
             };
             defer parsed.deinit();
 
             const label = labelFromValue(tool_name, parsed.value);
-            self.writer.print("{s}", .{label}) catch |err| {
-                return err;
-            };
+            if (had_error and colorize) {
+                self.writer.print("{s}{s}", .{ C.red, label }) catch |err| return err;
+            } else {
+                self.writer.print("{s}", .{label}) catch |err| return err;
+            }
+
+            if (had_error) {
+                self.writer.print(" (err)", .{}) catch |err| return err;
+            }
 
             writeToolLabelClose(self.writer);
 

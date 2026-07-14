@@ -1,4 +1,25 @@
-# Fix: Frontend display gaps
+# Plan OPT-2: Frontend display gaps
+
+## 状态: 部分完成
+
+| # | 状态 |
+|---|------|
+| 1-4 | ✅ 已实施 |
+| 5 | ⏳ 待实施 |
+
+## 前置依赖
+
+| 阻塞者 | 状态 | 被阻塞 |
+|--------|------|--------|
+| — | — | 无。所有改动独立，不阻塞其他方案 |
+
+## 不做
+
+| 项 | 理由 |
+|----|------|
+| 工具输出结构化 | OPT-3 已覆盖 |
+
+---
 
 ## 1. grep/glob label incomplete
 
@@ -117,11 +138,56 @@ Only one callback implementation exists (`render.zig:ToolDisplay.renderCb`). Thr
 
 | File | Change |
 |------|--------|
-| `core/agent.zig` | `ToolDisplayCb.render`: add `user_output: ?[]const u8` param; call site passes `ok.user_output` |
-| `frontends/cli/render.zig` | `ToolDisplay.renderCb` + `render`: add param; print after label if non-null |
-| `tool/bash.zig` | Set `.user_output` to `session_content[0..@min(len, 4096)]` (zero-copy view) |
+| `src/core/agent.zig` | `ToolDisplayCb.render`: add `user_output: ?[]const u8` param; call site passes `ok.user_output` |
+| `src/frontends/cli/render.zig` | `ToolDisplay.renderCb` + `render`: add param; print after label if non-null |
+| `src/tool/bash.zig` | Set `.user_output` to `session_content[0..@min(len, 4096)]` (zero-copy view) |
 
 No other tool files change — `user_output` defaults to null.
+
+## 4. Tool error display
+
+### Current
+`ToolDisplay.render` 接收 `had_error: bool` 但忽略（`_ = had_error`）。工具执行失败时无任何视觉提示。
+
+### Fix (render.zig: render)
+当 `had_error` 为 true 时：标签文字变红 + 追加 ` (err)` 后缀。
+
+```zig
+// render.zig: ToolDisplay.render
+if (had_error and colorize) {
+    self.writer.print("{s}{s}", .{ C.red, label }) catch |err| return err;
+} else {
+    self.writer.print("{s}", .{label}) catch |err| return err;
+}
+if (had_error) {
+    self.writer.print(" (err)", .{}) catch |err| return err;
+}
+```
+
+JSON 解析失败路径同理。
+
+## 5. Thinking content Markdown rendering conflicts
+
+### Current
+`writeLabeled(.think)` 用 `{dim}` 包裹整行思考内容，但 `PhaseWriter` 对思考内容仍然走 `renderLine` 进行 Markdown→ANSI 渲染。当思考中出现 ` ``` ` 时：
+
+```
+思考内容: {dim}{dim}```{reset}  ← renderLine 注入 {dim}code{reset}
+                                     ↑ 内部 reset 打破外层 dim
+```
+
+后续思考文字丢失 dim 效果。标题、粗体等 Markdown 语法的嵌套 ANSI 码同样与思考的外层 dim 冲突。
+
+### Fix (render.zig)
+思考内容放弃 Markdown 渲染，直接输出纯文本 + dim 颜色。理由：
+
+- 思考是模型的内部独白，不是格式化输出
+- ` ``` ` 是思维过程中的伪代码片段，不应作为真实代码块渲染
+- 纯文本输出避免 ANSI 嵌套冲突，更简洁
+
+### 改动
+- `PhaseWriter`：思考阶段输出的文本跳过 `renderLine`，直接 `writeRaw`（dim 包裹的纯文本）
+- 或 `renderLine` 新增参数 `is_thinking: bool`，思考内容时返回纯文本
 
 ## Scope
 
@@ -129,4 +195,6 @@ No other tool files change — `user_output` defaults to null.
 |-----|-------|------|
 | grep/glob label | render.zig | Low |
 | round warning | App.zig | Low |
-| bash output | types.zig + agent.zig + render.zig + bash.zig | Medium — adds field + callback param |
+| bash output | src/types.zig + src/core/agent.zig + src/frontends/cli/render.zig + src/tool/bash.zig | Medium — adds field + callback param |
+| tool error display | render.zig | Low |
+| thinking no markdown | render.zig | Low |
