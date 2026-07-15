@@ -117,10 +117,10 @@ pub fn listAvailableSkills(allocator: std.mem.Allocator, io: std.Io, project_roo
             desc = d;
         }
 
-        try list.append(allocator, .{
-            .name = try allocator.dupe(u8, entry.name),
-            .description = try allocator.dupe(u8, desc),
-        });
+        const duped_name = try allocator.dupe(u8, entry.name);
+        errdefer allocator.free(duped_name);
+        const duped_desc = try allocator.dupe(u8, desc);
+        try list.append(allocator, .{ .name = duped_name, .description = duped_desc });
     }
     return list.toOwnedSlice(allocator);
 }

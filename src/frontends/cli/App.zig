@@ -625,6 +625,7 @@ fn buildSystemPrompt(
     var final_prompt: []const u8 = prompt;
     if (skills.len > 0) {
         var skills_buf = std.ArrayListAligned(u8, null).empty;
+        errdefer skills_buf.deinit(allocator);
         try skills_buf.appendSlice(allocator, prompt);
         try skills_buf.appendSlice(allocator, "\n<available_skills>\n");
         for (skills) |s| {
@@ -632,7 +633,6 @@ fn buildSystemPrompt(
             defer allocator.free(line);
             try skills_buf.appendSlice(allocator, line);
         }
-        defer allocator.free(skills_buf.items);
         try skills_buf.appendSlice(allocator, "</available_skills>\n");
         final_prompt = try skills_buf.toOwnedSlice(allocator);
     }

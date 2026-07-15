@@ -1,6 +1,15 @@
 # Plan OPT-4: Agent 初始化与会话管理优化
 
-## 状态: 计划中
+## 状态: ✅ 已完成 (2026-07-15)
+
+## 实施偏差
+
+| 项 | 说明 |
+|----|------|
+| `session_ops.zig` 路由 `src/` 而非 `src/app/` | 当前仅一个共享文件，不建目录（符合计划） |
+| `sanitizeForkName` 保留为 App 包装 | App 仍持有轻量 wrapper 委托给 session_ops（避免改调用处） |
+| `parseFrontmatterField` 用 `indexOfPosLinear` 匹配 `---` | 精度有限但覆盖实际 frontmatter 格式 |
+| `base_prompt` 可选字段 | 不设置则用编译期 `BASE_PROMPT` 常量 |
 
 ## 前置依赖
 
