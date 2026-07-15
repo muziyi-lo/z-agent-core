@@ -3,9 +3,11 @@
 ## 实施顺序
 
 ```
-OPT-4 (session ops + prompt + skill)  ← 先做
+OPT-5 (稳定.AP")  ← 先做：运行时健壮性
     ↓
-新前端 (TUI/Web)  ← 依赖 OPT-4 完成
+OPT-4 (session ops + prompt + skill)  ← 会话管理
+    ↓
+新前端 (TUI/Web)  ← 依赖 OPT-4+5 完成
     ↓
 webfetch  ← 新工具，独立
 ```
@@ -31,12 +33,13 @@ webfetch  ← 新工具，独立
 | # | Item | Plan doc | Effort |
 |---|------|----------|--------|
 | I3 | Agent 初始化 + 会话管理优化 (session_ops, prompt, skill injection) | PLAN-OPT-4-AGENT-SESSION.md | High |
+| I4 | 运行时稳定性 (上下文压缩 + API重试 + 死循环 + 工具上下文 + 每步重组) | PLAN-OPT-5-STABILITY.md | High |
 
 ## Deferred (explicitly skipped)
 
 | # | Item | Reason |
 |---|------|--------|
-| R1 | compact.zig (Phase 2F) | Optional; summary-based context compression as a tool |
+| R1 | compact.zig (Phase 2F) | **→ OPT-5 P0-1** — 上下文压缩作为运行时健壮性核心项 |
 | R2 | DisplayHint (v2 tool metadata) | OPT-3 已覆盖 — ToolMeta 替代 |
 | R3 | Tool event streaming (start/update/end) | Requires significant protocol change |
 | R4 | Edit 模糊匹配 | 待 opencode 实现后跟进 |
