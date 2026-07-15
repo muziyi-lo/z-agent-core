@@ -1,8 +1,21 @@
 # Plan OPT-3: 工具输出结构化（ToolResult + ToolMeta）
 
-## 状态: 计划中
+## 状态: ✅ 已实施 (2026-07-15)
 
-## 前置依赖
+## 实施偏差
+
+| 计划项 | 状态 | 说明 |
+|--------|------|------|
+| grep regex (`std.regex.Regex`) | ❌ 延后 | Zig 0.16 标准库无 regex 模块。方案文档假设 `std.regex.Regex` 可用为误判。代码保持 `std.mem.indexOf` 子串匹配 |
+| ToolCard 渲染解耦表 | ❌ 延后 | `toolMetaLabel()` 已通过 switch 实现等效功能。ToolCard 表解耦属可选重构 |
+| toTools schema 缓存 | ❌ 延后 | 6-7 个工具的 `toTools` 开销极小，缓存收益微 |
+| config.zig ToolLimits | ❌ 延后 | 与 OPT-4 共享字段，延至 OPT-4 实施 |
+| write.zig old_lines 真实值 | ❌ 延后 | 需读旧文件内容并计行数，增加 I/O。当前 `old_lines = null` |
+| bash.zig timed_out 实现 | ❌ 延后 | 需 `std.process.Child` + poll 替代当前阻塞 `std.process.run`。当前 `timed_out = false` |
+| ToolEntry.validate 使用 | ❌ 延后 | 基础设施（字段 + 调用点）已就绪，暂无工具注册 validate |
+| render error 日志 | ❌ 延后 | `catch {}` 正确降级，无日志输出 |
+
+## <s>前置依赖</s>
 
 | 被阻塞 | 状态 | 阻塞 |
 |--------|------|------|

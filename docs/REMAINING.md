@@ -3,13 +3,11 @@
 ## 实施顺序
 
 ```
-OPT-3 (ToolMeta)  ← 先做：基础契约改动
+OPT-4 (session ops + prompt + skill)  ← 先做
     ↓
-OPT-4 (session ops + prompt + skill)  ← 依赖 OPT-3 稳定契约
+新前端 (TUI/Web)  ← 依赖 OPT-4 完成
     ↓
-新前端 (TUI/Web)  ← 依赖 OPT-3+4 完成
-    ↓
-webfetch  ← 新工具，独立于 OPT 链
+webfetch  ← 新工具，独立
 ```
 
 ## Done (2026-07-15)
@@ -17,6 +15,7 @@ webfetch  ← 新工具，独立于 OPT 链
 | # | Item | Plan doc | Effort |
 |---|------|----------|--------|
 | D5 | Thinking content: skip Markdown, plain dim text | PLAN-OPT-2-DISPLAY-GAPS.md | Low |
+| D6 | ToolResult 结构化：ToolMeta union + 全工具填 meta + edit 新工具 | PLAN-OPT-3-RENDER-TOOLS.md | High |
 
 ## Done (2026-07-14)
 
@@ -31,7 +30,6 @@ webfetch  ← 新工具，独立于 OPT 链
 
 | # | Item | Plan doc | Effort |
 |---|------|----------|--------|
-| I2 | ToolResult 结构化：ToolMeta union | PLAN-OPT-3-RENDER-TOOLS.md | High |
 | I3 | Agent 初始化 + 会话管理优化 (session_ops, prompt, skill injection) | PLAN-OPT-4-AGENT-SESSION.md | High |
 
 ## Deferred (explicitly skipped)
