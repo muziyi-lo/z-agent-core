@@ -15,6 +15,7 @@
 | T1-4 | render user_output 过滤 | `frontends/cli/render.zig` |
 | T1-6 | 路径左截断 | `frontends/cli/render.zig` |
 | T2-6 | 轮次 token 用量展示 | `frontends/cli/App.zig` + `frontends/cli/render.zig` |
+| F2 | API 错误显示实际原因替代通用标签 | `core/agent.zig` + `frontends/cli/App.zig` |
 
 ## 分析：工具卡死的根因
 
@@ -68,6 +69,7 @@ B3 根因：`runTurn` 被 abort 时，流式输出已通过 `session_ref.append(
 | # | 项 | 状态 | 文件 |
 |---|----|------|------|
 | T2-6 | 轮次 token 用量展示 | ✅ | `frontends/cli/App.zig` + `frontends/cli/render.zig` |
+| F2 | API 错误显示实际原因替代通用标签 | ✅ | `core/agent.zig` + `frontends/cli/App.zig` |
 | T2-7 | bash 长输出保存到文件 | ⏳ 新增 | `tool/bash.zig` - 超限时输出写 `<project>/.zagent/tool-output/` 并在 session_content 中附路径 |
 | T2-1 | grep include brace | ⏳ | `tool/grep.zig` |
 | T2-2 | bash workdir 参数 | ⏳ | `tool/bash.zig` |
