@@ -124,7 +124,7 @@ fn writeLabel(writer: *std.Io.Writer, mtype: MessageType, text: []const u8) !voi
     }
     const c = labelColor(mtype);
     if (c.bg.len > 0) {
-        try writer.print("{s}{s} {s} {s}{s}{s}{s}\n", .{ c.bg, c.fg, c.label, C.reset, c.text_fg, text, C.reset });
+        try writer.print("{s}{s} {s} {s} {s}{s}{s}\n", .{ c.bg, c.fg, c.label, C.reset, c.text_fg, text, C.reset });
     } else {
         try writer.print("{s}[ {s} ]{s} {s}\n", .{ c.fg, c.label, C.reset, text });
     }
