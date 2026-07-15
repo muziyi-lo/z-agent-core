@@ -64,6 +64,7 @@ pub const App = struct {
     tools: []types.Tool,
     session: session_mod.Session,
     agent: agent_mod.AgentLoop,
+    model_context: u32,
 
     project_root: []const u8,
     project_context: ?[]const u8,
@@ -170,6 +171,7 @@ pub const App = struct {
             .render_ctx = render.RenderContext{ .colorize = render.isColorized() },
             .tool_display = render.ToolDisplay{ .ctx = undefined, .writer = undefined },
             .line_buffer = undefined,
+            .model_context = model.context_window,
         };
     }
 
@@ -246,7 +248,7 @@ pub const App = struct {
             }
         }
         if (last_usage) |u| {
-            const context = self.cfg.model.context_window;
+            const context = self.model_context;
             const label = try std.fmt.allocPrint(self.allocator, "输入 {d} | 输出 {d} | 累计 {d}/{d}", .{ u.input, u.output, total_input + total_output, context });
             defer self.allocator.free(label);
             try render.writeLabeled(&stdout.interface, .usage, label);
@@ -390,7 +392,7 @@ pub const App = struct {
             }
         }
         if (last_usage2) |u| {
-            const context = self.cfg.model.context_window;
+            const context = self.model_context;
             const label = try std.fmt.allocPrint(self.allocator, "输入 {d} | 输出 {d} | 累计 {d}/{d}", .{ u.input, u.output, total_input + total_output, context });
             defer self.allocator.free(label);
             try render.writeLabeled(&stdout.interface, .usage, label);
