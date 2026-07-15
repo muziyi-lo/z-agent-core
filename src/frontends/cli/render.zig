@@ -379,7 +379,7 @@ fn toolMetaLabel(tool_name: []const u8, meta: types.ToolMeta) ?[]const u8 {
             return label;
         },
         .bash => |b| {
-            return std.fmt.bufPrint(&DISPLAY_BUF, "$ exit {d}", .{b.exit_code}) catch return tool_name;
+            return std.fmt.bufPrint(&DISPLAY_BUF, "$ {s} (exit {d})", .{ shorten(b.command, 60), b.exit_code }) catch return tool_name;
         },
         .glob => |g| {
             if (g.path) |p| {

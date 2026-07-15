@@ -91,6 +91,7 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
         .session_content = session_content,
         .user_output = if (total > 0) session_content[0..@min(session_content.len, MAX_USER_OUTPUT)] else null,
         .meta = .{ .bash = .{
+            .command = cmd_val.string,
             .exit_code = exit_code,
             .byte_count = raw_total,
             .truncated = truncated,

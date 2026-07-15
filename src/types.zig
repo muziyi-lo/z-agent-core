@@ -72,6 +72,7 @@ pub const ToolMeta = union(enum) {
         truncated: bool,
     },
     bash: struct {
+        command: []const u8,
         exit_code: i32,
         byte_count: usize,
         truncated: bool,
