@@ -20,6 +20,7 @@ pub const Color = struct {
     bg_green: []const u8 = "\x1b[42m",
     bg_bright_cyan: []const u8 = "\x1b[106m",
     bg_bright_magenta: []const u8 = "\x1b[105m",
+    bg_bright_black: []const u8 = "\x1b[40m",
 };
 
 pub const C: Color = .{};
@@ -103,47 +104,34 @@ fn isWideChar(cp: u21) bool {
         (cp >= 0x20000 and cp <= 0x2FFFF);
 }
 
-pub fn writeLabeled(writer: *std.Io.Writer, mtype: MessageType, text: []const u8) !void {
+fn labelColor(mtype: MessageType) struct { bg: []const u8, fg: []const u8, text_fg: []const u8, label: []const u8 } {
+    return switch (mtype) {
+        .user    => .{ .bg = C.bg_blue,           .fg = C.white, .text_fg = C.white, .label = "用户" },
+        .think   => .{ .bg = C.bg_gray,           .fg = C.white, .text_fg = C.dim,   .label = "思考" },
+        .tool    => .{ .bg = C.bg_bright_magenta,  .fg = C.white, .text_fg = C.dim,   .label = "工具" },
+        .output  => .{ .bg = C.bg_green,           .fg = C.white, .text_fg = C.reset, .label = "输出" },
+        .err     => .{ .bg = "",                    .fg = C.red,    .text_fg = C.reset, .label = "ERROR" },
+        .warning => .{ .bg = "",                    .fg = C.yellow, .text_fg = C.reset, .label = "WARN" },
+        .success => .{ .bg = "",                    .fg = C.green,  .text_fg = C.reset, .label = "OK" },
+        .usage   => .{ .bg = C.bg_bright_black,     .fg = C.white, .text_fg = C.dim,   .label = "用量" },
+    };
+}
+
+fn writeLabel(writer: *std.Io.Writer, mtype: MessageType, text: []const u8) !void {
     if (!colorize) {
         try writer.print("{s}{s}\n", .{ labelPlain(mtype), text });
         return;
     }
-    switch (mtype) {
-        .user => {
-            try writer.print("{s}{s} 用户 {s}{s}{s}{s}\n", .{
-                C.bg_blue, C.white, C.reset, C.white, text, C.reset,
-            });
-        },
-        .think => {
-            try writer.print("{s}{s} 思考 {s}{s}{s}{s}\n", .{
-                C.bg_gray, C.white, C.reset, C.dim, text, C.reset,
-            });
-        },
-        .tool => {
-            try writer.print("{s}{s} 工具 {s}{s}{s}{s}\n", .{
-                C.bg_bright_magenta, C.white, C.reset, C.dim, text, C.reset,
-            });
-        },
-        .output => {
-            try writer.print("{s}{s} 输出 {s}{s}{s}\n", .{
-                C.bg_green, C.white, C.reset, text, C.reset,
-            });
-        },
-        .err => {
-            try writer.print("{s}ERROR {s}{s}\n", .{ C.red, text, C.reset });
-        },
-        .warning => {
-            try writer.print("{s}WARN  {s}{s}\n", .{ C.yellow, text, C.reset });
-        },
-        .success => {
-            try writer.print("{s}OK    {s}{s}\n", .{ C.green, text, C.reset });
-        },
-        .usage => {
-            try writer.print("{s}{s} 用量 {s}{s}{s}{s}\n", .{
-                C.bg_bright_cyan, C.white, C.reset, C.dim, text, C.reset,
-            });
-        },
+    const c = labelColor(mtype);
+    if (c.bg.len > 0) {
+        try writer.print("{s}{s} {s} {s}{s}{s}{s}\n", .{ c.bg, c.fg, c.label, C.reset, c.text_fg, text, C.reset });
+    } else {
+        try writer.print("{s}[ {s} ]{s} {s}\n", .{ c.fg, c.label, C.reset, text });
     }
+}
+
+pub fn writeLabeled(writer: *std.Io.Writer, mtype: MessageType, text: []const u8) !void {
+    return writeLabel(writer, mtype, text);
 }
 
 pub fn writeLabelBegin(writer: *std.Io.Writer, mtype: MessageType) !void {
@@ -174,7 +162,7 @@ pub fn writeLabelBegin(writer: *std.Io.Writer, mtype: MessageType) !void {
             try writer.print("{s}OK    {s}\n", .{ C.green, C.reset });
         },
         .usage => {
-            try writer.print("{s}{s} 用量 {s}{s}\n", .{ C.bg_bright_cyan, C.white, C.reset, C.dim });
+            try writer.print("{s}{s} 用量 {s}{s}\n", .{ C.bg_bright_black, C.white, C.reset, C.dim });
         },
     }
 }
@@ -1158,4 +1146,28 @@ test "render: renderLine italic" {
 
     try std.testing.expect(std.mem.indexOf(u8, result, C.italic) != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "italic") != null);
+}
+
+test "render: writeLabel output" {
+    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+
+    colorize = false;
+    try writeLabel(&aw.writer, .err, "test error");
+    const result = try aw.toOwnedSlice();
+    defer std.testing.allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "ERROR test error") != null);
+
+    aw = std.Io.Writer.Allocating.init(std.testing.allocator);
+    colorize = true;
+    try writeLabel(&aw.writer, .err, "test error");
+    const result2 = try aw.toOwnedSlice();
+    defer std.testing.allocator.free(result2);
+    try std.testing.expect(std.mem.indexOf(u8, result2, "[ ERROR ]") != null);
+}
+
+test "render: labelColor all types" {
+    const types_list = [_]MessageType{ .user, .think, .tool, .output, .err, .warning, .success, .usage };
+    for (types_list) |t| {
+        _ = labelColor(t);
+    }
 }

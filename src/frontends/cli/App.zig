@@ -255,6 +255,7 @@ pub const App = struct {
             const label = try std.fmt.allocPrint(self.allocator, "输入 {d} | 输出 {d} | 累计 {d}/{d}", .{ u.input, u.output, total_input + total_output, context });
             defer self.allocator.free(label);
             try render.writeLabeled(&stdout.interface, .usage, label);
+            _ = stdout.interface.write("\n") catch {};
         }
 
         if (result.finish == .interrupted) {
@@ -404,6 +405,7 @@ pub const App = struct {
             const label = try std.fmt.allocPrint(self.allocator, "输入 {d} | 输出 {d} | 累计 {d}/{d}", .{ u.input, u.output, total_input + total_output, context });
             defer self.allocator.free(label);
             try render.writeLabeled(&stdout.interface, .usage, label);
+            _ = stdout.interface.write("\n") catch {};
         }
 
         switch (result.finish) {
