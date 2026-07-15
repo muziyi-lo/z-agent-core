@@ -481,6 +481,7 @@ pub const ToolDisplay = struct {
             self.writer.print("{s}", .{tool_name}) catch |err| return err;
             if (colorize) self.writer.print("{s} ...", .{C.dim}) catch |err| return err;
             writeToolLabelClose(self.writer);
+            self.writer.flush() catch {};
         }
 
         pub fn render(self: *ToolDisplay, tool_name: []const u8, args_json: []const u8, had_error: bool, err_msg: ?[]const u8, user_output: ?[]const u8, meta: types.ToolMeta) anyerror!void {
