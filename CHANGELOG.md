@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.2.0] - 未发布
+
+### Added
+- **OPT-3: 工具输出结构化（ToolMeta）**
+  - `types.zig`：新增 `ToolMeta` union（write/read/grep/bash/glob/skill/edit 共 7 个 variant + none）；`ToolResult` 新增 `meta` 字段
+  - `tool/registry.zig`：集中 `parseFromSlice`（工具接收 `std.json.Value` 替代原始 JSON 字符串）；`ToolEntry` 新增 `validate` 回调
+  - `tool/edit.zig`：全新 edit 工具——oldString→newString 精确替换 + diff 预览 + replaceAll 开关 + 多处匹配保护
+  - `frontends/cli/render.zig`：`toolMetaLabel()` 从 meta 构建标签，meta.none 回退 `labelFromValue`
+  - `core/agent.zig`：`ToolDisplayCb.render` 新增 `err_msg` + `meta` 参数；render 错误降级（catch {} 继续）；工具错误路径也走 display；新增 `begin_tool` 回调
+  - `core/agent.zig`：`RoundResult` 新增 `error_msg: ?[]const u8`，API 错误显示实际原因而非通用标签
+
+### Changed
+- **OPT-3: 工具增强**
+  - `tool/read.zig`：offset 超界报错、分页元数据（next_offset）、单行截断 2000 字符、扩展名黑名单 33 项、全文件 UTF-8 校验、limit=0 仅返元信息
+  - `tool/write.zig`：`meta.write` 填 existed/new_lines/byte_count
+  - `tool/bash.zig`：`meta.bash` 填 exit_code/byte_count/truncated/command；MAX_OUTPUT 50KB→512KB；stderr 加 `[stderr]` 前缀；二进制输出检测（>30% 控制字符替换为摘要）
+  - `tool/grep.zig`：`meta.grep` 填 match_count/files_scanned/truncated；path 改为可选（默认 project_root）`GrepResult` 结构化返回
+  - `tool/glob.zig`：`meta.glob` 填 pattern/file_count/truncated
+  - `tool/skill.zig`：`meta.skill` 填 name/file_count
+  - 全部工具：删除内部 JSON 解析模板（每工具 -10 行）；`execute(ctx, args: Value)` 替代 `execute(ctx, args: []const u8)`
+
+### Fixed
+- **OPT-3.1: Bug 修复**
+  - `tool/edit.zig`：`buildDiff()` 字节截断可能切碎多字节 UTF-8 → `truncateUtf8()` 回退到码点边界
+  - `tool/bash.zig`：二进制输出垃圾字节撑爆终端 → 检测后替换为 `[binary output: N bytes]`
+  - `frontends/cli/render.zig`：路径标签字节截断 `zig-regex\d` 误导 → `truncatePath()` 左截断 `...tail`
+  - `frontends/cli/render.zig`：bash user_output 控制字符乱码 → 打印前过滤 `\x00-\x08` 等
+
+### Refactored
+- `frontends/cli/render.zig`：`LineBuffer` 新增 `raw_mode` 字段，思考内容跳过 Markdown 渲染（I1）
+- `frontends/cli/render.zig`：`MessageType` 新增 `usage`，`writeLabeled(.usage)` 显示 token 统计
+- `frontends/cli/App.zig`：每轮结束后显示 token 用量（输入/输出/累计/窗口上限）
+
 ## [0.1.0] - 未发布
 
 本版本引入前后端分离架构、回调 API 清理和核心功能增强。
