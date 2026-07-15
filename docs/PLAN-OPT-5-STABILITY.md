@@ -2,9 +2,28 @@
 
 ## 状态: 计划中
 
+## 前置依赖
+
+| 阻塞者 | 状态 | 被阻塞 |
+|--------|------|--------|
+| OPT-3 (ToolMeta) | ✅ 已完成 | OPT-4、TUI/Web |
+| — | — | OPT-5 独立于 OPT-4，两者无交叉依赖 |
+
+OPT-4 与 OPT-5 可并行推进（OPT-4 改会话管理，OPT-5 改运行时逻辑，不同模块）。
+
 ## 来源
 
-与 opencode agent 实现对比发现的 5 项健壮性差距。z-agent-core 假设一切正常，opencode 假设一切都会出错。
+与 opencode agent 实现对比发现的健壮性差距。
+
+## 不做
+
+| 项 | 理由 |
+|----|------|
+| 多模型提示模板（7 套 variant） | 仅针对 DeepSeek，不需要 |
+| 自动标题生成 | 体验优化，非健壮性 |
+| 流式事件系统（15+ event types） | 架构级重构，延后到新前端 |
+| SQLite 会话存储 | JSONL 工作良好，单用户无需数据库 |
+| Effect 并发框架 | Zig 同步模型匹配 CLI 定位 |
 
 ## P0: 阻断级（无此必崩）
 
@@ -30,6 +49,31 @@
 | `core/session.zig` | 消息替换方法（已有 API） |
 
 ### 2. API 重试与退避
+
+**问题**：DeepSeek API 返回 429/503 时直接报 `api_error`，下一轮继续输入全新请求。
+
+**当前**：
+```zig
+const resp = raw_resp catch |err| {
+    return finishTurn(self, new_msgs, .api_error, @errorName(err));
+};
+// → 用户看到 "ERROR APIRateLimitExceeded"，需手动重新输入
+```
+
+**实施后**：
+```zig
+var retries: u8 = 0;
+while (retries < 5) : (retries += 1) {
+    const resp = raw_resp catch |err| {
+        if (!isRetryable(err)) return finishTurn(...);
+        phase_writer.writeStatus("Retrying ({d}/5)...", .{retries + 1});
+        std.time.sleep(backoffMs(retries) * std.time.ns_per_ms);
+        continue;
+    };
+    break;
+}
+// → 自动重试 5 次，用户看到 "Retrying (2/5)..." 后成功或最终失败
+```
 
 **问题**：DeepSeek API 返回 429/503 时直接报 `api_error`，下一轮继续输入全新请求。没有指数退避、没有 `retry-after` 尊重、没有状态显示。
 
@@ -118,5 +162,18 @@ P1-3 (死循环) → P1-4 (工具上下文) → P1-5 (每步重组)
 zig build
 zig build test
 ```
+
+## G7 对照表：Zig 0.16 stdlib API 验证
+
+| # | 方案中的调用 | 源码文件:行号 | 实际签名 | 匹配? |
+|---|------------|-------------|---------|-------|
+| 1 | `session.messages()` | `core/session.zig:183` | `pub fn messages(self: *const Session) []const types.Message` | ✅ |
+| 2 | `session.append(msg)` | `core/session.zig:151` | `pub fn append(self: *Session, msg: types.Message) !void` — arena 自动 dupe | ✅ |
+| 3 | `session.truncateTo(keep)` | `core/session.zig:193` | `pub fn truncateTo(self: *Session, keep: usize) void` | ✅ |
+| 4 | `registry.toTools(allocator)` | `tool/registry.zig:44` | `pub fn toTools(self: Registry, allocator: std.mem.Allocator) ![]types.Tool` | ✅ |
+| 5 | `TokenUsage { input, output, total }` | `types.zig:17-21` | 三个 `u32` 字段 | ✅ |
+| 6 | `ToolContext { allocator, io, project_root, api_endpoint, abort_target }` | `types.zig:40-46` | 5 个字段 + 2 个计划新增 (`messages`, `session_ref`) | ✅ |
+| 7 | `ApiEndpoint { base_url, api_key, model }` | `types.zig:24-28` | 三个 `[]const u8` 字段 | ✅ |
+| 8 | `provider.chatCompletionStreaming(&arena, io, msgs, tools)` | `io/provider.zig:60` | `pub fn chatCompletionStreaming(self: *Provider, arena: *ArenaAllocator, io: Io, msgs: []const types.Message, tools: ?[]const types.Tool) anyerror!ProviderResponse` | ✅ |
 
 目标：不减少测试数。
