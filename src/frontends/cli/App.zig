@@ -233,6 +233,25 @@ pub const App = struct {
             self.agent.abort();
             signal.reset();
         }
+
+        var total_input: usize = 0;
+        var total_output: usize = 0;
+        var last_usage: ?types.TokenUsage = null;
+        const msgs = self.session.messages();
+        for (msgs) |msg| {
+            if (msg.usage) |u| {
+                total_input += u.input;
+                total_output += u.output;
+                last_usage = u;
+            }
+        }
+        if (last_usage) |u| {
+            const context = self.cfg.model.context_window;
+            const label = try std.fmt.allocPrint(self.allocator, "输入 {d} | 输出 {d} | 累计 {d}/{d}", .{ u.input, u.output, total_input + total_output, context });
+            defer self.allocator.free(label);
+            try render.writeLabeled(&stdout.interface, .usage, label);
+        }
+
         if (result.finish == .interrupted) {
             try render.writeLabeled(&stdout.interface, .warning, "interrupted");
         }
@@ -358,6 +377,23 @@ pub const App = struct {
         if (signal.isInterrupted()) {
             self.agent.abort();
             signal.reset();
+        }
+
+        var total_input: usize = 0;
+        var total_output: usize = 0;
+        var last_usage2: ?types.TokenUsage = null;
+        for (self.session.messages()) |msg| {
+            if (msg.usage) |u| {
+                total_input += u.input;
+                total_output += u.output;
+                last_usage2 = u;
+            }
+        }
+        if (last_usage2) |u| {
+            const context = self.cfg.model.context_window;
+            const label = try std.fmt.allocPrint(self.allocator, "输入 {d} | 输出 {d} | 累计 {d}/{d}", .{ u.input, u.output, total_input + total_output, context });
+            defer self.allocator.free(label);
+            try render.writeLabeled(&stdout.interface, .usage, label);
         }
 
         switch (result.finish) {

@@ -32,6 +32,7 @@ pub const MessageType = enum {
     err,
     warning,
     success,
+    usage,
 };
 
 var colorize: bool = false;
@@ -137,6 +138,11 @@ pub fn writeLabeled(writer: *std.Io.Writer, mtype: MessageType, text: []const u8
         .success => {
             try writer.print("{s}OK    {s}{s}\n", .{ C.green, text, C.reset });
         },
+        .usage => {
+            try writer.print("{s}{s} 用量 {s}{s}{s}{s}\n", .{
+                C.bg_bright_cyan, C.white, C.reset, C.dim, text, C.reset,
+            });
+        },
     }
 }
 
@@ -166,6 +172,9 @@ pub fn writeLabelBegin(writer: *std.Io.Writer, mtype: MessageType) !void {
         },
         .success => {
             try writer.print("{s}OK    {s}\n", .{ C.green, C.reset });
+        },
+        .usage => {
+            try writer.print("{s}{s} 用量 {s}{s}\n", .{ C.bg_bright_cyan, C.white, C.reset, C.dim });
         },
     }
 }
@@ -543,6 +552,7 @@ fn labelPlain(mtype: MessageType) []const u8 {
         .err => "ERROR ",
         .warning => "WARN  ",
         .success => "OK    ",
+        .usage => "用量  ",
     };
 }
 
