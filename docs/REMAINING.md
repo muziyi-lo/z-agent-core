@@ -3,11 +3,9 @@
 ## 实施顺序
 
 ```
-OPT-5 (上下文压缩 + API重试 + 死循环 + 工具上下文 + 每步重组)  ← 先做：运行时健壮性
+OPT-5 (上下文压缩 + API重试 + 死循环 + 工具上下文 + 每步重组)  ← 下一项
     ↓
-OPT-4 (session ops + prompt + skill)  ← 会话管理
-    ↓
-新前端 (TUI/Web)  ← 依赖 OPT-4+5 完成
+新前端 (TUI/Web)  ← 依赖 OPT-5 完成
     ↓
 webfetch  ← 新工具，独立
 ```
@@ -21,6 +19,8 @@ webfetch  ← 新工具，独立
 | D7 | OPT-3.1 bug 修复 (B1 UTF-8截断, B2 bash二进制, B3 abort后flush) | PLAN-OPT-3.1-TECHDEBT.md | Medium |
 | D8 | OPT-3.1 快赢 (grep可选, bash 512KB/stderr/二进制, user_output过滤, 路径左截断) | PLAN-OPT-3.1-TECHDEBT.md | Medium |
 | D9 | OPT-3.1 增强 (token用量展示, 工具进度提示, bash命令标签, API错误展示) | PLAN-OPT-3.1-TECHDEBT.md | Medium |
+| D10 | OPT-4 会话管理 (session_ops分层 + base_prompt模板 + skill列表注入) | PLAN-OPT-4-AGENT-SESSION.md | High |
+| D11 | OPT-3.2 标签渲染统一化 (writeLabel + labelColor表 + 对比度/空行) | PLAN-OPT-3.2-LABEL-UNIFY.md | Low |
 
 ## Done (2026-07-14)
 
@@ -35,9 +35,7 @@ webfetch  ← 新工具，独立
 
 | # | Item | Plan doc | Effort |
 |---|------|----------|--------|
-| I3 | Agent 初始化 + 会话管理优化 (session_ops, prompt, skill injection) | PLAN-OPT-4-AGENT-SESSION.md | High |
 | I4 | 运行时稳定性 (上下文压缩 + API重试 + 死循环 + 工具上下文 + 每步重组) | PLAN-OPT-5-STABILITY.md | High |
-| I5 | 标签渲染统一化 (writeLabel函数 + 颜色表 + 对比度修复) | PLAN-OPT-3.2-LABEL-UNIFY.md | Low |
 
 ## Deferred (explicitly skipped)
 
