@@ -108,7 +108,7 @@ fn labelColor(mtype: MessageType) struct { bg: []const u8, fg: []const u8, text_
     return switch (mtype) {
         .user    => .{ .bg = C.bg_blue,           .fg = C.white, .text_fg = C.white, .label = "用户" },
         .think   => .{ .bg = C.bg_gray,           .fg = C.white, .text_fg = C.dim,   .label = "思考" },
-        .tool    => .{ .bg = C.bg_bright_magenta,  .fg = C.white, .text_fg = C.dim,   .label = "工具" },
+        .tool    => .{ .bg = C.bg_bright_magenta,  .fg = C.white, .text_fg = C.white, .label = "工具" },
         .output  => .{ .bg = C.bg_green,           .fg = C.white, .text_fg = C.reset, .label = "输出" },
         .err     => .{ .bg = "",                    .fg = C.red,    .text_fg = C.reset, .label = "ERROR" },
         .warning => .{ .bg = "",                    .fg = C.yellow, .text_fg = C.reset, .label = "WARN" },
