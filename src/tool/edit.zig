@@ -133,6 +133,23 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
     };
 }
 
+fn truncateUtf8(s: []const u8, max: usize) []const u8 {
+    if (s.len <= max) return s;
+    var end = max;
+    while (end > 0) {
+        const len = std.unicode.utf8ByteSequenceLength(s[end - 1]) catch {
+            end -= 1;
+            continue;
+        };
+        if (end - 1 + len <= s.len and end - 1 + len > max) {
+            end -= 1;
+            continue;
+        }
+        break;
+    }
+    return s[0..end];
+}
+
 fn buildDiff(allocator: std.mem.Allocator, old_content: []const u8, new_content: []const u8, old_str: []const u8, new_str: []const u8) ![]const u8 {
     var buf = std.ArrayListAligned(u8, null).empty;
 
@@ -154,7 +171,7 @@ fn buildDiff(allocator: std.mem.Allocator, old_content: []const u8, new_content:
             }
             if (std.mem.indexOf(u8, ol, old_str) != null) {
                 if (trimmed.len > 240) {
-                    trimmed = trimmed[0..240];
+                    trimmed = truncateUtf8(trimmed, 240);
                 }
                 try buf.appendSlice(allocator, "-");
                 try buf.appendSlice(allocator, trimmed);
@@ -169,7 +186,7 @@ fn buildDiff(allocator: std.mem.Allocator, old_content: []const u8, new_content:
             }
             if (std.mem.indexOf(u8, nl, new_str) != null) {
                 if (trimmed.len > 240) {
-                    trimmed = trimmed[0..240];
+                    trimmed = truncateUtf8(trimmed, 240);
                 }
                 try buf.appendSlice(allocator, "+");
                 try buf.appendSlice(allocator, trimmed);
