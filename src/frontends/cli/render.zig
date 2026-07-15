@@ -233,6 +233,7 @@ pub const LineBuffer = struct {
     buf: std.ArrayListAligned(u8, null),
     allocator: std.mem.Allocator,
     render_ctx: *RenderContext,
+    raw_mode: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, render_ctx: *RenderContext) LineBuffer {
         return .{
@@ -240,6 +241,10 @@ pub const LineBuffer = struct {
             .allocator = allocator,
             .render_ctx = render_ctx,
         };
+    }
+
+    pub fn setRawMode(self: *LineBuffer, raw: bool) void {
+        self.raw_mode = raw;
     }
 
     pub fn feed(self: *LineBuffer, bytes: []const u8, writer: *std.Io.Writer) !void {
@@ -273,6 +278,13 @@ pub const LineBuffer = struct {
                 continue;
             }
 
+            if (self.raw_mode) {
+                writer.print("{s}\n", .{line}) catch {};
+                writer.flush() catch {};
+                drainBuf(&self.buf, line_end);
+                continue;
+            }
+
             const styled = renderLine(self.render_ctx, self.allocator, line) catch {
                 drainBuf(&self.buf, line_end);
                 continue;
@@ -301,6 +313,11 @@ pub const LineBuffer = struct {
         self.buf.clearRetainingCapacity();
 
         if (!std.unicode.utf8ValidateSlice(line)) return;
+
+        if (self.raw_mode) {
+            writer.print("{s}", .{line}) catch {};
+            return;
+        }
 
         const styled = renderLine(self.render_ctx, self.allocator, line) catch return;
         defer self.allocator.free(styled);

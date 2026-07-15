@@ -1,11 +1,10 @@
 # Plan OPT-2: Frontend display gaps
 
-## 状态: 部分完成
+## 状态: ✅ 完成
 
 | # | 状态 |
 |---|------|
-| 1-4 | ✅ 已实施 |
-| 5 | ⏳ 待实施 |
+| 1-5 | ✅ 已实施 |
 
 ## 前置依赖
 
@@ -166,7 +165,18 @@ if (had_error) {
 
 JSON 解析失败路径同理。
 
-## 5. Thinking content Markdown rendering conflicts
+## 5. Thinking content Markdown rendering conflicts ✅
+
+### 实施 (2026-07-15)
+
+采用方案 1：`LineBuffer` 新增 `raw_mode` 字段。思考阶段 (`pwBeginPhase(.thinking)`) 设置 `raw_mode = true`，内容阶段恢复 `raw_mode = false`。raw_mode 下 `feed()`/`flush()` 跳过 `renderLine()` 直接输出纯文本，dim 由 `writeLabelBegin(.think)` / `writeLabelEnd()` 管理。
+
+| 文件 | 改动 |
+|------|------|
+| `src/frontends/cli/render.zig` | `LineBuffer` 新增 `raw_mode: bool` + `setRawMode()`；`feed()`/`flush()` raw_mode 分支直接输出纯文本 |
+| `src/frontends/cli/App.zig` | `pwBeginPhase` 中 `.thinking` → `setRawMode(true)`，`.content` → `setRawMode(false)` |
+
+### Original plan
 
 ### Current
 `writeLabeled(.think)` 用 `{dim}` 包裹整行思考内容，但 `PhaseWriter` 对思考内容仍然走 `renderLine` 进行 Markdown→ANSI 渲染。当思考中出现 ` ``` ` 时：

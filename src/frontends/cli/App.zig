@@ -23,6 +23,11 @@ const WriterCtx = struct {
 fn pwBeginPhase(ctx: ?*anyopaque, mtype: provider_mod.PhaseType) void {
     const wc: *WriterCtx = @ptrCast(@alignCast(ctx.?));
     wc.lb.flush(wc.writer) catch {};
+    switch (mtype) {
+        .thinking => wc.lb.setRawMode(true),
+        .content => wc.lb.setRawMode(false),
+        .none => {},
+    }
     const mt: render.MessageType = switch (mtype) {
         .thinking => .think,
         .content => .output,

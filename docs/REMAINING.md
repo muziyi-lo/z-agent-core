@@ -9,9 +9,14 @@ OPT-4 (session ops + prompt + skill)  ← 依赖 OPT-3 稳定契约
     ↓
 新前端 (TUI/Web)  ← 依赖 OPT-3+4 完成
     ↓
-OPT-2 #5 (thinking no markdown)  ← 独立，可随时做
 webfetch  ← 新工具，独立于 OPT 链
 ```
+
+## Done (2026-07-15)
+
+| # | Item | Plan doc | Effort |
+|---|------|----------|--------|
+| D5 | Thinking content: skip Markdown, plain dim text | PLAN-OPT-2-DISPLAY-GAPS.md | Low |
 
 ## Done (2026-07-14)
 
@@ -26,7 +31,6 @@ webfetch  ← 新工具，独立于 OPT 链
 
 | # | Item | Plan doc | Effort |
 |---|------|----------|--------|
-| I1 | Thinking content: skip Markdown, plain dim text | PLAN-OPT-2-DISPLAY-GAPS.md | Low |
 | I2 | ToolResult 结构化：ToolMeta union | PLAN-OPT-3-RENDER-TOOLS.md | High |
 | I3 | Agent 初始化 + 会话管理优化 (session_ops, prompt, skill injection) | PLAN-OPT-4-AGENT-SESSION.md | High |
 
