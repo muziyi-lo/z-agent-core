@@ -31,6 +31,7 @@ pub const ChatFn = *const fn (
 /// Callback for tool result display. {context, render} struct avoids agent importing render module.
 pub const ToolDisplayCb = struct {
     context: ?*anyopaque,
+    begin_tool: ?*const fn (ctx: ?*anyopaque, tool_name: []const u8) void = null,
     render: *const fn (
         ctx: ?*anyopaque,
         tool_name: []const u8,
@@ -212,6 +213,9 @@ pub const AgentLoop = struct {
                             },
                             .abort_target = &self._aborted,
                         };
+                        if (tool_display) |cb| {
+                            if (cb.begin_tool) |bt| bt(cb.context, tc.name);
+                        }
                         var exec_result = self.tool_registry.execute(ctx, tc.name, tc.arguments);
 
                         if (exec_result) |*ok| {

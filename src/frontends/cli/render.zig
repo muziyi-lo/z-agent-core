@@ -477,6 +477,18 @@ pub const ToolDisplay = struct {
             try self.render(tool_name, tool_args, had_error, err_msg, user_output, meta);
         }
 
+        pub fn beginCb(context: ?*anyopaque, tool_name: []const u8) void {
+            const self: *ToolDisplay = @ptrCast(@alignCast(context orelse return));
+            self.begin(tool_name) catch {};
+        }
+
+        fn begin(self: *ToolDisplay, tool_name: []const u8) !void {
+            writeToolLabelOpen(self.writer);
+            self.writer.print("{s}", .{tool_name}) catch |err| return err;
+            if (colorize) self.writer.print("{s} ..", .{C.dim}) catch |err| return err;
+            writeToolLabelClose(self.writer);
+        }
+
         pub fn render(self: *ToolDisplay, tool_name: []const u8, args_json: []const u8, had_error: bool, err_msg: ?[]const u8, user_output: ?[]const u8, meta: types.ToolMeta) anyerror!void {
             writeToolLabelOpen(self.writer);
 

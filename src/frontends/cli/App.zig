@@ -221,6 +221,7 @@ pub const App = struct {
 
         const tool_cb = agent_mod.ToolDisplayCb{
             .context = &self.tool_display,
+            .begin_tool = render.ToolDisplay.beginCb,
             .render = render.ToolDisplay.renderCb,
         };
         self.tool_display.writer = &stdout.interface;
@@ -365,6 +366,7 @@ pub const App = struct {
         }
         const tool_cb = agent_mod.ToolDisplayCb{
             .context = &self.tool_display,
+            .begin_tool = render.ToolDisplay.beginCb,
             .render = render.ToolDisplay.renderCb,
         };
         self.tool_display.writer = &stdout.interface;
