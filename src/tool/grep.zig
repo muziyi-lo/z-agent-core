@@ -6,7 +6,7 @@ const path_util = @import("../util/path.zig");
 pub const tool_name = "grep";
 pub const tool_description = "Search for a pattern in file contents. Supports file and directory search with optional file filter.";
 pub const tool_params =
-    \\{"type":"object","properties":{"pattern":{"type":"string","description":"Substring or pattern to search for"},"path":{"type":"string","description":"File or directory path to search"},"include":{"type":"string","description":"Glob pattern to filter files (e.g. *.zig)"}},"required":["pattern","path"]}
+    \\{"type":"object","properties":{"pattern":{"type":"string","description":"Substring or pattern to search for"},"path":{"type":"string","description":"File or directory path (defaults to project root)"},"include":{"type":"string","description":"Glob pattern to filter files (e.g. *.zig)"}},"required":["pattern"]}
 ;
 
 const MAX_OUTPUT: usize = 50 * 1024;
@@ -27,12 +27,7 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
         };
     }
 
-    const path_val = args.object.get("path") orelse {
-        const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'path' argument", .{});
-        return types.ToolResult{
-            .session_content = content,
-        };
-    };
+    const path_val = if (args.object.get("path")) |pv| pv else std.json.Value{ .string = ctx.project_root };
     if (path_val != .string) {
         const content = try std.fmt.allocPrint(ctx.allocator, "Error: 'path' must be a string", .{});
         return types.ToolResult{

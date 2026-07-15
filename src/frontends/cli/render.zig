@@ -357,22 +357,41 @@ fn shorten(s: []const u8, max: usize) []const u8 {
     return s[0..@min(s.len, max)];
 }
 
+fn truncatePath(s: []const u8, max: usize) []const u8 {
+    if (s.len <= max) return s;
+    const prefix = "...";
+    const start = s.len - (max - prefix.len);
+    if (start >= s.len) return s;
+    var i = start;
+    while (i < s.len) {
+        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + len > s.len) break;
+        break;
+    } else {
+        i = start;
+    }
+    return s[i..];
+}
+
 fn toolMetaLabel(tool_name: []const u8, meta: types.ToolMeta) ?[]const u8 {
     switch (meta) {
         .read => |r| {
-            if (r.is_directory) return std.fmt.bufPrint(&DISPLAY_BUF, "Read dir {s}", .{shorten(r.path, 60)}) catch return tool_name;
-            return std.fmt.bufPrint(&DISPLAY_BUF, "Read {s}", .{shorten(r.path, 60)}) catch return tool_name;
+            if (r.is_directory) return std.fmt.bufPrint(&DISPLAY_BUF, "Read dir {s}", .{truncatePath(r.path, 60)}) catch return tool_name;
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Read {s}", .{truncatePath(r.path, 60)}) catch return tool_name;
         },
         .write => |w| {
             if (w.existed) {
-                return std.fmt.bufPrint(&DISPLAY_BUF, "Wrote {s} ({d} lines, {d} bytes)", .{ shorten(w.path, 50), w.new_lines, w.byte_count }) catch return tool_name;
+                return std.fmt.bufPrint(&DISPLAY_BUF, "Wrote {s} ({d} lines, {d} bytes)", .{ truncatePath(w.path, 50), w.new_lines, w.byte_count }) catch return tool_name;
             }
-            return std.fmt.bufPrint(&DISPLAY_BUF, "Wrote {s} ({d} lines, {d} bytes)", .{ shorten(w.path, 50), w.new_lines, w.byte_count }) catch return tool_name;
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Wrote {s} ({d} lines, {d} bytes)", .{ truncatePath(w.path, 50), w.new_lines, w.byte_count }) catch return tool_name;
         },
         .grep => |g| {
             var label: []const u8 = tool_name;
             if (g.path) |p| {
-                label = std.fmt.bufPrint(&DISPLAY_BUF, "Grep \"{s}\" in {s} ({d} matches)", .{ shorten(g.pattern, 30), shorten(p, 30), g.match_count }) catch return tool_name;
+                label = std.fmt.bufPrint(&DISPLAY_BUF, "Grep \"{s}\" in {s} ({d} matches)", .{ shorten(g.pattern, 30), truncatePath(p, 30), g.match_count }) catch return tool_name;
             } else {
                 label = std.fmt.bufPrint(&DISPLAY_BUF, "Grep \"{s}\" ({d} matches)", .{ shorten(g.pattern, 40), g.match_count }) catch return tool_name;
             }
@@ -383,7 +402,7 @@ fn toolMetaLabel(tool_name: []const u8, meta: types.ToolMeta) ?[]const u8 {
         },
         .glob => |g| {
             if (g.path) |p| {
-                return std.fmt.bufPrint(&DISPLAY_BUF, "Glob {s} in {s} ({d} files)", .{ shorten(g.pattern, 30), shorten(p, 30), g.file_count }) catch return tool_name;
+                return std.fmt.bufPrint(&DISPLAY_BUF, "Glob {s} in {s} ({d} files)", .{ shorten(g.pattern, 30), truncatePath(p, 30), g.file_count }) catch return tool_name;
             }
             return std.fmt.bufPrint(&DISPLAY_BUF, "Glob {s} ({d} files)", .{ shorten(g.pattern, 40), g.file_count }) catch return tool_name;
         },
@@ -391,7 +410,7 @@ fn toolMetaLabel(tool_name: []const u8, meta: types.ToolMeta) ?[]const u8 {
             return std.fmt.bufPrint(&DISPLAY_BUF, "Skill {s} ({d} files)", .{ shorten(s.name, 50), s.file_count }) catch return tool_name;
         },
         .edit => |e| {
-            return std.fmt.bufPrint(&DISPLAY_BUF, "Edit {s} ({d} replacements, {d}->{d} lines)", .{ shorten(e.path, 50), e.replacements, e.old_lines, e.new_lines }) catch return tool_name;
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Edit {s} ({d} replacements, {d}->{d} lines)", .{ truncatePath(e.path, 50), e.replacements, e.old_lines, e.new_lines }) catch return tool_name;
         },
         .none => return null,
     }
@@ -479,7 +498,15 @@ pub const ToolDisplay = struct {
             writeToolLabelClose(self.writer);
 
             if (user_output) |out| {
-                self.writer.print("\n{s}", .{out}) catch |err| {
+                var out_filtered: [4096]u8 = undefined;
+                var oi: usize = 0;
+                for (out) |b| {
+                    if (oi >= out_filtered.len) break;
+                    if (b < 0x20 and b != '\n' and b != '\r' and b != '\t') continue;
+                    out_filtered[oi] = b;
+                    oi += 1;
+                }
+                self.writer.print("\n{s}", .{out_filtered[0..oi]}) catch |err| {
                     return err;
                 };
             }

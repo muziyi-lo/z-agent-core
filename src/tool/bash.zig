@@ -8,7 +8,7 @@ pub const tool_params =
     \\{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"timeout":{"type":"integer","description":"Timeout in seconds (default 30)"}},"required":["command"]}
 ;
 
-const MAX_OUTPUT: usize = 50 * 1024;
+const MAX_OUTPUT: usize = 512 * 1024;
 const MAX_STREAM: usize = 25 * 1024;
 const MAX_USER_OUTPUT: usize = 4096;
 
@@ -72,11 +72,17 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
             truncated = true;
             const half = MAX_OUTPUT / 2;
             if (out_len > half) try result_buf.appendSlice(ctx.allocator, proc_result.stdout[0..half]) else try result_buf.appendSlice(ctx.allocator, proc_result.stdout[0..out_len]);
-            if (err_len > half) try result_buf.appendSlice(ctx.allocator, proc_result.stderr[0..half]) else try result_buf.appendSlice(ctx.allocator, proc_result.stderr[0..err_len]);
+            if (err_len > 0) {
+                try result_buf.appendSlice(ctx.allocator, "[stderr]\n");
+                if (err_len > half) try result_buf.appendSlice(ctx.allocator, proc_result.stderr[0..half]) else try result_buf.appendSlice(ctx.allocator, proc_result.stderr[0..err_len]);
+            }
             try result_buf.appendSlice(ctx.allocator, "\n[truncated]");
         } else {
             try result_buf.appendSlice(ctx.allocator, proc_result.stdout[0..out_len]);
-            try result_buf.appendSlice(ctx.allocator, proc_result.stderr[0..err_len]);
+            if (err_len > 0) {
+                try result_buf.appendSlice(ctx.allocator, "[stderr]\n");
+                try result_buf.appendSlice(ctx.allocator, proc_result.stderr[0..err_len]);
+            }
         }
     }
 
