@@ -477,9 +477,9 @@ pub const ToolDisplay = struct {
         }
 
         fn begin(self: *ToolDisplay, tool_name: []const u8) !void {
-            writeToolLabelOpen(self.writer);
+            if (colorize) self.writer.print("{s}~ ", .{C.dim}) catch |err| return err;
             self.writer.print("{s}", .{tool_name}) catch |err| return err;
-            if (colorize) self.writer.print("{s} ..", .{C.dim}) catch |err| return err;
+            if (colorize) self.writer.print("{s} ...", .{C.dim}) catch |err| return err;
             writeToolLabelClose(self.writer);
         }
 
