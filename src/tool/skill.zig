@@ -9,16 +9,8 @@ pub const tool_params =
 ;
 
 /// Load a skill's SKILL.md from .zagent/skills/<name>/. Returns allocator-owned ToolResult.
-pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.ToolResult {
-    const args = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
-        const content = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
-        return types.ToolResult{
-            .session_content = content,
-        };
-    };
-    defer args.deinit();
-
-    const name_val = args.value.object.get("name") orelse {
+pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.ToolResult {
+    const name_val = args.object.get("name") orelse {
         const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'name' argument", .{});
         return types.ToolResult{
             .session_content = content,
@@ -67,6 +59,10 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.Too
     const session_content = try buf.toOwnedSlice(ctx.allocator);
     return types.ToolResult{
         .session_content = session_content,
+        .meta = .{ .skill = .{
+            .name = name_val.string,
+            .file_count = 1,
+        }},
     };
 }
 
@@ -90,6 +86,15 @@ fn appendJsonStr(buf: *std.ArrayListAligned(u8, null), allocator: std.mem.Alloca
 
 const Io = std.Io;
 
+fn testExec(ctx: types.ToolContext, args_json: []const u8) !types.ToolResult {
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        return types.ToolResult{ .session_content = msg };
+    };
+    defer parsed.deinit();
+    return execute(ctx, parsed.value);
+}
+
 test "skill: missing skill error" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -106,7 +111,7 @@ test "skill: missing skill error" {
         .project_root = test_path,
     };
 
-    var result = try execute(ctx, "{\"name\":\"nonexistent\"}");
+    var result = try testExec(ctx, "{\"name\":\"nonexistent\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "not found") != null);
 }
@@ -137,7 +142,7 @@ test "skill: loads skill file" {
         .project_root = test_path,
     };
 
-    var result = try execute(ctx, "{\"name\":\"test-skill\"}");
+    var result = try testExec(ctx, "{\"name\":\"test-skill\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "test-skill") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "skill content here") != null);

@@ -45,11 +45,62 @@ pub const ToolContext = struct {
     abort_target: ?*bool = null,
 };
 
+/// Per-tool structured metadata for frontend display.
+/// All slices are zero-copy borrows (into session_content or tool args).
+pub const ToolMeta = union(enum) {
+    none: void,
+    write: struct {
+        path: []const u8,
+        existed: bool,
+        old_lines: ?usize,
+        new_lines: usize,
+        byte_count: usize,
+    },
+    read: struct {
+        path: []const u8,
+        is_directory: bool,
+        total_lines: usize,
+        byte_count: usize,
+        truncated: bool,
+        next_offset: ?u32,
+    },
+    grep: struct {
+        pattern: []const u8,
+        path: ?[]const u8,
+        match_count: usize,
+        files_scanned: usize,
+        truncated: bool,
+    },
+    bash: struct {
+        exit_code: i32,
+        byte_count: usize,
+        truncated: bool,
+        timed_out: bool,
+    },
+    glob: struct {
+        pattern: []const u8,
+        path: ?[]const u8,
+        file_count: usize,
+        truncated: bool,
+    },
+    skill: struct {
+        name: []const u8,
+        file_count: usize,
+    },
+    edit: struct {
+        path: []const u8,
+        replacements: usize,
+        old_lines: usize,
+        new_lines: usize,
+    },
+};
+
 pub const ToolResult = struct {
     session_content: []const u8,
     err_msg: ?[]const u8 = null,
     /// Zero-copy view into session_content — NOT freed by deinit.
     user_output: ?[]const u8 = null,
+    meta: ToolMeta = .none,
 
     pub fn deinit(self: *ToolResult, allocator: std.mem.Allocator) void {
         allocator.free(self.session_content);
@@ -62,7 +113,7 @@ pub const Tool = struct {
     name: []const u8,
     description: []const u8,
     params: []const u8,
-    execute: *const fn (ctx: ToolContext, args: []const u8) anyerror!ToolResult,
+    execute: *const fn (ctx: ToolContext, args: std.json.Value) anyerror!ToolResult,
 };
 
 pub const InputModality = enum { text, image };

@@ -357,6 +357,46 @@ fn shorten(s: []const u8, max: usize) []const u8 {
     return s[0..@min(s.len, max)];
 }
 
+fn toolMetaLabel(tool_name: []const u8, meta: types.ToolMeta) ?[]const u8 {
+    switch (meta) {
+        .read => |r| {
+            if (r.is_directory) return std.fmt.bufPrint(&DISPLAY_BUF, "Read dir {s}", .{shorten(r.path, 60)}) catch return tool_name;
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Read {s}", .{shorten(r.path, 60)}) catch return tool_name;
+        },
+        .write => |w| {
+            if (w.existed) {
+                return std.fmt.bufPrint(&DISPLAY_BUF, "Wrote {s} ({d} lines, {d} bytes)", .{ shorten(w.path, 50), w.new_lines, w.byte_count }) catch return tool_name;
+            }
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Wrote {s} ({d} lines, {d} bytes)", .{ shorten(w.path, 50), w.new_lines, w.byte_count }) catch return tool_name;
+        },
+        .grep => |g| {
+            var label: []const u8 = tool_name;
+            if (g.path) |p| {
+                label = std.fmt.bufPrint(&DISPLAY_BUF, "Grep \"{s}\" in {s} ({d} matches)", .{ shorten(g.pattern, 30), shorten(p, 30), g.match_count }) catch return tool_name;
+            } else {
+                label = std.fmt.bufPrint(&DISPLAY_BUF, "Grep \"{s}\" ({d} matches)", .{ shorten(g.pattern, 40), g.match_count }) catch return tool_name;
+            }
+            return label;
+        },
+        .bash => |b| {
+            return std.fmt.bufPrint(&DISPLAY_BUF, "$ exit {d}", .{b.exit_code}) catch return tool_name;
+        },
+        .glob => |g| {
+            if (g.path) |p| {
+                return std.fmt.bufPrint(&DISPLAY_BUF, "Glob {s} in {s} ({d} files)", .{ shorten(g.pattern, 30), shorten(p, 30), g.file_count }) catch return tool_name;
+            }
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Glob {s} ({d} files)", .{ shorten(g.pattern, 40), g.file_count }) catch return tool_name;
+        },
+        .skill => |s| {
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Skill {s} ({d} files)", .{ shorten(s.name, 50), s.file_count }) catch return tool_name;
+        },
+        .edit => |e| {
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Edit {s} ({d} replacements, {d}->{d} lines)", .{ shorten(e.path, 50), e.replacements, e.old_lines, e.new_lines }) catch return tool_name;
+        },
+        .none => return null,
+    }
+}
+
 fn labelFromValue(tool_name: []const u8, value: std.json.Value) []const u8 {
     if (std.mem.eql(u8, tool_name, "read")) {
         if (value.object.get("path")) |v| if (v == .string)
@@ -404,24 +444,27 @@ pub const ToolDisplay = struct {
     ctx: *RenderContext,
     writer: *std.Io.Writer,
 
-        pub fn renderCb(context: ?*anyopaque, tool_name: []const u8, tool_args: []const u8, had_error: bool, user_output: ?[]const u8) anyerror!void {
+        pub fn renderCb(context: ?*anyopaque, tool_name: []const u8, tool_args: []const u8, had_error: bool, err_msg: ?[]const u8, user_output: ?[]const u8, meta: types.ToolMeta) anyerror!void {
             const self: *ToolDisplay = @ptrCast(@alignCast(context orelse return error.NullContext));
-            try self.render(tool_name, tool_args, had_error, user_output);
+            try self.render(tool_name, tool_args, had_error, err_msg, user_output, meta);
         }
 
-        pub fn render(self: *ToolDisplay, tool_name: []const u8, args_json: []const u8, had_error: bool, user_output: ?[]const u8) anyerror!void {
+        pub fn render(self: *ToolDisplay, tool_name: []const u8, args_json: []const u8, had_error: bool, err_msg: ?[]const u8, user_output: ?[]const u8, meta: types.ToolMeta) anyerror!void {
             writeToolLabelOpen(self.writer);
 
-            const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
-                self.writer.print("{s}", .{tool_name}) catch |err| return err;
-                if (had_error and colorize) self.writer.print("{s}", .{C.red}) catch |err| return err;
-                if (had_error) self.writer.print(" (err)", .{}) catch |err| return err;
-                writeToolLabelClose(self.writer);
-                return;
+            const label = toolMetaLabel(tool_name, meta) orelse blk: {
+                const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
+                    self.writer.print("{s}", .{tool_name}) catch |err| return err;
+                    if (had_error and colorize) self.writer.print("{s}", .{C.red}) catch |err| return err;
+                    if (had_error) self.writer.print(" (err)", .{}) catch |err| return err;
+                    if (err_msg) |e| self.writer.print(": {s}", .{e}) catch |err| return err;
+                    writeToolLabelClose(self.writer);
+                    return;
+                };
+                defer parsed.deinit();
+                break :blk labelFromValue(tool_name, parsed.value);
             };
-            defer parsed.deinit();
 
-            const label = labelFromValue(tool_name, parsed.value);
             if (had_error and colorize) {
                 self.writer.print("{s}{s}", .{ C.red, label }) catch |err| return err;
             } else {
@@ -430,6 +473,7 @@ pub const ToolDisplay = struct {
 
             if (had_error) {
                 self.writer.print(" (err)", .{}) catch |err| return err;
+                if (err_msg) |e| self.writer.print(": {s}", .{e}) catch |err| return err;
             }
 
             writeToolLabelClose(self.writer);

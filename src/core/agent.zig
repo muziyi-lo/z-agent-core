@@ -31,7 +31,15 @@ pub const ChatFn = *const fn (
 /// Callback for tool result display. {context, render} struct avoids agent importing render module.
 pub const ToolDisplayCb = struct {
     context: ?*anyopaque,
-    render: *const fn (ctx: ?*anyopaque, tool_name: []const u8, tool_args: []const u8, had_error: bool, user_output: ?[]const u8) anyerror!void,
+    render: *const fn (
+        ctx: ?*anyopaque,
+        tool_name: []const u8,
+        tool_args: []const u8,
+        had_error: bool,
+        err_msg: ?[]const u8,
+        user_output: ?[]const u8,
+        meta: types.ToolMeta,
+    ) anyerror!void,
 };
 
 /// Hooks for intercepting tool execution. before returns non-null to block; after fires before result deinit.
@@ -212,9 +220,7 @@ pub const AgentLoop = struct {
                             }
                             defer ok.deinit(self.allocator);
                             if (tool_display) |cb| {
-                                cb.render(cb.context, tc.name, tc.arguments, false, ok.user_output) catch {
-                                    return finishTurn(self, new_msgs, .render_error);
-                                };
+                                cb.render(cb.context, tc.name, tc.arguments, ok.err_msg != null, ok.err_msg, ok.user_output, ok.meta) catch {};
                             }
                             try self.session_ref.append(.{
                                 .role = .tool,
@@ -223,6 +229,9 @@ pub const AgentLoop = struct {
                             });
                             new_msgs += 1;
                         } else |exec_err| {
+                            if (tool_display) |cb| {
+                                cb.render(cb.context, tc.name, tc.arguments, true, @errorName(exec_err), null, .none) catch {};
+                            }
                             const err_msg = try std.fmt.allocPrint(self.allocator, "Error executing {s}: {s}", .{ tc.name, @errorName(exec_err) });
                             defer self.allocator.free(err_msg);
                             try self.session_ref.append(.{

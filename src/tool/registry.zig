@@ -6,34 +6,41 @@ const bash_tool = @import("bash.zig");
 const grep_tool = @import("grep.zig");
 const glob_tool = @import("glob.zig");
 const skill_tool = @import("skill.zig");
+const edit_tool = @import("edit.zig");
 
-/// Registered tool handler: name, LLM description, JSON params schema, execute function.
 pub const ToolEntry = struct {
     name: []const u8,
     description: []const u8,
     params: []const u8,
-    execute: *const fn (ctx: types.ToolContext, args: []const u8) anyerror!types.ToolResult,
+    validate: ?*const fn (args: std.json.Value) ?[]const u8 = null,
+    execute: *const fn (ctx: types.ToolContext, args: std.json.Value) anyerror!types.ToolResult,
 };
 
-/// Tool registry dispatched by name. Holds compile-time array of ToolEntry.
 pub const Registry = struct {
     handlers: []const ToolEntry,
 
-    /// Look up tool by name and execute. Returns ToolResult (caller must deinit).
     pub fn execute(self: Registry, ctx: types.ToolContext, name: []const u8, args_json: []const u8) anyerror!types.ToolResult {
+        const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON", .{});
+            return types.ToolResult{ .session_content = msg };
+        };
+        defer parsed.deinit();
+
         for (self.handlers) |h| {
             if (std.mem.eql(u8, h.name, name)) {
-                return h.execute(ctx, args_json);
+                if (h.validate) |v| {
+                    if (v(parsed.value)) |err| {
+                        const msg = try std.fmt.allocPrint(ctx.allocator, "{s}", .{err});
+                        return types.ToolResult{ .session_content = msg, .err_msg = err };
+                    }
+                }
+                return h.execute(ctx, parsed.value);
             }
         }
         const msg = try std.fmt.allocPrint(ctx.allocator, "Error: unknown tool '{s}'", .{name});
-        errdefer ctx.allocator.free(msg);
-        return types.ToolResult{
-            .session_content = msg,
-        };
+        return types.ToolResult{ .session_content = msg };
     }
 
-    /// Convert handlers to Tool array for OpenAI API. Caller owns returned slice.
     pub fn toTools(self: Registry, allocator: std.mem.Allocator) ![]types.Tool {
         var list = std.ArrayListAligned(types.Tool, null).empty;
         for (self.handlers) |h| {
@@ -58,6 +65,7 @@ pub fn buildRegistry() Registry {
             .{ .name = grep_tool.tool_name, .description = grep_tool.tool_description, .params = grep_tool.tool_params, .execute = grep_tool.execute },
             .{ .name = glob_tool.tool_name, .description = glob_tool.tool_description, .params = glob_tool.tool_params, .execute = glob_tool.execute },
             .{ .name = skill_tool.tool_name, .description = skill_tool.tool_description, .params = skill_tool.tool_params, .execute = skill_tool.execute },
+            .{ .name = edit_tool.tool_name, .description = edit_tool.tool_description, .params = edit_tool.tool_params, .execute = edit_tool.execute },
         },
     };
 }
@@ -101,7 +109,7 @@ test "registry: toTools generates array" {
     const tools = try reg.toTools(std.testing.allocator);
     defer std.testing.allocator.free(tools);
 
-    try std.testing.expect(tools.len == 6);
+    try std.testing.expect(tools.len == 7);
     try std.testing.expect(std.mem.eql(u8, tools[0].name, "read"));
     try std.testing.expect(std.mem.eql(u8, tools[1].name, "write"));
     try std.testing.expect(std.mem.eql(u8, tools[5].name, "skill"));

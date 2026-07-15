@@ -13,16 +13,8 @@ const MAX_OUTPUT: usize = 50 * 1024;
 const MAX_MATCHES: usize = 500;
 
 /// Search file contents for a pattern. Returns allocator-owned ToolResult.
-pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.ToolResult {
-    const args = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
-        const content = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
-        return types.ToolResult{
-            .session_content = content,
-        };
-    };
-    defer args.deinit();
-
-    const pattern_val = args.value.object.get("pattern") orelse {
+pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.ToolResult {
+    const pattern_val = args.object.get("pattern") orelse {
         const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'pattern' argument", .{});
         return types.ToolResult{
             .session_content = content,
@@ -35,7 +27,7 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.Too
         };
     }
 
-    const path_val = args.value.object.get("path") orelse {
+    const path_val = args.object.get("path") orelse {
         const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'path' argument", .{});
         return types.ToolResult{
             .session_content = content,
@@ -48,7 +40,7 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.Too
         };
     }
 
-    const include = if (args.value.object.get("include")) |inc|
+    const include = if (args.object.get("include")) |inc|
         if (inc == .string) inc.string else null
     else
         null;
@@ -66,20 +58,41 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.Too
 
     if (Io.Dir.cwd().openDir(ctx.io, resolved, .{ .iterate = true })) |dir| {
         defer dir.close(ctx.io);
-        const result_content = try searchDir(ctx, dir, pattern_val.string, path_val.string, include);
+        const gr = try searchDir(ctx, dir, pattern_val.string, include);
         return types.ToolResult{
-            .session_content = result_content,
+            .session_content = gr.content,
+            .meta = .{ .grep = .{
+                .pattern = pattern_val.string,
+                .path = path_val.string,
+                .match_count = gr.match_count,
+                .files_scanned = gr.files_scanned,
+                .truncated = gr.truncated,
+            }},
         };
     } else |err| switch (err) {
         error.FileNotFound, error.NotDir, error.AccessDenied => {},
         else => return err,
     }
 
-    const result_content = try searchFile(ctx, resolved, pattern_val.string, path_val.string);
+    const gr = try searchFile(ctx, resolved, pattern_val.string);
     return types.ToolResult{
-        .session_content = result_content,
+        .session_content = gr.content,
+        .meta = .{ .grep = .{
+            .pattern = pattern_val.string,
+            .path = path_val.string,
+            .match_count = gr.match_count,
+            .files_scanned = gr.files_scanned,
+            .truncated = gr.truncated,
+        }},
     };
 }
+
+const GrepResult = struct {
+    content: []const u8,
+    match_count: usize,
+    files_scanned: usize,
+    truncated: bool,
+};
 
 fn countMatches(result: []const u8) usize {
     var count: usize = 0;
@@ -90,15 +103,25 @@ fn countMatches(result: []const u8) usize {
     return count;
 }
 
-fn searchFile(ctx: types.ToolContext, abs_path: []const u8, pattern: []const u8, display_path: []const u8) ![]const u8 {
+fn searchFile(ctx: types.ToolContext, abs_path: []const u8, pattern: []const u8) !GrepResult {
     const file = Io.Dir.cwd().openFile(ctx.io, abs_path, .{ .mode = .read_only }) catch |err| {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: cannot open '{s}': {s}", .{ display_path, @errorName(err) });
+        return .{
+            .content = try std.fmt.allocPrint(ctx.allocator, "Error: cannot open '{s}': {s}", .{ abs_path, @errorName(err) }),
+            .match_count = 0,
+            .files_scanned = 1,
+            .truncated = false,
+        };
     };
     defer file.close(ctx.io);
 
     const size: usize = @intCast((try file.stat(ctx.io)).size);
     if (size > 1024 * 1024) {
-        return try std.fmt.allocPrint(ctx.allocator, "Error: file too large for grep: {s} ({d} bytes)", .{ display_path, size });
+        return .{
+            .content = try std.fmt.allocPrint(ctx.allocator, "Error: file too large for grep: {s} ({d} bytes)", .{ abs_path, size }),
+            .match_count = 0,
+            .files_scanned = 1,
+            .truncated = false,
+        };
     }
 
     const file_content = try ctx.allocator.alloc(u8, size);
@@ -108,6 +131,7 @@ fn searchFile(ctx: types.ToolContext, abs_path: []const u8, pattern: []const u8,
     var buf = std.ArrayListAligned(u8, null).empty;
 
     var matches: usize = 0;
+    var truncated = false;
     var lines = std.mem.splitScalar(u8, file_content[0..n], '\n');
     var line_num: usize = 1;
     while (lines.next()) |raw_line| : (line_num += 1) {
@@ -116,10 +140,12 @@ fn searchFile(ctx: types.ToolContext, abs_path: []const u8, pattern: []const u8,
             matches += 1;
             if (matches > MAX_MATCHES) {
                 try buf.appendSlice(ctx.allocator, "... (max matches reached)\n");
+                truncated = true;
                 break;
             }
             if (buf.items.len >= MAX_OUTPUT) {
                 try buf.appendSlice(ctx.allocator, "[truncated]\n");
+                truncated = true;
                 break;
             }
             var num_buf: [16]u8 = undefined;
@@ -132,16 +158,27 @@ fn searchFile(ctx: types.ToolContext, abs_path: []const u8, pattern: []const u8,
     }
 
     if (matches == 0) {
-        return try std.fmt.allocPrint(ctx.allocator, "No matches found for '{s}' in {s}", .{ pattern, display_path });
+        return .{
+            .content = try std.fmt.allocPrint(ctx.allocator, "No matches found for '{s}' in file", .{pattern}),
+            .match_count = 0,
+            .files_scanned = 1,
+            .truncated = false,
+        };
     }
 
-    return buf.toOwnedSlice(ctx.allocator);
+    return .{
+        .content = try buf.toOwnedSlice(ctx.allocator),
+        .match_count = matches,
+        .files_scanned = 1,
+        .truncated = truncated,
+    };
 }
 
-fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, display_path: []const u8, include: ?[]const u8) ![]const u8 {
+fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, include: ?[]const u8) !GrepResult {
     var buf = std.ArrayListAligned(u8, null).empty;
     var matches: usize = 0;
     var truncated = false;
+    var files_scanned: usize = 0;
 
     var iter = dir.iterate();
     while (try iter.next(ctx.io)) |entry| {
@@ -155,6 +192,8 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, display_p
             truncated = true;
             break;
         }
+
+        files_scanned += 1;
 
         const file = dir.openFile(ctx.io, entry.name, .{ .mode = .read_only }) catch continue;
         defer file.close(ctx.io);
@@ -175,19 +214,21 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, display_p
                 matches += 1;
                 if (matches > MAX_MATCHES) {
                     try buf.appendSlice(ctx.allocator, "... (max matches reached)\n");
-                    return buf.toOwnedSlice(ctx.allocator);
+                    truncated = true;
+                    return .{
+                        .content = try buf.toOwnedSlice(ctx.allocator),
+                        .match_count = matches,
+                        .files_scanned = files_scanned,
+                        .truncated = truncated,
+                    };
                 }
                 if (buf.items.len >= MAX_OUTPUT) {
                     truncated = true;
                     break;
                 }
                 if (!file_has_match) {
-                    try buf.appendSlice(ctx.allocator, display_path);
-                    if (!std.mem.endsWith(u8, display_path, "/") and !std.mem.endsWith(u8, display_path, "\\")) {
-                        try buf.append(ctx.allocator, if (builtin.os.tag == .windows) '\\' else '/');
-                    }
                     try buf.appendSlice(ctx.allocator, entry.name);
-                    try buf.appendSlice(ctx.allocator, "\n");
+                    try buf.appendSlice(ctx.allocator, ":\n");
                     file_has_match = true;
                 }
                 var num_buf: [16]u8 = undefined;
@@ -202,13 +243,23 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, display_p
     }
 
     if (matches == 0) {
-        return try std.fmt.allocPrint(ctx.allocator, "No matches found for '{s}' in {s}", .{ pattern, display_path });
+        return .{
+            .content = try std.fmt.allocPrint(ctx.allocator, "No matches found for '{s}'", .{pattern}),
+            .match_count = 0,
+            .files_scanned = files_scanned,
+            .truncated = false,
+        };
     }
     if (truncated) {
         try buf.appendSlice(ctx.allocator, "[truncated: output limit reached]\n");
     }
 
-    return buf.toOwnedSlice(ctx.allocator);
+    return .{
+        .content = try buf.toOwnedSlice(ctx.allocator),
+        .match_count = matches,
+        .files_scanned = files_scanned,
+        .truncated = truncated,
+    };
 }
 
 fn globMatch(name: []const u8, pattern: []const u8) bool {
@@ -222,6 +273,15 @@ fn globMatch(name: []const u8, pattern: []const u8) bool {
 }
 
 const Io = std.Io;
+
+fn testExec(ctx: types.ToolContext, args_json: []const u8) !types.ToolResult {
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        return types.ToolResult{ .session_content = msg };
+    };
+    defer parsed.deinit();
+    return execute(ctx, parsed.value);
+}
 
 test "grep: finds matches in file" {
     const allocator = std.testing.allocator;
@@ -245,7 +305,7 @@ test "grep: finds matches in file" {
         .project_root = test_path,
     };
 
-    var result = try execute(ctx, "{\"pattern\":\"hello\",\"path\":\"search.txt\"}");
+    var result = try testExec(ctx, "{\"pattern\":\"hello\",\"path\":\"search.txt\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "hello world") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "hello again") != null);
@@ -273,7 +333,7 @@ test "grep: no matches" {
         .project_root = test_path,
     };
 
-    var result = try execute(ctx, "{\"pattern\":\"xyzzy\",\"path\":\"search.txt\"}");
+    var result = try testExec(ctx, "{\"pattern\":\"xyzzy\",\"path\":\"search.txt\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "No matches") != null);
 }

@@ -11,16 +11,8 @@ pub const tool_params =
 const MAX_CONTENT: usize = 512 * 1024;
 
 /// Create or overwrite a file. Creates parent directories. Returns allocator-owned ToolResult.
-pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.ToolResult {
-    const args = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
-        const content = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
-        return types.ToolResult{
-            .session_content = content,
-        };
-    };
-    defer args.deinit();
-
-    const path_val = args.value.object.get("path") orelse {
+pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.ToolResult {
+    const path_val = args.object.get("path") orelse {
         const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'path' argument", .{});
         return types.ToolResult{
             .session_content = content,
@@ -33,7 +25,7 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.Too
         };
     }
 
-    const content_val = args.value.object.get("content") orelse {
+    const content_val = args.object.get("content") orelse {
         const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'content' argument", .{});
         return types.ToolResult{
             .session_content = content,
@@ -71,17 +63,33 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.Too
         };
     }
 
-    // Check if file existed (for logging/debug purposes only - the file is always overwritten)
+    const existed = if (Io.Dir.cwd().openFile(ctx.io, path, .{ .mode = .read_only })) |f| blk: {
+        defer f.close(ctx.io);
+        break :blk true;
+    } else |_| false;
+
     _ = Io.Dir.cwd().deleteFile(ctx.io, path) catch |err| switch (err) {
-        error.FileNotFound => {}, // best-effort: file may not exist yet
-        else => {}, // non-fatal, proceed with createFile
+        error.FileNotFound => {},
+        else => {},
     };
     const file = try Io.Dir.cwd().createFile(ctx.io, path, .{});
     defer file.close(ctx.io);
     try file.writeStreamingAll(ctx.io, content_val.string);
 
+    var new_lines: usize = 1;
+    for (content_val.string) |b| {
+        if (b == '\n') new_lines += 1;
+    }
+
     return types.ToolResult{
         .session_content = try std.fmt.allocPrint(ctx.allocator, "Wrote {s}: {d} bytes", .{ path_val.string, content_val.string.len }),
+        .meta = .{ .write = .{
+            .path = path_val.string,
+            .existed = existed,
+            .old_lines = null,
+            .new_lines = new_lines,
+            .byte_count = content_val.string.len,
+        }},
     };
 }
 
@@ -95,6 +103,15 @@ fn readFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]const
     errdefer allocator.free(buf);
     const n = try f.readPositionalAll(io, buf, 0);
     return buf[0..n];
+}
+
+fn testExec(ctx: types.ToolContext, args_json: []const u8) !types.ToolResult {
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        return types.ToolResult{ .session_content = msg };
+    };
+    defer parsed.deinit();
+    return execute(ctx, parsed.value);
 }
 
 test "write: creates file" {
@@ -114,7 +131,7 @@ test "write: creates file" {
         .project_root = test_path,
     };
 
-    var result = try execute(ctx, "{\"path\":\"new.txt\",\"content\":\"hello world\"}");
+    var result = try testExec(ctx, "{\"path\":\"new.txt\",\"content\":\"hello world\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "Wrote") != null);
 
@@ -142,7 +159,7 @@ test "write: parent dirs auto-created" {
         .project_root = test_path,
     };
 
-    var result = try execute(ctx, "{\"path\":\"sub/dir/deep.txt\",\"content\":\"deep\"}");
+    var result = try testExec(ctx, "{\"path\":\"sub/dir/deep.txt\",\"content\":\"deep\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "Wrote") != null);
 
@@ -188,7 +205,7 @@ test "write: content too large" {
     }
     try json_buf.appendSlice(allocator, "\"}");
 
-    var result = try execute(ctx, json_buf.items);
+    var result = try testExec(ctx, json_buf.items);
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "too large") != null);
 }
@@ -217,7 +234,7 @@ test "write: overwrites existing file" {
         .project_root = test_path,
     };
 
-    var result = try execute(ctx, "{\"path\":\"exist.txt\",\"content\":\"updated\"}");
+    var result = try testExec(ctx, "{\"path\":\"exist.txt\",\"content\":\"updated\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "Wrote") != null);
 

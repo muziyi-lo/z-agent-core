@@ -12,16 +12,8 @@ const MAX_OUTPUT: usize = 50 * 1024;
 const MAX_ENTRIES: usize = 1000;
 
 /// Find files matching a glob pattern. Supports recursive **. Returns allocator-owned ToolResult.
-pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.ToolResult {
-    const args = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
-        const content = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
-        return types.ToolResult{
-            .session_content = content,
-        };
-    };
-    defer args.deinit();
-
-    const pattern_val = args.value.object.get("pattern") orelse {
+pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.ToolResult {
+    const pattern_val = args.object.get("pattern") orelse {
         const content = try std.fmt.allocPrint(ctx.allocator, "Error: missing 'pattern' argument", .{});
         return types.ToolResult{
             .session_content = content,
@@ -34,7 +26,7 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.Too
         };
     }
 
-    const path_arg: []const u8 = if (args.value.object.get("path")) |p|
+    const path_arg: []const u8 = if (args.object.get("path")) |p|
         if (p == .string) p.string else "."
     else
         ".";
@@ -68,6 +60,12 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.Too
         const msg = try std.fmt.allocPrint(ctx.allocator, "No files matched '{s}' in {s}", .{ pattern_val.string, path_arg });
         return types.ToolResult{
             .session_content = msg,
+            .meta = .{ .glob = .{
+                .pattern = pattern_val.string,
+                .path = if (path_arg.len > 0) path_arg else null,
+                .file_count = 0,
+                .truncated = false,
+            }},
         };
     }
     if (truncated) {
@@ -77,6 +75,12 @@ pub fn execute(ctx: types.ToolContext, args_json: []const u8) anyerror!types.Too
     const session_content = try buf.toOwnedSlice(ctx.allocator);
     return types.ToolResult{
         .session_content = session_content,
+        .meta = .{ .glob = .{
+            .pattern = pattern_val.string,
+            .path = if (path_arg.len > 0) path_arg else null,
+            .file_count = count,
+            .truncated = truncated,
+        }},
     };
 }
 
@@ -144,6 +148,15 @@ fn globMatch(name: []const u8, pattern: []const u8) bool {
 
 const Io = std.Io;
 
+fn testExec(ctx: types.ToolContext, args_json: []const u8) !types.ToolResult {
+    const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
+        return types.ToolResult{ .session_content = msg };
+    };
+    defer parsed.deinit();
+    return execute(ctx, parsed.value);
+}
+
 test "glob: finds files by extension" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -171,7 +184,7 @@ test "glob: finds files by extension" {
         .project_root = test_path,
     };
 
-    var result = try execute(ctx, "{\"pattern\":\"*.zig\",\"path\":\".\"}");
+    var result = try testExec(ctx, "{\"pattern\":\"*.zig\",\"path\":\".\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "a.zig") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "b.txt") == null);
@@ -193,7 +206,7 @@ test "glob: no matches" {
         .project_root = test_path,
     };
 
-    var result = try execute(ctx, "{\"pattern\":\"*.xyz\",\"path\":\".\"}");
+    var result = try testExec(ctx, "{\"pattern\":\"*.xyz\",\"path\":\".\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "No files") != null);
 }
