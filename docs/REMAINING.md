@@ -37,6 +37,7 @@ webfetch  ← 新工具，独立
 |---|------|----------|--------|
 | I3 | Agent 初始化 + 会话管理优化 (session_ops, prompt, skill injection) | PLAN-OPT-4-AGENT-SESSION.md | High |
 | I4 | 运行时稳定性 (上下文压缩 + API重试 + 死循环 + 工具上下文 + 每步重组) | PLAN-OPT-5-STABILITY.md | High |
+| I5 | 标签渲染统一化 (writeLabel函数 + 颜色表 + 对比度修复) | PLAN-OPT-3.2-LABEL-UNIFY.md | Low |
 
 ## Deferred (explicitly skipped)
 
