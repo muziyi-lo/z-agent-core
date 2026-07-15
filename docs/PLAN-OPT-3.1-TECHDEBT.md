@@ -22,6 +22,7 @@ OPT-3 实施对照检查发现的 13 项偏差。1 项外部阻塞（Zig 0.16 �
 | T1-2 | bash 上限 512KB | `tool/bash.zig` | `MAX_OUTPUT: usize = 50 * 1024` → `512 * 1024` |
 | T1-3 | bash stdout/stderr 标签 | `tool/bash.zig` | result_buf 拼接时 err_len > 0 → 加 `[stderr]\n` 前缀 |
 | T1-4 | render user_output 过滤 | `frontends/cli/render.zig` | 打印 user_output 前过滤 `\x00-\x08`/`\x0B`/`\x0C`/`\x0E-\x1F` |
+| T1-5 | tool 执行进度提示 | `core/agent.zig` + `frontends/cli/render.zig` | ToolDisplayCb 新增 `begin_tool` 回调（工具执行前触发）；render 实现等待状态 ` 工具 {name} ..` |
 
 ### 🔧 Tier 2: 中等（单文件 10-30 行）
 
