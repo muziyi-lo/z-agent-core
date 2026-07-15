@@ -12,6 +12,7 @@ pub const Config = struct {
     max_tokens: u32,
     max_tool_rounds: u32,
     providers: []const types.ProviderEntry,
+    base_prompt: ?[]const u8 = null,
 
     _arena: std.heap.ArenaAllocator,
 
@@ -205,12 +206,14 @@ fn parseConfigContent(a: std.mem.Allocator, source: []const u8) !Config {
     if (max_tool_rounds_val > @as(i64, @intCast(std.math.maxInt(u32)))) return error.ValueTooLarge;
 
     const all_models = try parseAllModels(a, parsed);
+    const bp_raw = getString(parsed, "base_prompt");
 
     return .{
         .default_model = try a.dupe(u8, dm_raw),
         .max_tokens = @intCast(@max(max_tokens_val, 0)),
         .max_tool_rounds = @intCast(@max(max_tool_rounds_val, 0)),
         .providers = try parseProviders(a, parsed, all_models),
+        .base_prompt = if (bp_raw) |bp| try a.dupe(u8, bp) else null,
         ._arena = undefined,
     };
 }

@@ -84,6 +84,65 @@ fn appendJsonStr(buf: *std.ArrayListAligned(u8, null), allocator: std.mem.Alloca
     }
 }
 
+pub const SkillInfo = struct {
+    name: []const u8,
+    description: []const u8,
+};
+
+pub fn listAvailableSkills(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8) ![]SkillInfo {
+    const skills_dir = try std.fs.path.join(allocator, &.{ project_root, ".zagent", "skills" });
+    defer allocator.free(skills_dir);
+
+    var dir = Io.Dir.cwd().openDir(io, skills_dir, .{ .iterate = true }) catch return &.{};
+    defer dir.close(io);
+
+    var list = std.ArrayListAligned(SkillInfo, null).empty;
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        const skill_path = try std.fs.path.join(allocator, &.{ skills_dir, entry.name, "SKILL.md" });
+        defer allocator.free(skill_path);
+
+        const file = Io.Dir.cwd().openFile(io, skill_path, .{ .mode = .read_only }) catch continue;
+        defer file.close(io);
+
+        const size: usize = @intCast((file.stat(io) catch continue).size);
+        if (size == 0 or size > 65536) continue;
+        const content = allocator.alloc(u8, size) catch continue;
+        defer allocator.free(content);
+        _ = file.readPositionalAll(io, content, 0) catch continue;
+
+        var desc: []const u8 = entry.name;
+        if (parseFrontmatterField(content, "description")) |d| {
+            desc = d;
+        }
+
+        try list.append(allocator, .{
+            .name = try allocator.dupe(u8, entry.name),
+            .description = try allocator.dupe(u8, desc),
+        });
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+fn parseFrontmatterField(content: []const u8, field: []const u8) ?[]const u8 {
+    if (content.len < 3 or !std.mem.eql(u8, content[0..3], "---")) return null;
+    const normalized = content[3..];
+    const end = std.mem.indexOfPosLinear(u8, normalized, 0, "---") orelse return null;
+    const fm = normalized[0..end];
+
+    const prefix = std.fmt.allocPrint(std.heap.page_allocator, "{s}:", .{field}) catch return null;
+    defer std.heap.page_allocator.free(prefix);
+
+    const pos = std.mem.indexOfPosLinear(u8, fm, 0, prefix) orelse return null;
+    const value_start = pos + prefix.len;
+    const line_end = std.mem.indexOfScalarPos(u8, fm, value_start, '\n') orelse fm.len;
+    var val = fm[value_start..line_end];
+    val = std.mem.trim(u8, val, " \t\r");
+    if (val.len == 0) return null;
+    return val;
+}
+
 const Io = std.Io;
 
 fn testExec(ctx: types.ToolContext, args_json: []const u8) !types.ToolResult {

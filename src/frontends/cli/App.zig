@@ -4,10 +4,12 @@ const types = @import("../../types.zig");
 const config_mod = @import("../../config.zig");
 const provider_mod = @import("../../io/provider.zig");
 const registry_mod = @import("../../tool/registry.zig");
+const skill_tool = @import("../../tool/skill.zig");
 const session_mod = @import("../../core/session.zig");
 const agent_mod = @import("../../core/agent.zig");
 const render = @import("render.zig");
 const signal = @import("../../util/signal.zig");
+const session_ops = @import("../../session_ops.zig");
 
 const Io = std.Io;
 
@@ -151,7 +153,7 @@ pub const App = struct {
         var session = try session_mod.Session.init(allocator, io, cfg.default_model);
         errdefer session.deinit();
 
-        try buildSystemPrompt(allocator, io, project_root, project_context, &session);
+        try buildSystemPrompt(allocator, io, project_root, project_context, &session, cfg.base_prompt);
 
         const session_dir = try std.fs.path.join(allocator, &.{ project_root, ".zagent", "sessions" });
 
@@ -458,18 +460,13 @@ pub const App = struct {
         struct {};
 
     fn sanitizeForkName(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
-        var buf: std.ArrayListAligned(u8, null) = .empty;
-        errdefer buf.deinit(allocator);
-        for (name) |c| {
-            try buf.append(allocator, if (c == ' ' or c == '\t') '_' else c);
-        }
-        return buf.toOwnedSlice(allocator);
+        return session_ops.sanitizeForkName(allocator, name);
     }
 
     fn resetSession(self: *App) !void {
         self.session.deinit();
-        self.session = try session_mod.Session.init(self.allocator, self.io, self.cfg.default_model);
-        try buildSystemPrompt(self.allocator, self.io, self.project_root, self.project_context, &self.session);
+        self.session = try session_ops.new(self.allocator, self.io, self.cfg.default_model);
+        try buildSystemPrompt(self.allocator, self.io, self.project_root, self.project_context, &self.session, self.cfg.base_prompt);
         self.initAgent();
     }
 
@@ -524,12 +521,7 @@ pub const App = struct {
             try render.writeLabeled(&stdout.interface, .err, "Usage: /load <session-name>");
             return;
         }
-        const path = try std.fs.path.join(self.allocator, &.{ self.session_dir, trimmed });
-        defer self.allocator.free(path);
-        const load_path = try std.fmt.allocPrint(self.allocator, "{s}.jsonl", .{path});
-        defer self.allocator.free(load_path);
-
-        const new_session = session_mod.Session.load(self.allocator, self.io, load_path) catch |err| {
+        const new_session = session_ops.loadById(self.allocator, self.io, self.session_dir, trimmed) catch |err| {
             var ebuf: [256]u8 = undefined;
             const msg = std.fmt.bufPrint(&ebuf, "Cannot load '{s}': {s}", .{ trimmed, @errorName(err) }) catch "Cannot load session";
             try render.writeLabeled(&stdout.interface, .err, msg);
@@ -553,34 +545,16 @@ pub const App = struct {
             return;
         }
 
-        const safe_name = try sanitizeForkName(self.allocator, fork_name);
-        defer self.allocator.free(safe_name);
-
-        const target_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}.jsonl", .{ self.session_dir, safe_name });
-        defer self.allocator.free(target_path);
-
-        // Check if target already exists
-        const f_check = Io.Dir.cwd().openFile(self.io, target_path, .{ .mode = .read_only }) catch null;
-        if (f_check) |f| {
-            f.close(self.io);
-            const msg = try std.fmt.allocPrint(self.allocator, "Session '{s}' already exists", .{fork_name});
-            defer self.allocator.free(msg);
-            try render.writeLabeled(&stdout.interface, .err, msg);
-            return;
-        }
-
-        // Write current session messages to new file (atomic via temp+rename)
-        self.session.writeTo(target_path, self.io) catch |err| {
-            const msg = try std.fmt.allocPrint(self.allocator, "Cannot create session '{s}': {s}", .{ fork_name, @errorName(err) });
-            defer self.allocator.free(msg);
-            try render.writeLabeled(&stdout.interface, .err, msg);
-            return;
-        };
-
-        // Auto-load the forked session
-        const new_session = session_mod.Session.load(self.allocator, self.io, target_path) catch |err| {
-            const msg = try std.fmt.allocPrint(self.allocator, "Cannot load forked session: {s}", .{@errorName(err)});
-            defer self.allocator.free(msg);
+        const new_session = session_ops.fork(self.allocator, self.io, &self.session, self.session_dir, fork_name_raw) catch |err| {
+            const msg = switch (err) {
+                error.InvalidForkName => "Fork name must not be empty",
+                error.PathSeparatorInName => "Fork name must not contain path separators",
+                error.SessionAlreadyExists => "Session already exists",
+                else => blk: {
+                    var ebuf: [128]u8 = undefined;
+                    break :blk std.fmt.bufPrint(&ebuf, "Cannot fork: {s}", .{@errorName(err)}) catch "Cannot fork";
+                },
+            };
             try render.writeLabeled(&stdout.interface, .err, msg);
             return;
         };
@@ -589,7 +563,7 @@ pub const App = struct {
         self.initAgent();
         self.render_ctx.reset();
 
-        const msg = try std.fmt.allocPrint(self.allocator, "Forked to '{s}' (switched)", .{safe_name});
+        const msg = try std.fmt.allocPrint(self.allocator, "Forked to '{s}' (switched)", .{fork_name_raw});
         defer self.allocator.free(msg);
         try render.writeLabeled(&stdout.interface, .success, msg);
     }
@@ -615,10 +589,11 @@ fn findProviderEntry(providers: []const types.ProviderEntry, spec: []const u8) ?
 
 fn buildSystemPrompt(
     allocator: std.mem.Allocator,
-    io: Io,
+    io: std.Io,
     project_root: []const u8,
     project_context: ?[]const u8,
     session: *session_mod.Session,
+    base_prompt: ?[]const u8,
 ) !void {
     const cwd_alloc = std.process.currentPathAlloc(io, allocator) catch null;
     defer if (cwd_alloc) |p| allocator.free(p);
@@ -631,6 +606,8 @@ fn buildSystemPrompt(
     const date = try formatDate(allocator, now_secs);
     defer allocator.free(date);
 
+    const effective_prompt = base_prompt orelse BASE_PROMPT;
+
     const prompt = try std.fmt.allocPrint(allocator,
         \\{s}
         \\
@@ -641,15 +618,38 @@ fn buildSystemPrompt(
         \\  Today's date: {s}
         \\</env>
         \\
-    , .{ BASE_PROMPT, cwd, project_root, os_tag, date });
+    , .{ effective_prompt, cwd, project_root, os_tag, date });
     defer allocator.free(prompt);
 
+    const skills = skill_tool.listAvailableSkills(allocator, io, project_root) catch &.{};
+    var final_prompt: []const u8 = prompt;
+    if (skills.len > 0) {
+        var skills_buf = std.ArrayListAligned(u8, null).empty;
+        try skills_buf.appendSlice(allocator, prompt);
+        try skills_buf.appendSlice(allocator, "\n<available_skills>\n");
+        for (skills) |s| {
+            const line = try std.fmt.allocPrint(allocator, "  {s}: {s}\n", .{ s.name, s.description });
+            defer allocator.free(line);
+            try skills_buf.appendSlice(allocator, line);
+        }
+        defer allocator.free(skills_buf.items);
+        try skills_buf.appendSlice(allocator, "</available_skills>\n");
+        final_prompt = try skills_buf.toOwnedSlice(allocator);
+    }
+    defer {
+        for (skills) |s| {
+            allocator.free(s.name);
+            allocator.free(s.description);
+        }
+        allocator.free(skills);
+    }
+
     if (project_context) |ctx| {
-        const full = try std.fmt.allocPrint(allocator, "{s}\n<project_context>\n{s}\n</project_context>\n", .{ prompt, ctx });
+        const full = try std.fmt.allocPrint(allocator, "{s}\n<project_context>\n{s}\n</project_context>\n", .{ final_prompt, ctx });
         defer allocator.free(full);
         try session.append(.{ .role = .system, .content = full });
     } else {
-        try session.append(.{ .role = .system, .content = prompt });
+        try session.append(.{ .role = .system, .content = final_prompt });
     }
 }
 
