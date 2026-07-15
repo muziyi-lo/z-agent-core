@@ -66,8 +66,16 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
     const total = out_len + err_len;
     var truncated = out_len < proc_result.stdout.len or err_len < proc_result.stderr.len;
 
+    const out_binary = isBinaryContent(proc_result.stdout);
+    const err_binary = isBinaryContent(proc_result.stderr);
+
     var result_buf = std.ArrayListAligned(u8, null).empty;
     if (total > 0) {
+        if (out_binary and err_binary) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "[binary output: {d} bytes]", .{raw_total});
+            defer ctx.allocator.free(msg);
+            try result_buf.appendSlice(ctx.allocator, msg);
+        } else {
         if (total > MAX_OUTPUT) {
             truncated = true;
             const half = MAX_OUTPUT / 2;
@@ -84,6 +92,7 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
                 try result_buf.appendSlice(ctx.allocator, proc_result.stderr[0..err_len]);
             }
         }
+    }
     }
 
     if (exit_code != 0) {
@@ -104,6 +113,19 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
             .timed_out = false,
         }},
     };
+}
+
+fn isBinaryContent(data: []const u8) bool {
+    if (data.len == 0) return false;
+    var control: usize = 0;
+    const check_len = @min(data.len, 4096);
+    for (data[0..check_len]) |b| {
+        if (b == 0) return true;
+        if (b < 0x20 and b != '\n' and b != '\r' and b != '\t') {
+            control += 1;
+        }
+    }
+    return control * 100 / check_len > 30;
 }
 
 const Io = std.Io;
