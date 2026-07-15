@@ -3,7 +3,7 @@
 ## 实施顺序
 
 ```
-OPT-5 (稳定.AP")  ← 先做：运行时健壮性
+OPT-5 (上下文压缩 + API重试 + 死循环 + 工具上下文 + 每步重组)  ← 先做：运行时健壮性
     ↓
 OPT-4 (session ops + prompt + skill)  ← 会话管理
     ↓
@@ -18,6 +18,9 @@ webfetch  ← 新工具，独立
 |---|------|----------|--------|
 | D5 | Thinking content: skip Markdown, plain dim text | PLAN-OPT-2-DISPLAY-GAPS.md | Low |
 | D6 | ToolResult 结构化：ToolMeta union + 全工具填 meta + edit 新工具 | PLAN-OPT-3-RENDER-TOOLS.md | High |
+| D7 | OPT-3.1 bug 修复 (B1 UTF-8截断, B2 bash二进制, B3 abort后flush) | PLAN-OPT-3.1-TECHDEBT.md | Medium |
+| D8 | OPT-3.1 快赢 (grep可选, bash 512KB/stderr/二进制, user_output过滤, 路径左截断) | PLAN-OPT-3.1-TECHDEBT.md | Medium |
+| D9 | OPT-3.1 增强 (token用量展示, 工具进度提示, bash命令标签, API错误展示) | PLAN-OPT-3.1-TECHDEBT.md | Medium |
 
 ## Done (2026-07-14)
 
@@ -49,7 +52,7 @@ webfetch  ← 新工具，独立
 | R8 | write 竞争防护 (writeIfUnchanged) | 需文件 hash 基础设施，单进程无并发 |
 | R9 | grep ripgrep 外部二进制 | `std.regex` 满足需求 |
 | R10 | bash 外部目录警告 | 权限系统范式不同 |
-| R11 | 死循环检测（StormBreaker） | 同 `(name, error)` 连续 3 次 → 追加攻略提示 |
+| R11 | 死循环检测（StormBreaker） | **→ OPT-5 P1-3** — 连续 3 次相同 (name, args) → 追加系统消息提示 |
 | R12 | 证据回执系统（Evidence Ledger） | 工具间交叉验证，需独立设计 |
 | R13 | 并行调度分区 | 后期性能优化 |
 

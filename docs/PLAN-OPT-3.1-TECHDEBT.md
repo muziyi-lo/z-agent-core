@@ -1,6 +1,6 @@
 # Plan OPT-3.1: 技术债清还
 
-## 状态: 部分完成
+## 状态: ✅ Bug 已修复，B4 延后，T2-3/4/5/7 延后
 
 ## 已修复 (2026-07-15)
 
@@ -47,8 +47,8 @@ T3-2（bash 可中断）和 T1-5（工具进度提示）从各自档位提升—
 |---|----|------|
 | B1 | edit diff 含无效 UTF-8 截断 | ✅ |
 | B2 | bash 输出二进制文件垃圾字节撑爆终端 | ✅ |
-| B3 | 打断后下一轮 API error — session 残留不完整消息 | ⏳ |
-| B4 | meta 字段借用 args Value 在 registry.defer 后悬垂 | ⏳ |
+| B3 | 打断后下一轮 API error — session 残留不完整消息 | ✅ |
+| B4 | meta 字段借用 args Value 在 registry.defer 后悬垂 | 📅 延后 |
 
 B4 根因：`registry.execute()` 中 `parsed.deinit()` 在工具 execute() 返回后、agent 消费 meta 前执行。meta 字段（如 `meta.bash.command`、`meta.read.path`）引用 `parsed.value` 内部字符串切片，`defer` 先于 `return` 执行导致悬垂。影响所有 7 个工具的 meta 字段。当前因 arena 复用侥幸运行，属于 UB。
 
