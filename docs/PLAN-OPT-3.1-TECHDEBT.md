@@ -17,6 +17,7 @@ OPT-3 实施对照检查发现的 13 项偏差 + 实际使用中暴露的 1 个 
 | # | 项 | 根因 | 文件 | 改动 |
 |---|----|------|------|------|
 | B1 | edit diff 含无效 UTF-8 截断 | `buildDiff()` 字节截断 `trimmed[0..240]` 可能切在多字节字符中间 | `tool/edit.zig` | 截断后用 `std.unicode.utf8ValidateSlice` 回退到最后一个完整码点边界 |
+| B2 | bash 输出二进制文件垃圾字节撑爆终端 | `std.process.run` 捕获 stdout/stderr 后未检测二进制数据，直接拼入 session_content 和 user_output | `tool/bash.zig` | 输出拼接前检查 content 含非可打印字符比例 >30%，超过则返回 `[binary output: N bytes]` 替代原始内容 |
 
 ## 分档
 
