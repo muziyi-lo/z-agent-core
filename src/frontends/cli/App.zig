@@ -266,6 +266,7 @@ pub const App = struct {
                 try render.writeLabeled(&stdout.interface, .err, e);
             }
             self.rollbackTurn(pre_count);
+            try self.session.flush();
         } else {
             try self.session.flush();
         }
@@ -408,10 +409,12 @@ pub const App = struct {
                 const msg = if (result.error_msg) |e| e else "API error";
                 try render.writeLabeled(&stdout.interface, .err, msg);
                 self.rollbackTurn(pre_count);
+                try self.session.flush();
             },
             .interrupted => {
                 try render.writeLabeled(&stdout.interface, .warning, "interrupted");
                 self.rollbackTurn(pre_count);
+                try self.session.flush();
             },
             .max_rounds => {
                 try render.writeLabeled(&stdout.interface, .warning, "max tool rounds reached");
