@@ -361,6 +361,7 @@ fn drainBuf(buf: *std.ArrayListAligned(u8, null), keep_start: usize) void {
 }
 
 threadlocal var DISPLAY_BUF: [256]u8 = undefined;
+threadlocal var PATH_BUF: [256]u8 = undefined;
 
 fn shorten(s: []const u8, max: usize) []const u8 {
     return s[0..@min(s.len, max)];
@@ -369,8 +370,8 @@ fn shorten(s: []const u8, max: usize) []const u8 {
 fn truncatePath(s: []const u8, max: usize) []const u8 {
     if (s.len <= max) return s;
     const prefix = "...";
-    const start = s.len - (max - prefix.len);
-    if (start >= s.len) return s;
+    const avail = max - prefix.len;
+    const start = s.len -| avail;
     var i = start;
     while (i < s.len) {
         const len = std.unicode.utf8ByteSequenceLength(s[i]) catch {
@@ -382,7 +383,12 @@ fn truncatePath(s: []const u8, max: usize) []const u8 {
     } else {
         i = start;
     }
-    return s[i..];
+    const tail = s[i..];
+    const total = prefix.len + tail.len;
+    if (total > PATH_BUF.len) return s;
+    @memcpy(PATH_BUF[0..prefix.len], prefix);
+    @memcpy(PATH_BUF[prefix.len..total], tail);
+    return PATH_BUF[0..total];
 }
 
 fn toolMetaLabel(tool_name: []const u8, meta: types.ToolMeta) ?[]const u8 {

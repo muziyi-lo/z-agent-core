@@ -48,6 +48,11 @@ T3-2（bash 可中断）和 T1-5（工具进度提示）从各自档位提升—
 | B1 | edit diff 含无效 UTF-8 截断 | ✅ |
 | B2 | bash 输出二进制文件垃圾字节撑爆终端 | ✅ |
 | B3 | 打断后下一轮 API error — session 残留不完整消息 | ⏳ |
+| B4 | meta 字段借用 args Value 在 registry.defer 后悬垂 | ⏳ |
+
+B4 根因：`registry.execute()` 中 `parsed.deinit()` 在工具 execute() 返回后、agent 消费 meta 前执行。meta 字段（如 `meta.bash.command`、`meta.read.path`）引用 `parsed.value` 内部字符串切片，`defer` 先于 `return` 执行导致悬垂。影响所有 7 个工具的 meta 字段。当前因 arena 复用侥幸运行，属于 UB。
+
+修复方向：工具用 `ctx.allocator`（agent arena）dup meta 字符串；或 registry 推迟 `parsed.deinit` 到 render 回调后。
 
 B3 根因：`runTurn` 被 abort 时，流式输出已通过 `session_ref.append()` 追加了部分 assistant message（`thinking/content`），但 `App` 看到 `.interrupted` 后不 flush（当前行 242-244 `if (.interrupted) rollback`），却也不回滚 session 中已追加的内容。下一轮 API 请求发送截断的 assistant message → JSON 序列化失败 → API error。
 
