@@ -17,6 +17,7 @@ pub const TurnFinish = enum {
 pub const RoundResult = struct {
     new_message_count: usize,
     finish: TurnFinish,
+    error_msg: ?[]const u8 = null,
 };
 
 /// Mock-injectable chat function. ctx: opaque test state; returns arena-backed ProviderResponse.
@@ -106,14 +107,14 @@ pub const AgentLoop = struct {
     }
 
     /// Fire on_turn_end callback then construct RoundResult. Called at every exit point.
-    fn finishTurn(self: *AgentLoop, new_msgs: usize, finish: TurnFinish) RoundResult {
+    fn finishTurn(self: *AgentLoop, new_msgs: usize, finish: TurnFinish, error_msg: ?[]const u8) RoundResult {
         if (finish == .interrupted) {
             self._aborted = false;
         }
         if (self.lifecycle) |lc| {
             if (lc.on_turn_end) |cb| cb(lc.context, finish);
         }
-        return .{ .new_message_count = new_msgs, .finish = finish };
+        return .{ .new_message_count = new_msgs, .finish = finish, .error_msg = error_msg };
     }
 
     /// Execute one LLM turn. User message must already be in session.
@@ -142,7 +143,7 @@ pub const AgentLoop = struct {
 
         while (true) {
             if (self._aborted) {
-                return finishTurn(self, new_msgs, .interrupted);
+                return finishTurn(self, new_msgs, .interrupted, null);
             }
             if (tool_rounds >= self.max_tool_rounds) {
                 new_msgs += 1;
@@ -150,7 +151,7 @@ pub const AgentLoop = struct {
                     .role = .system,
                     .content = "[max tool rounds reached - further tool calls prevented]",
                 });
-                return finishTurn(self, new_msgs, .max_rounds);
+                return finishTurn(self, new_msgs, .max_rounds, null);
             }
 
             const msgs = self.session_ref.messages();
@@ -163,9 +164,10 @@ pub const AgentLoop = struct {
                 break :blk result;
             };
             const resp = raw_resp catch |err| {
+                const err_name = @errorName(err);
                 return switch (err) {
-                    error.Interrupted => finishTurn(self, new_msgs, .interrupted),
-                    else => finishTurn(self, new_msgs, .api_error),
+                    error.Interrupted => finishTurn(self, new_msgs, .interrupted, err_name),
+                    else => finishTurn(self, new_msgs, .api_error, err_name),
                 };
             };
 
@@ -178,14 +180,14 @@ pub const AgentLoop = struct {
             new_msgs += 1;
 
             if (resp.finish_reason == .stop) {
-                return finishTurn(self, new_msgs, .stop);
+                return finishTurn(self, new_msgs, .stop, null);
             }
 
             if (resp.finish_reason == .tool_calls) {
                 if (resp.tool_calls) |tcs| {
                     for (tcs) |tc| {
                         if (self._aborted) {
-                            return finishTurn(self, new_msgs, .interrupted);
+                            return finishTurn(self, new_msgs, .interrupted, null);
                         }
 
                         if (self.tool_hooks) |h| {
@@ -251,7 +253,7 @@ pub const AgentLoop = struct {
                 continue;
             }
 
-            return finishTurn(self, new_msgs, .stop);
+            return finishTurn(self, new_msgs, .stop, null);
         }
     }
 };
