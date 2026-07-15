@@ -14,6 +14,9 @@
 |----|------|
 | 修改 pub API 签名 | `writeLabeled`/`writeLabelBegin` 签名不变，内部重构 |
 | 给 `.err/.warning/.success` 加底色块 | 错误/警告/成功信息不需要底色视觉权重 |
+| multi-line text 缩进前缀 | 当前所有调用 text 均为单行，无多行场景 |
+| LabelWriter 链式包装器 | 引入新类型增加复杂度，与 CLI 单文件直接风格冲突 |
+| comptime 预构建样式字符串 | 8 个标签运行时开销可忽略，编译期优化无显著收益 |
 
 ## 问题
 
@@ -42,6 +45,9 @@ fn writeLabel(writer: *Io.Writer, bg: []const u8, fg: []const u8, label: []const
 }
 ```
 
+空行由调用层控制：App.zig 中 token 显示后写入 `\n`，不在 `writeLabel` 内部追加双换行。
+`writeLabelBegin` 保持独立结构（流式输出需要 begin/end 配对），不纳入本次统⼀。
+
 ### 标签颜色表
 
 ```zig
@@ -59,6 +65,8 @@ fn labelColor(mtype: MessageType) struct { bg: []const u8, fg: []const u8, label
 }
 ```
 
+`labelPlain` 保持独立实现（返回纯文本标签），不从 `labelColor` 派生，确保无颜色模式不被 ANSI 结构体污染。
+
 ### 调用简化
 
 ```
@@ -69,25 +77,20 @@ try writer.print("{s}{s} 用量 {s}{s}{s}{s}\n", .{ C.bg_bright_cyan, C.white, C
 try writeLabel(writer, C.bg_bright_black, C.white, "用量", text);
 ```
 
-### 标签输出对比
+### 测试
 
-```
-当前:  用量 输入 2186 | 输出 843 | 累计 4502/131072
-                                ↑ 无空行
- 用户  你好
-
-实施后:  用量 输入 2186 | 输出 843 | 累计 4502/131072
-                                ↑ 附加空行
- 用户  你好
-```
+新增 `writeLabel` 单元测试：
+- 有颜色模式：验证底色块风格输出
+- 有颜色模式：验证括号风格输出（err/warning/success）
+- 无颜色模式：验证纯文本输出
+- `labelColor` 八种类型不 panic
 
 ## 文件变更
 
 | 文件 | 操作 | 说明 |
 |------|------|------|
-| `src/frontends/cli/render.zig` | 修改 | 新增 `writeLabel` + `labelColor`；`writeLabeled`/`writeLabelBegin` 内部改用新函数；删除手工格式字符串 |
-
-不碰任何其他文件。`labelPlain` 保留供无颜色模式，内部也改用 `labelColor`。
+| `src/frontends/cli/render.zig` | 修改 | 新增 `writeLabel` + `labelColor`；`writeLabeled` 内部改用新函数；删除手工格式字符串；新增测试 |
+| `src/frontends/cli/App.zig` | 修改 | token 用量显示后追加 `\n` 空行 |
 
 ## 验证
 
@@ -95,3 +98,17 @@ try writeLabel(writer, C.bg_bright_black, C.white, "用量", text);
 zig build
 zig build test
 ```
+
+## 第三方评测决策
+
+| 建议 | 决策 | 理由 |
+|------|------|------|
+| 漏洞1: 明确空行实现 | ✅ 采纳 | 空行由 App.zig 调用层控制，不在 render 内部处理 |
+| 漏洞2: 输出格式变化兼容 | ❌ 不采纳 | CLI 交互工具无下游解析器，label 格式变化属于视觉优化 |
+| 漏洞3: labelPlain 重用方式 | ✅ 采纳 | `labelPlain` 保持独立，不从 `labelColor` 派生 |
+| 漏洞4: writeLabelBegin 差异 | ✅ 采纳 | `writeLabel` 仅替换 `writeLabeled`，begin/end 配对保持独立 |
+| 漏洞5: 多行 text 处理 | ❌ 不采纳 | 当前所有调用均为单行，预加约束增加复杂度 |
+| 实践1: comptime 预构建 | ❌ 不采纳 | 运行时开销可忽略，无显著收益 |
+| 实践2: LabelWriter 包装器 | 📅 延后 | 未来 TUI/Web 前端阶段可考虑 |
+| 实践3: 消息组级空行 | ✅ 采纳 | 空行逻辑放在调用层而非 render 内部 |
+| 实践4: 快照测试 | ✅ 采纳 | 新增 `writeLabel` + `labelColor` 单元测试 |
