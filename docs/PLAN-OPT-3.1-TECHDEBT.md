@@ -46,6 +46,11 @@ T3-2（bash 可中断）和 T1-5（工具进度提示）从各自档位提升—
 |---|----|------|
 | B1 | edit diff 含无效 UTF-8 截断 | ✅ |
 | B2 | bash 输出二进制文件垃圾字节撑爆终端 | ✅ |
+| B3 | 打断后下一轮 API error — session 残留不完整消息 | ⏳ |
+
+B3 根因：`runTurn` 被 abort 时，流式输出已通过 `session_ref.append()` 追加了部分 assistant message（`thinking/content`），但 `App` 看到 `.interrupted` 后不 flush（当前行 242-244 `if (.interrupted) rollback`），却也不回滚 session 中已追加的内容。下一轮 API 请求发送截断的 assistant message → JSON 序列化失败 → API error。
+
+修复方向：abort 时回滚 session 到 `pre_count`（`rollbackTurn` 已有，但当前跳过该路径）；或在 agent 层 abort 时确保 session 无半条消息。
 
 ## ⚡ Tier 1: 快赢 + 核心体验
 
@@ -87,7 +92,7 @@ T3-2（bash 可中断）和 T1-5（工具进度提示）从各自档位提升—
 ```
 已完成: B1 B2 T1-1 T1-2 T1-3 T1-4 T1-6 T2-6
     ↓
-优先: T1-5 (工具进度) → T3-2 (bash 可中断)  ← 卡死体验根因
+优先: B3 (打断后 API error) → T3-2 (bash 可中断)  ← 可用性阻断
     ↓
 可选: T2-7 (输出存档) → T2-3/4 (skill) → T2-5 (PhaseWriter) → T2-1/2
 ```
