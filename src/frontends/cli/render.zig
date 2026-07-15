@@ -502,7 +502,8 @@ pub const ToolDisplay = struct {
             if (had_error and colorize) {
                 self.writer.print("{s}{s}", .{ C.red, label }) catch |err| return err;
             } else {
-                self.writer.print("{s}", .{label}) catch |err| return err;
+                if (colorize) self.writer.print("{s}{s}{s}", .{ C.white, label, C.reset }) catch |err| return err
+                else self.writer.print("{s}", .{label}) catch |err| return err;
             }
 
             if (had_error) {
