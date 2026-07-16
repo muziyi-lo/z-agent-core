@@ -28,6 +28,7 @@ pub fn main(process: std.process.Init) !void {
             }
         } else if (std.mem.eql(u8, arg, "--list-models")) {
             list_models = true;
+        } else if (std.mem.eql(u8, arg, "--model")) {
             if (arg_iter.next()) |val| {
                 model_override = try allocator.dupe(u8, val);
             }
