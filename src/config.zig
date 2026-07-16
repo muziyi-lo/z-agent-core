@@ -34,19 +34,6 @@ pub const Config = struct {
                     var stderr_writer: Io.File.Writer = .init(.stderr(), io, &stderr_buf);
                     try stderr_writer.interface.print("z-agent-core: config created at .zagent/config.toml\n", .{});
                 }
-                const model = try resolveModel(&result, result.default_model);
-                {
-                    var stderr_buf: [512]u8 = undefined;
-                    var stderr_writer: Io.File.Writer = .init(.stderr(), io, &stderr_buf);
-                    var model_dbuf: [128]u8 = undefined;
-                    var prov_dbuf: [64]u8 = undefined;
-                    const model_display = formatModelDisplay(model.name, &model_dbuf);
-                    const provider_display = formatProviderDisplay(model.provider, &prov_dbuf);
-                    try stderr_writer.interface.print("z-agent-core v{s} | {s} | {s}\n", .{
-                        types.VERSION, model_display, provider_display,
-                    });
-                    try stderr_writer.interface.flush();
-                }
                 result._arena = arena;
                 return result;
             },
@@ -55,20 +42,6 @@ pub const Config = struct {
 
         var result = try parseConfigContent(arena.allocator(), content);
         try validateConfig(&result, io);
-
-        const model = try resolveModel(&result, result.default_model);
-        {
-            var stderr_buf: [512]u8 = undefined;
-            var stderr_writer: Io.File.Writer = .init(.stderr(), io, &stderr_buf);
-            var model_dbuf: [128]u8 = undefined;
-            var prov_dbuf: [64]u8 = undefined;
-            const model_display = formatModelDisplay(model.name, &model_dbuf);
-            const provider_display = formatProviderDisplay(model.provider, &prov_dbuf);
-            try stderr_writer.interface.print("z-agent-core v{s} | {s} | {s}\n", .{
-                types.VERSION, model_display, provider_display,
-            });
-            try stderr_writer.interface.flush();
-        }
 
         result._arena = arena;
         return result;
@@ -388,7 +361,7 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8, io: std.Io) ![]u8 {
 
 /// Format model name for display: replace spaces with hyphens.
 /// Returns slice of buf (caller owns nothing).
-fn formatModelDisplay(name: []const u8, buf: *[128]u8) []const u8 {
+pub fn formatModelDisplay(name: []const u8, buf: *[128]u8) []const u8 {
     var i: usize = 0;
     for (name) |ch| {
         if (i >= 126) break;
@@ -406,7 +379,7 @@ fn formatModelDisplay(name: []const u8, buf: *[128]u8) []const u8 {
 /// Capitalize first letter of provider name for display.
 /// Special-cases known provider names for correct casing (e.g. "deepseek" → "DeepSeek").
 /// Returns a compile-time known slice or a slice of buf.
-fn formatProviderDisplay(name: []const u8, buf: *[64]u8) []const u8 {
+pub fn formatProviderDisplay(name: []const u8, buf: *[64]u8) []const u8 {
     if (name.len == 0) return name;
     if (std.mem.eql(u8, name, "deepseek")) return "DeepSeek";
     buf[0] = if (name[0] >= 'a' and name[0] <= 'z') @as(u8, name[0] - 32) else name[0];

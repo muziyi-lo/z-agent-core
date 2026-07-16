@@ -123,6 +123,18 @@ pub const App = struct {
         _ = config_mod.loadDotEnv(allocator, project_root, io) catch {}; // .env is optional
 
         const model = try config_mod.resolveModel(&cfg, cfg.default_model);
+        {
+            var sbuf: [256]u8 = undefined;
+            var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
+            var md: [128]u8 = undefined;
+            var pd: [64]u8 = undefined;
+            sw.interface.print("z-agent-core v{s} | {s} | {s}\n", .{
+                types.VERSION,
+                config_mod.formatModelDisplay(model.name, &md),
+                config_mod.formatProviderDisplay(model.provider, &pd),
+            }) catch {};
+            sw.interface.flush() catch {};
+        }
         const entry = findProviderEntry(cfg.providers, cfg.default_model) orelse {
             var sbuf: [256]u8 = undefined;
             var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
