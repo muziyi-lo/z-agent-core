@@ -3,6 +3,21 @@
 ## [0.2.0] - 未发布
 
 ### Added
+- **OPT-5: 运行时稳定性（P0-2）API 重试增强**
+  - `io/provider.zig`：重试次数 3→5，退避 500ms→1s→2s→4s→8s；错误分类（`isRetryableError`/`isRetryableBody` 检测 rate limit/503 → `error.ApiRateLimited` 可重试）；PhaseWriter 替代 stderr 输出重试状态
+  - `io/provider.zig`：新增 `containsIgnoreCase` 辅助函数用于 case-insensitive 错误分类
+- **OPT-5: 运行时稳定性（P0-1）上下文压缩**
+  - `tool/compact.zig`：全新 compact 工具——API 摘要生成 + session 消息替换（保留 system prompt + 最近 N 条 + 摘要）
+  - `core/agent.zig`：`runTurn` 入口累计 token 检查（超出 context_window 85% 阈值时注入系统警告）
+  - `core/session.zig`：新增 `updateFirstSystem()` 方法（替换/前插 system 消息）
+- **OPT-5: 运行时稳定性（P1-3）死循环检测**
+  - `core/agent.zig`：StormBreaker — FIFO 队列（容量 5）记录工具调用 `{name, args_hash}`；连续 3 次相同追加 system 警告
+- **OPT-5: 运行时稳定性（P1-4）工具上下文增强**
+  - `types.zig`：`ToolContext` 新增 `messages`、`session_ref`、`provider_ref` 字段（anyopaque 避免循环依赖）
+- **OPT-5: 运行时稳定性（P1-5）每步重组系统提示**
+  - `core/agent.zig`：新增 `SystemPromptCb` 回调；`runTurn` 入口调用 `system_prompt.rebuild()`
+  - `core/session.zig`：新增 `updateFirstSystem()` 方法
+  - `frontends/cli/App.zig`：`buildSystemPrompt` 改为 `buildPromptString` 返回字符串；通过回调注册替代 init 时一次性构建
 - **OPT-3: 工具输出结构化（ToolMeta）**
   - `types.zig`：新增 `ToolMeta` union（write/read/grep/bash/glob/skill/edit 共 7 个 variant + none）；`ToolResult` 新增 `meta` 字段
   - `tool/registry.zig`：集中 `parseFromSlice`（工具接收 `std.json.Value` 替代原始 JSON 字符串）；`ToolEntry` 新增 `validate` 回调

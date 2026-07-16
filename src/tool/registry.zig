@@ -7,6 +7,7 @@ const grep_tool = @import("grep.zig");
 const glob_tool = @import("glob.zig");
 const skill_tool = @import("skill.zig");
 const edit_tool = @import("edit.zig");
+const compact_tool = @import("compact.zig");
 
 pub const ToolEntry = struct {
     name: []const u8,
@@ -66,6 +67,7 @@ pub fn buildRegistry() Registry {
             .{ .name = glob_tool.tool_name, .description = glob_tool.tool_description, .params = glob_tool.tool_params, .execute = glob_tool.execute },
             .{ .name = skill_tool.tool_name, .description = skill_tool.tool_description, .params = skill_tool.tool_params, .execute = skill_tool.execute },
             .{ .name = edit_tool.tool_name, .description = edit_tool.tool_description, .params = edit_tool.tool_params, .execute = edit_tool.execute },
+            .{ .name = compact_tool.tool_name, .description = compact_tool.tool_description, .params = compact_tool.tool_params, .execute = compact_tool.execute },
         },
     };
 }
@@ -109,7 +111,7 @@ test "registry: toTools generates array" {
     const tools = try reg.toTools(std.testing.allocator);
     defer std.testing.allocator.free(tools);
 
-    try std.testing.expect(tools.len == 7);
+    try std.testing.expect(tools.len == 8);
     try std.testing.expect(std.mem.eql(u8, tools[0].name, "read"));
     try std.testing.expect(std.mem.eql(u8, tools[1].name, "write"));
     try std.testing.expect(std.mem.eql(u8, tools[5].name, "skill"));

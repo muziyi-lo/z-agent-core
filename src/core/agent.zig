@@ -59,6 +59,19 @@ pub const LifecycleCb = struct {
     on_turn_end: ?*const fn (ctx: ?*anyopaque, finish: TurnFinish) void = null,
 };
 
+/// Callback to rebuild the system prompt at the start of each turn.
+/// Frontend injects this; agent calls it before the first LLM request.
+/// Responsible for updating the session's system message (replace or prepend).
+pub const SystemPromptCb = struct {
+    context: ?*anyopaque = null,
+    rebuild: *const fn (ctx: ?*anyopaque) anyerror!void,
+};
+
+pub const ToolCallRecord = struct {
+    name: []const u8,
+    args_hash: u64,
+};
+
 /// Single-turn LLM execution engine. V1 synchronous — no TUI, compact, permission, or async.
 pub const AgentLoop = struct {
     /// Parent allocator, used for ToolContext and freeing tool results. Not arena.
@@ -69,11 +82,18 @@ pub const AgentLoop = struct {
     session_ref: *session_mod.Session,
     max_tool_rounds: u32,
     project_root: []const u8,
+    context_window: u32,
     chat_fn: ?ChatFn = null,
     chat_ctx: ?*anyopaque = null,
     tool_hooks: ?ToolHooks = null,
     lifecycle: ?LifecycleCb = null,
+    system_prompt: ?SystemPromptCb = null,
     _aborted: bool = false,
+    _tool_call_history: [5]ToolCallRecord = undefined,
+    _tool_call_history_len: usize = 0,
+    _tool_call_history_pos: usize = 0,
+    _loop_warning_injected: bool = false,
+    _context_warning_injected: bool = false,
 
     /// Signal the next runTurn to abort at the earliest safe point.
     pub fn abort(self: *AgentLoop) void {
@@ -88,9 +108,11 @@ pub const AgentLoop = struct {
         session_ref: *session_mod.Session,
         max_tool_rounds: u32,
         project_root: []const u8,
+        context_window: u32,
         opts: struct {
             tool_hooks: ?ToolHooks = null,
             lifecycle: ?LifecycleCb = null,
+            system_prompt: ?SystemPromptCb = null,
         },
     ) AgentLoop {
         return .{
@@ -101,8 +123,10 @@ pub const AgentLoop = struct {
             .session_ref = session_ref,
             .max_tool_rounds = max_tool_rounds,
             .project_root = project_root,
+            .context_window = context_window,
             .tool_hooks = opts.tool_hooks,
             .lifecycle = opts.lifecycle,
+            .system_prompt = opts.system_prompt,
         };
     }
 
@@ -132,6 +156,15 @@ pub const AgentLoop = struct {
             }
         }
 
+        if (self.system_prompt) |sp| {
+            try sp.rebuild(sp.context);
+        }
+
+        self._tool_call_history_len = 0;
+        self._tool_call_history_pos = 0;
+        self._loop_warning_injected = false;
+        self._context_warning_injected = false;
+
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const arena_alloc = arena.allocator();
@@ -152,6 +185,22 @@ pub const AgentLoop = struct {
                     .content = "[max tool rounds reached - further tool calls prevented]",
                 });
                 return finishTurn(self, new_msgs, .max_rounds, null);
+            }
+
+            if (self.context_window > 0) {
+                var total_used: usize = 0;
+                for (self.session_ref.messages()) |msg| {
+                    if (msg.usage) |u| total_used += u.total;
+                }
+                const threshold = (self.context_window * 85) / 100;
+                if (total_used > threshold and !self._context_warning_injected) {
+                    self._context_warning_injected = true;
+                    try self.session_ref.append(.{
+                        .role = .system,
+                        .content = "[Notice: Approaching context window limit. Consider asking the user for guidance or focusing on the most critical task.]",
+                    });
+                    new_msgs += 1;
+                }
             }
 
             const msgs = self.session_ref.messages();
@@ -214,10 +263,42 @@ pub const AgentLoop = struct {
                                 .model = self.provider_ref.config.model,
                             },
                             .abort_target = &self._aborted,
+                            .messages = self.session_ref.messages(),
+                            .session_ref = self.session_ref,
+                            .provider_ref = self.provider_ref,
                         };
                         if (tool_display) |cb| {
                             if (cb.begin_tool) |bt| bt(cb.context, tc.name);
                         }
+
+                        if (!self._loop_warning_injected) {
+                            const args_hash: u64 = std.hash.Wyhash.hash(0, tc.arguments);
+                            if (self._tool_call_history_len >= 3) {
+                                var all_same = true;
+                                const start_pos: usize = (self._tool_call_history_pos + 5 - 3) % 5;
+                                for (0..3) |i| {
+                                    const idx = (start_pos + i) % 5;
+                                    if (!std.mem.eql(u8, self._tool_call_history[idx].name, tc.name) or
+                                        self._tool_call_history[idx].args_hash != args_hash)
+                                    {
+                                        all_same = false;
+                                        break;
+                                    }
+                                }
+                                if (all_same) {
+                                    self._loop_warning_injected = true;
+                                    try self.session_ref.append(.{
+                                        .role = .system,
+                                        .content = "[Notice: You appear to be repeating the same tool call. Consider adjusting your strategy or asking the user for guidance.]",
+                                    });
+                                    new_msgs += 1;
+                                }
+                            }
+                            self._tool_call_history[self._tool_call_history_pos] = .{ .name = tc.name, .args_hash = args_hash };
+                            self._tool_call_history_pos = (self._tool_call_history_pos + 1) % 5;
+                            if (self._tool_call_history_len < 5) self._tool_call_history_len += 1;
+                        }
+
                         var exec_result = self.tool_registry.execute(ctx, tc.name, tc.arguments);
 
                         if (exec_result) |*ok| {
@@ -325,7 +406,7 @@ test "agent: init stores fields" {
 
     const reg = registry_mod.buildRegistry();
 
-    const agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, "/tmp/project", .{});
+    const agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, "/tmp/project", 0, .{});
 
     try std.testing.expectEqual(allocator, agent.allocator);
     try std.testing.expectEqual(io, agent.io);
@@ -353,7 +434,7 @@ test "agent: runTurn stop" {
     };
     const reg = registry_mod.buildRegistry();
 
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{});
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
 
     var mock = MockChatter{
         .responses = &.{
@@ -396,7 +477,7 @@ test "agent: runTurn tool_calls" {
     };
     const reg = registry_mod.buildRegistry();
 
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{});
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
 
     var tool_calls = [_]types.ToolCall{
         .{ .id = "call_1", .name = "glob", .arguments = "{\"pattern\":\"*.zig\"}" },
@@ -447,7 +528,7 @@ test "agent: runTurn max_rounds" {
     };
     const reg = registry_mod.buildRegistry();
 
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 1, ".", .{});
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 1, ".", 0, .{});
 
     var tool_calls_mr = [_]types.ToolCall{
         .{ .id = "call_1", .name = "glob", .arguments = "{\"pattern\":\"*.zig\"}" },
@@ -495,7 +576,7 @@ test "agent: runTurn interrupted" {
     };
     const reg = registry_mod.buildRegistry();
 
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{});
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
 
     var mock = MockChatter{
         .responses = &.{
@@ -534,7 +615,7 @@ test "agent: runTurn api_error" {
     };
     const reg = registry_mod.buildRegistry();
 
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{});
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
 
     var mock = MockChatter{
         .responses = &.{},
@@ -570,7 +651,7 @@ test "agent: runTurn appends to session" {
     };
     const reg = registry_mod.buildRegistry();
 
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{});
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
 
     var tool_calls_app = [_]types.ToolCall{
         .{ .id = "c1", .name = "glob", .arguments = "{\"pattern\":\"*\"}" },
@@ -651,7 +732,7 @@ test "agent: hooks before blocks execution" {
     const reg = registry_mod.buildRegistry();
 
     var tc = TestCallbacks{ .before_block = true };
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{
         .tool_hooks = .{ .context = &tc, .before = testBeforeHook },
     });
 
@@ -687,7 +768,7 @@ test "agent: hooks before allows execution" {
     const reg = registry_mod.buildRegistry();
 
     var tc = TestCallbacks{ .before_block = false };
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{
         .tool_hooks = .{ .context = &tc, .before = testBeforeHook },
     });
 
@@ -722,7 +803,7 @@ test "agent: hooks after fires on success" {
     const reg = registry_mod.buildRegistry();
 
     var tc = TestCallbacks{};
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{
         .tool_hooks = .{ .context = &tc, .after = testAfterHook },
     });
 
@@ -757,7 +838,7 @@ test "agent: abort before runTurn returns interrupted" {
     };
     const reg = registry_mod.buildRegistry();
 
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{});
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
 
     var mock = MockChatter{
         .responses = &.{.{ .content = "Hello!", .tool_calls = null, .finish_reason = .stop }},
@@ -787,7 +868,7 @@ test "agent: abort resets on next runTurn" {
     };
     const reg = registry_mod.buildRegistry();
 
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{});
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
 
     var mock = MockChatter{
         .responses = &.{
@@ -824,7 +905,7 @@ test "agent: lifecycle on_turn_start fires" {
     const reg = registry_mod.buildRegistry();
 
     var tc = TestCallbacks{};
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{
         .lifecycle = .{ .context = &tc, .on_turn_start = testStartCb },
     });
 
@@ -854,7 +935,7 @@ test "agent: lifecycle on_turn_end fires" {
     const reg = registry_mod.buildRegistry();
 
     var tc = TestCallbacks{};
-    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", .{
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{
         .lifecycle = .{ .context = &tc, .on_turn_end = testEndCb },
     });
 

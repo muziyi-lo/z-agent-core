@@ -72,6 +72,7 @@ pub const App = struct {
     project_context: ?[]const u8,
     single_prompt: ?[]const u8,
     session_dir: []const u8,
+    base_prompt: ?[]const u8,
 
     render_ctx: render.RenderContext,
     tool_display: render.ToolDisplay,
@@ -153,8 +154,6 @@ pub const App = struct {
         var session = try session_mod.Session.init(allocator, io, cfg.default_model);
         errdefer session.deinit();
 
-        try buildSystemPrompt(allocator, io, project_root, project_context, &session, cfg.base_prompt);
-
         const session_dir = try std.fs.path.join(allocator, &.{ project_root, ".zagent", "sessions" });
 
         return App{
@@ -170,6 +169,7 @@ pub const App = struct {
             .project_context = project_context,
             .single_prompt = single_prompt,
             .session_dir = session_dir,
+            .base_prompt = cfg.base_prompt,
             .render_ctx = render.RenderContext{ .colorize = render.isColorized() },
             .tool_display = render.ToolDisplay{ .ctx = undefined, .writer = undefined },
             .line_buffer = undefined,
@@ -184,8 +184,10 @@ pub const App = struct {
         self.agent = agent_mod.AgentLoop.init(
             self.allocator, self.io,
             &self.provider, self.registry, &self.session,
-            self.cfg.max_tool_rounds, self.project_root,
-            .{},
+            self.cfg.max_tool_rounds, self.project_root, self.model_context,
+            .{
+                .system_prompt = .{ .context = self, .rebuild = spRebuild },
+            },
         );
     }
 
@@ -468,7 +470,6 @@ pub const App = struct {
     fn resetSession(self: *App) !void {
         self.session.deinit();
         self.session = try session_ops.new(self.allocator, self.io, self.cfg.default_model);
-        try buildSystemPrompt(self.allocator, self.io, self.project_root, self.project_context, &self.session, self.cfg.base_prompt);
         self.initAgent();
     }
 
@@ -589,14 +590,20 @@ fn findProviderEntry(providers: []const types.ProviderEntry, spec: []const u8) ?
     return null;
 }
 
-fn buildSystemPrompt(
+fn spRebuild(ctx: ?*anyopaque) anyerror!void {
+    const self: *App = @ptrCast(@alignCast(ctx.?));
+    const prompt = try buildPromptString(self.allocator, self.io, self.project_root, self.project_context, self.base_prompt);
+    defer self.allocator.free(prompt);
+    try self.session.updateFirstSystem(prompt);
+}
+
+fn buildPromptString(
     allocator: std.mem.Allocator,
     io: std.Io,
     project_root: []const u8,
     project_context: ?[]const u8,
-    session: *session_mod.Session,
     base_prompt: ?[]const u8,
-) !void {
+) ![]const u8 {
     const cwd_alloc = std.process.currentPathAlloc(io, allocator) catch null;
     defer if (cwd_alloc) |p| allocator.free(p);
     const cwd: []const u8 = if (cwd_alloc) |p| p else ".";
@@ -624,7 +631,7 @@ fn buildSystemPrompt(
     defer allocator.free(prompt);
 
     const skills = skill_tool.listAvailableSkills(allocator, io, project_root) catch &.{};
-    var final_prompt: []const u8 = prompt;
+    var result: []const u8 = prompt;
     if (skills.len > 0) {
         var skills_buf = std.ArrayListAligned(u8, null).empty;
         errdefer skills_buf.deinit(allocator);
@@ -636,7 +643,7 @@ fn buildSystemPrompt(
             try skills_buf.appendSlice(allocator, line);
         }
         try skills_buf.appendSlice(allocator, "</available_skills>\n");
-        final_prompt = try skills_buf.toOwnedSlice(allocator);
+        result = try skills_buf.toOwnedSlice(allocator);
     }
     defer {
         for (skills) |s| {
@@ -647,12 +654,9 @@ fn buildSystemPrompt(
     }
 
     if (project_context) |ctx| {
-        const full = try std.fmt.allocPrint(allocator, "{s}\n<project_context>\n{s}\n</project_context>\n", .{ final_prompt, ctx });
-        defer allocator.free(full);
-        try session.append(.{ .role = .system, .content = full });
-    } else {
-        try session.append(.{ .role = .system, .content = final_prompt });
+        return try std.fmt.allocPrint(allocator, "{s}\n<project_context>\n{s}\n</project_context>\n", .{ result, ctx });
     }
+    return if (std.mem.eql(u8, result, prompt)) try allocator.dupe(u8, result) else result;
 }
 
 fn formatDate(allocator: std.mem.Allocator, epoch_s: i64) ![]const u8 {

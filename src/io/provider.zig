@@ -100,21 +100,22 @@ pub const Provider = struct {
         messages: []const types.Message,
         tools: ?[]const types.Tool,
     ) !types.ProviderResponse {
-        const max_retries: u32 = 3;
+        const max_retries: u32 = 5;
         var attempt: u32 = 0;
         while (attempt <= max_retries) : (attempt += 1) {
             if (attempt > 0) {
                 const delay_ms: u64 = switch (attempt) {
-                    1 => 1000,
-                    2 => 2000,
-                    3 => 4000,
+                    1 => 500,
+                    2 => 1000,
+                    3 => 2000,
+                    4 => 4000,
+                    5 => 8000,
                     else => unreachable,
                 };
-                {
-                    var stderr_buf: [64]u8 = undefined;
-                    var stderr_writer: std.Io.File.Writer = .init(.stderr(), io, &stderr_buf);
-                    stderr_writer.interface.print("[Retry {d}/{d} in {d}s...]\n", .{ attempt, max_retries, @divTrunc(delay_ms, 1000) }) catch {};
-                    stderr_writer.interface.flush() catch {};
+                if (self.phase_writer) |pw| {
+                    var status_buf: [64]u8 = undefined;
+                    const status = std.fmt.bufPrint(&status_buf, "\n[Retry {d}/{d} — waiting {d}s...]\n", .{ attempt, max_retries, @divTrunc(delay_ms, 1000) }) catch "[Retry...]\n";
+                    pw.write_rendered(pw.context, status);
                 }
                 if (builtin.os.tag == .windows) {
                     const kernel32 = struct {
@@ -132,7 +133,7 @@ pub const Provider = struct {
             return chatCompletionStreamingOnce(self, arena, io, messages, tools) catch |err| {
                 if (attempt >= max_retries) return err;
                 switch (err) {
-                    error.ApiError, error.Interrupted => return err,
+                    error.Interrupted, error.ApiError => return err,
                     else => continue,
                 }
             };
@@ -253,7 +254,8 @@ pub const Provider = struct {
 
             const parsed = std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{ .ignore_unknown_fields = true }) catch continue;
 
-            if (parsed.object.get("error")) |_| {
+            if (parsed.object.get("error")) |err_val| {
+                if (isRetryableError(err_val)) return error.ApiRateLimited;
                 return error.ApiError;
             }
 
@@ -357,6 +359,9 @@ pub const Provider = struct {
         child_finished = true;
 
         if (error_body_buf.items.len > 0 and !seen_first_data) {
+            if (isRetryableBody(error_body_buf.items)) {
+                return error.ApiRateLimited;
+            }
             {
                 var stderr_buf: [256]u8 = undefined;
                 var stderr_writer: std.Io.File.Writer = .init(.stderr(), io, &stderr_buf);
@@ -367,6 +372,9 @@ pub const Provider = struct {
         }
 
         if (term != .exited or term.exited != 0) {
+            if (isRetryableBody(error_body_buf.items)) {
+                return error.ApiRateLimited;
+            }
             return error.ApiError;
         }
 
@@ -514,6 +522,54 @@ fn parseFinishReason(s: []const u8) types.FinishReason {
         if (std.mem.eql(u8, s, @tagName(tag))) return tag;
     }
     return .unknown;
+}
+
+fn isRetryableError(err_val: std.json.Value) bool {
+    if (err_val == .object) {
+        if (err_val.object.get("type")) |typ| {
+            if (typ == .string) {
+                const t = typ.string;
+                if (containsIgnoreCase(t, "rate_limit")) return true;
+                if (containsIgnoreCase(t, "server_error")) return true;
+                if (containsIgnoreCase(t, "insufficient_quota")) return true;
+            }
+        }
+        if (err_val.object.get("message")) |msg| {
+            if (msg == .string) {
+                const m = msg.string;
+                if (containsIgnoreCase(m, "rate")) return true;
+                if (containsIgnoreCase(m, "quota")) return true;
+                if (containsIgnoreCase(m, "overloaded")) return true;
+                if (std.mem.indexOf(u8, m, "429") != null) return true;
+                if (std.mem.indexOf(u8, m, "503") != null) return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0 or needle.len > haystack.len) return false;
+    const end = haystack.len - needle.len;
+    for (0..end + 1) |i| {
+        var matched = true;
+        for (needle, 0..) |nc, j| {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(nc)) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return true;
+    }
+    return false;
+}
+
+fn isRetryableBody(body: []const u8) bool {
+    const keywords = [_][]const u8{ "rate", "quota", "overloaded", "429", "503", "rate_limit", "server_error", "insufficient" };
+    for (keywords) |keyword| {
+        if (containsIgnoreCase(body, keyword)) return true;
+    }
+    return false;
 }
 
 test "detectVendor deepseek" {
@@ -777,14 +833,32 @@ test "retry backoff delays" {
     const delay = struct {
         fn ms(attempt: u32) u64 {
             return switch (attempt) {
-                1 => 1000,
-                2 => 2000,
-                3 => 4000,
+                1 => 500,
+                2 => 1000,
+                3 => 2000,
+                4 => 4000,
+                5 => 8000,
                 else => unreachable,
             };
         }
     }.ms;
-    try testing.expectEqual(@as(u64, 1000), delay(1));
-    try testing.expectEqual(@as(u64, 2000), delay(2));
-    try testing.expectEqual(@as(u64, 4000), delay(3));
+    try testing.expectEqual(@as(u64, 500), delay(1));
+    try testing.expectEqual(@as(u64, 1000), delay(2));
+    try testing.expectEqual(@as(u64, 2000), delay(3));
+    try testing.expectEqual(@as(u64, 4000), delay(4));
+    try testing.expectEqual(@as(u64, 8000), delay(5));
+}
+
+test "isRetryableBody rate limit keywords" {
+    try std.testing.expect(isRetryableBody("{\"error\":{\"message\":\"Rate limit exceeded\"}}"));
+    try std.testing.expect(isRetryableBody("{\"error\":{\"type\":\"rate_limit_error\"}}"));
+    try std.testing.expect(isRetryableBody("429 Too Many Requests"));
+    try std.testing.expect(isRetryableBody("503 Service Unavailable"));
+    try std.testing.expect(isRetryableBody("Insufficient quota"));
+}
+
+test "isRetryableBody fatal errors" {
+    try std.testing.expect(!isRetryableBody("{\"error\":{\"message\":\"Invalid API key\"}}"));
+    try std.testing.expect(!isRetryableBody("{\"error\":{\"type\":\"invalid_request_error\"}}"));
+    try std.testing.expect(!isRetryableBody(""));
 }

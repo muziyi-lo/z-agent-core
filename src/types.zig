@@ -43,6 +43,9 @@ pub const ToolContext = struct {
     project_root: []const u8,
     api_endpoint: ?ApiEndpoint = null,
     abort_target: ?*bool = null,
+    messages: ?[]const Message = null,
+    session_ref: ?*anyopaque = null,
+    provider_ref: ?*anyopaque = null,
 };
 
 /// Per-tool structured metadata for frontend display.

@@ -197,6 +197,18 @@ pub const Session = struct {
         }
     }
 
+    /// Replace the first system message or prepend one. Used for per-turn system prompt refresh.
+    pub fn updateFirstSystem(self: *Session, content: []const u8) !void {
+        const arena = self._arena.allocator();
+        const duped = try arena.dupe(u8, content);
+        if (self._messages.items.len > 0 and self._messages.items[0].role == .system) {
+            self._messages.items[0].content = duped;
+        } else {
+            try self._messages.insert(arena, 0, .{ .role = .system, .content = duped });
+        }
+        self.modified = true;
+    }
+
     /// Write all messages to JSONL file. Creates .zagent/sessions/ if needed.
     pub fn flush(self: *Session) !void {
         const arena = self._arena.allocator();
