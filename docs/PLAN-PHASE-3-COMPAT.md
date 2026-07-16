@@ -10,7 +10,7 @@
 
 ## 概览
 
-- **参考**：对比 Pi 项目的 `detectCompat()` 系统，确认了 7 项缺口。对比 nullclaw（同语言 Zig）的 `CompatProvider` 编译期表 + vtable 架构，确认了表驱动优于 URL 启发式的设计方向。
+- **参考**：对比 Pi 项目的 `detectCompat()` 系统，确认了 7 项缺口。对比 nullclaw（同语言 Zig）的 `CompatProvider` 编译期表 + vtable 架构，确认了表驱动优于 URL 启发式的设计方向。对比 Reasonix（专为 DeepSeek 设计的 Go 代理），发现了 cache-first 循环、reasoning_content 选择性回传等 DeepSeek 专属优化。
 - **改动范围**：3 个文件（types.zig、config.zig、provider.zig），不触及 render 层、不改变前后端分离架构
 - **方案思路**：在 `types.zig` 中定义一个协议适配结构体（compat），`provider.zig` 在构建 JSON 请求体时根据 compat 的字段值选择正确的格式，`config.zig` 允许用户在 TOML 中覆盖推断结果
 
@@ -68,7 +68,17 @@ Pi 的做法是将 thinking 和 text 作为两个独立块并行累积，各自�
 - `thinking_started`：思考块是否已开始显示
 - `text_started`：文本块是否已开始显示
 
-两个标志互不干扰。Qwen 的首次 delta 会同时触发两个 `begin_phase`，但后续 deltas 只追加内容不切换状态。
+### 5. Cache-first 循环 vs 每回合重建
+
+Reasonix 的核心架构决策：append-only history，保证 prompt 前缀在每回合之间字节不变，所以 DeepSeek 自动缓存命中率 > 90%。我们的 P1-5（每回合重建 system prompt）主动破坏了前缀稳定性——system 消息中的日期/时间/cwd 每次都变。
+
+这不属于 compat 层的修复范围，但需要标注为已知矛盾：如果要追求高缓存命中率，P1-5 的系统提示不应在每回合重建，而是仅在环境变化时重建。当前方案暂不处理此点，留待后续优化。
+
+### 6. reasoning_content 选择性回传
+
+Reasonix 做了一种精细控制：reasoning_content 仅在 tool-call 回合回传给 API（因为 DeepSeek 要求在 tool call 历史中保留 reasoning），在普通 assistant 回合丢弃（节省 token 和保持缓存前缀稳定）。我们的代码将所有 reasoning 和 content 混合在同一个 content_buf 中回传，未做区分。
+
+作为 PHASE-3 的子任务，在 `buildJsonBody` 中增加逻辑：对于 DeepSeek compat，仅当 assistant 消息包含 tool_calls 时才携带 `reasoning_content` 字段。
 
 ## 实施
 
@@ -141,5 +151,7 @@ zig build test
 | 独立块（independent blocks） | Pi 的做法：thinking 和 text 作为两个并行累积的内容块，不互斥 |
 | 盲拼（blind concatenation） | v0.1-0.2 的做法：把 TOML 中的 JSON 字符串直接拼接到请求体 |
 | thinking 强度（thinking level） | 思考模式的深度等级（低/中/高/最大），由通用语义映射到各 provider 的具体参数 |
+| cache-first 循环 | Reasonix 的核心设计：append-only 消息历史，保持 prompt 前缀字节不变以命中 DeepSeek 自动缓存 |
+| reasoning_content 回传 | DeepSeek 要求 tool-call 消息必须携带 reasoning_content，但普通 assistant 消息可省略以节省 token |
 | stall 检测 | nullclaw 独有功能：curl `--speed-limit 1 --speed-time 60`，60 秒无数据自动断开 |
 | stream_options | OpenAI 标准参数：`{"include_usage": true}` 让 provider 在每个 chunk 返回 token 用量 |
