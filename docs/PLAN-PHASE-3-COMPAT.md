@@ -10,7 +10,7 @@
 
 ## 概览
 
-- **参考**：对比 Pi 项目的 `detectCompat()` 系统，确认了 7 项缺口
+- **参考**：对比 Pi 项目的 `detectCompat()` 系统，确认了 7 项缺口。对比 nullclaw（同语言 Zig）的 `CompatProvider` 编译期表 + vtable 架构，确认了表驱动优于 URL 启发式的设计方向。
 - **改动范围**：3 个文件（types.zig、config.zig、provider.zig），不触及 render 层、不改变前后端分离架构
 - **方案思路**：在 `types.zig` 中定义一个协议适配结构体（compat），`provider.zig` 在构建 JSON 请求体时根据 compat 的字段值选择正确的格式，`config.zig` 允许用户在 TOML 中覆盖推断结果
 
@@ -26,6 +26,8 @@
 | URL 模式自动推断 + 手动可覆盖 | 零配置即可用、专家可调优 | 推断规则可能不覆盖所有 provider |
 
 **选择**：URL 推断 + 覆盖。Pi 的实践证明 URL 域名模式（`api.deepseek.com`、`aliyun`、`api.openai.com`）足以覆盖绝大多数 provider。用户在 TOML 中可通过 `compat` 字段覆盖任意推断结果。
+
+**与 nullclaw 的差异**：nullclaw 用编译期的 `compat_providers` 表（70+ provider），每个条目是预配置的 bool 标志。我们选择 URL 启发式而非预编表，因为我们的用户模型不同——z-agent-core 面向用户自配置少量模型（5-10 个），编译期表维护成本 > 收益。但标志化字段的设计（`thinking_param: bool` 而非 `params_json: string`）可直接借鉴。
 
 ### 2. thinking 格式的七种变体
 
@@ -139,3 +141,5 @@ zig build test
 | 独立块（independent blocks） | Pi 的做法：thinking 和 text 作为两个并行累积的内容块，不互斥 |
 | 盲拼（blind concatenation） | v0.1-0.2 的做法：把 TOML 中的 JSON 字符串直接拼接到请求体 |
 | thinking 强度（thinking level） | 思考模式的深度等级（低/中/高/最大），由通用语义映射到各 provider 的具体参数 |
+| stall 检测 | nullclaw 独有功能：curl `--speed-limit 1 --speed-time 60`，60 秒无数据自动断开 |
+| stream_options | OpenAI 标准参数：`{"include_usage": true}` 让 provider 在每个 chunk 返回 token 用量 |
