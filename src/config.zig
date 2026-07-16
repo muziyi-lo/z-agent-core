@@ -54,7 +54,7 @@ pub const Config = struct {
         };
 
         var result = try parseConfigContent(arena.allocator(), content);
-        try validateConfig(&result);
+        try validateConfig(&result, io);
 
         const model = try resolveModel(&result, result.default_model);
         {
@@ -180,16 +180,41 @@ pub fn resolveModel(config: *const Config, spec: []const u8) !*const types.Model
     return error.ProviderNotFound;
 }
 
-fn validateConfig(config: *const Config) !void {
+fn validateConfig(config: *const Config, io: std.Io) !void {
     if (config.default_model.len == 0) return error.InvalidConfig_NoDefaultModel;
     for (config.providers) |p| {
         if (p.name.len == 0) return error.InvalidConfig_NameEmpty;
-        if (p.base_url.len == 0) return error.InvalidConfig_BaseUrlEmpty;
-        if (p.api_key_env.len == 0) return error.InvalidConfig_ApiKeyEnvEmpty;
-        if (p.models.len == 0) return error.InvalidConfig_NoModels;
+        if (p.base_url.len == 0) {
+            var sbuf: [256]u8 = undefined;
+            var sw: std.Io.File.Writer = .init(.stderr(), io, &sbuf);
+            sw.interface.print("error: Provider has empty base_url.\n", .{}) catch {};
+            sw.interface.flush() catch {};
+            return error.InvalidConfig_BaseUrlEmpty;
+        }
+        if (p.api_key_env.len == 0) {
+            var sbuf: [256]u8 = undefined;
+            var sw: std.Io.File.Writer = .init(.stderr(), io, &sbuf);
+            sw.interface.print("error: Provider has empty api_key_env.\n", .{}) catch {};
+            sw.interface.flush() catch {};
+            return error.InvalidConfig_ApiKeyEnvEmpty;
+        }
+        if (p.models.len == 0) {
+            var sbuf: [256]u8 = undefined;
+            var sw: std.Io.File.Writer = .init(.stderr(), io, &sbuf);
+            sw.interface.print("error: Provider '{s}' has no valid models.\n", .{p.name}) catch {};
+            sw.interface.print("       Each model ID in [[providers]].models needs a matching [[models]] block.\n", .{}) catch {};
+            sw.interface.flush() catch {};
+            return error.InvalidConfig_NoModels;
+        }
         for (p.models) |m| {
             if (m.id.len == 0) return error.InvalidConfig_ModelIdEmpty;
-            if (m.context_window == 0) return error.InvalidConfig_ContextWindowZero;
+            if (m.context_window == 0) {
+                var sbuf: [256]u8 = undefined;
+                var sw: std.Io.File.Writer = .init(.stderr(), io, &sbuf);
+                sw.interface.print("error: Model '{s}' in provider '{s}' has context_window=0.\n", .{ m.id, p.name }) catch {};
+                sw.interface.flush() catch {};
+                return error.InvalidConfig_ContextWindowZero;
+            }
         }
     }
 }
@@ -630,7 +655,7 @@ test "config: validate no models" {
     );
     defer config.deinit();
 
-    try std.testing.expectError(error.InvalidConfig_NoModels, validateConfig(&config));
+    try std.testing.expectError(error.InvalidConfig_NoModels, validateConfig(&config, std.testing.io));
 }
 
 test "config: validate zero context" {
@@ -654,7 +679,7 @@ test "config: validate zero context" {
     );
     defer config.deinit();
 
-    try std.testing.expectError(error.InvalidConfig_ContextWindowZero, validateConfig(&config));
+    try std.testing.expectError(error.InvalidConfig_ContextWindowZero, validateConfig(&config, std.testing.io));
 }
 
 test "config: validate empty provider name" {
@@ -678,7 +703,7 @@ test "config: validate empty provider name" {
     );
     defer config.deinit();
 
-    try std.testing.expectError(error.InvalidConfig_NameEmpty, validateConfig(&config));
+    try std.testing.expectError(error.InvalidConfig_NameEmpty, validateConfig(&config, std.testing.io));
 }
 
 test "config: validate empty base_url" {
@@ -702,7 +727,7 @@ test "config: validate empty base_url" {
     );
     defer config.deinit();
 
-    try std.testing.expectError(error.InvalidConfig_BaseUrlEmpty, validateConfig(&config));
+    try std.testing.expectError(error.InvalidConfig_BaseUrlEmpty, validateConfig(&config, std.testing.io));
 }
 
 test "config: validate empty api_key_env" {
@@ -726,7 +751,7 @@ test "config: validate empty api_key_env" {
     );
     defer config.deinit();
 
-    try std.testing.expectError(error.InvalidConfig_ApiKeyEnvEmpty, validateConfig(&config));
+    try std.testing.expectError(error.InvalidConfig_ApiKeyEnvEmpty, validateConfig(&config, std.testing.io));
 }
 
 test "config: validate empty model id" {
@@ -750,7 +775,7 @@ test "config: validate empty model id" {
     );
     defer config.deinit();
 
-    try std.testing.expectError(error.InvalidConfig_ModelIdEmpty, validateConfig(&config));
+    try std.testing.expectError(error.InvalidConfig_ModelIdEmpty, validateConfig(&config, std.testing.io));
 }
 
 test "config: validate empty default model" {
@@ -767,7 +792,7 @@ test "config: validate empty default model" {
     config._arena = arena;
     defer config.deinit();
 
-    try std.testing.expectError(error.InvalidConfig_NoDefaultModel, validateConfig(&config));
+    try std.testing.expectError(error.InvalidConfig_NoDefaultModel, validateConfig(&config, std.testing.io));
 }
 
 test "config: providers not array returns error" {
