@@ -297,6 +297,7 @@ pub const App = struct {
             }
             self.rollbackTurn(pre_count);
             try self.session.flush();
+            std.process.exit(1);
         } else {
             try self.session.flush();
         }
