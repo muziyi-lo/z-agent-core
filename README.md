@@ -149,7 +149,8 @@ Add a tool: `tool/xxx.zig` + 1 line in `registry.zig` `buildRegistry()`.
 |------|---------|
 | `docs/CORE-FRONTEND.md` | Core definition, frontend integration, Phase 0/1/2 plan, architecture comparison with Pi Agent |
 | `docs/PLAN-PHASE2.md` | Phase 2 spec + implementation (✅ done): hooks, abort, lifecycle, TokenUsage, /fork, compact |
-| `docs/PLAN-PHASE-3-COMPAT.md` | Phase 3: compat protocol layer — ModelCompat, detectCompat, thinking formats (planned) |
+| `docs/PLAN-PHASE-3-COMPAT.md` | Phase 3: compat protocol layer (planned) |
+| `docs/PLAN-PHASE-4-CACHE.md` | Phase 4: cache-first loop + reasoning separation (planned) |
 | `docs/设计原则整理.md` | 15 design principles accumulated from development |
 | `docs/REMAINING.md` | Remaining work tracker: done/planned/deferred/future/wishlist |
 | `docs/0.2.0/` | v0.2.0 plan docs: OPT-1 through OPT-6 + FIX-1 (9 files, all done) |

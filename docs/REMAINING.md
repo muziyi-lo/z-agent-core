@@ -5,6 +5,8 @@
 ```
 PHASE-3 (compat layer)  ← 下一项
     ↓
+PHASE-4 (cache-first + reasoning 分离)
+    ↓
 新前端 (TUI/Web)
     ↓
 webfetch  ← 新工具，独立
@@ -62,6 +64,7 @@ webfetch  ← 新工具，独立
 | # | Item | Notes |
 |---|------|-------|
 | F0 | PHASE-3 compat 协议适配层 | ModelCompat + detectCompat + thinking 格式 + stream_options (planned, not started) |
+| F0.5 | PHASE-4 cache-first + reasoning 分离 | Message 结构扩展 + reasoning_content 选择性回传 + system prompt 按需重建 (planned, not started) |
 | F1 | TUI frontend | Terminal UI framework (vaxis or similar) |
 | F2 | Web frontend | Single HTML served by zig binary, SSE to browser |
 | F3 | MCP tool discovery | `mcp_connect` tool — LLM discovers remote tools at runtime |

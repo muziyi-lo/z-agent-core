@@ -68,17 +68,9 @@ Pi 的做法是将 thinking 和 text 作为两个独立块并行累积，各自�
 - `thinking_started`：思考块是否已开始显示
 - `text_started`：文本块是否已开始显示
 
-### 5. Cache-first 循环 vs 每回合重建
+### 5. reasoning_content 选择性回传
 
-Reasonix 的核心架构决策：append-only history，保证 prompt 前缀在每回合之间字节不变，所以 DeepSeek 自动缓存命中率 > 90%。我们的 P1-5（每回合重建 system prompt）主动破坏了前缀稳定性——system 消息中的日期/时间/cwd 每次都变。
-
-这不属于 compat 层的修复范围，但需要标注为已知矛盾：如果要追求高缓存命中率，P1-5 的系统提示不应在每回合重建，而是仅在环境变化时重建。当前方案暂不处理此点，留待后续优化。
-
-### 6. reasoning_content 选择性回传
-
-Reasonix 做了一种精细控制：reasoning_content 仅在 tool-call 回合回传给 API（因为 DeepSeek 要求在 tool call 历史中保留 reasoning），在普通 assistant 回合丢弃（节省 token 和保持缓存前缀稳定）。我们的代码将所有 reasoning 和 content 混合在同一个 content_buf 中回传，未做区分。
-
-作为 PHASE-3 的子任务，在 `buildJsonBody` 中增加逻辑：对于 DeepSeek compat，仅当 assistant 消息包含 tool_calls 时才携带 `reasoning_content` 字段。
+Reasonix 做了一种精细控制：reasoning_content 仅在 tool-call 回合回传给 API，在普通 assistant 回合丢弃以节省 token 和保持缓存前缀稳定。这是一个跨层改动（SSE 解析→存储→序列化→上下文组装），已独立为 `PLAN-PHASE-4-CACHE.md`。
 
 ## 实施
 
