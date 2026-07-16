@@ -2,7 +2,16 @@
 
 ## [0.2.1] - 未完成
 
-本版本专注于 BUG 修复
+### Added
+- **OPT-6: 用量数据显示增强**
+  - `types.zig`：`TokenUsage` 新增 `cache_hit`、`cache_miss`（`?u32` nullable）
+  - `io/provider.zig`：SSE `usage` 解析缓存命中等字段，`if (usage) |*u|` 守卫避免空指针
+  - `core/session.zig`：JSONL 序列化/反序列化缓存字段，`null` 省略、`0` 显式写入、加载缺失回 `null`
+  - `frontends/cli/App.zig`：新用量显示格式——动态单位 K/M、缓存命中率、上下文窗口占比、中断回合跳过
+  - `formatToken()`：栈缓冲零堆分配 token 数格式化
+
+### Fixed
+- `context_window` 从 131072 修正为 DeepSeek V4 官方规格 1000000
 
 ## [0.2.0] 
 

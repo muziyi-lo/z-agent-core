@@ -119,10 +119,18 @@ pub const Session = struct {
                         if (u.get("output")) |out_val| {
                             if (u.get("total")) |tot_val| {
                                 if (in_val != .null and out_val != .null and tot_val != .null) {
+                                    const cache_hit: ?u32 = if (u.get("cache_hit")) |ch|
+                                        if (ch != .null) @as(?u32, @intCast(ch.integer)) else null
+                                    else null;
+                                    const cache_miss: ?u32 = if (u.get("cache_miss")) |cm|
+                                        if (cm != .null) @as(?u32, @intCast(cm.integer)) else null
+                                    else null;
                                     break :blk .{
                                         .input = @intCast(in_val.integer),
                                         .output = @intCast(out_val.integer),
                                         .total = @intCast(tot_val.integer),
+                                        .cache_hit = cache_hit,
+                                        .cache_miss = cache_miss,
                                     };
                                 }
                             }
@@ -487,6 +495,18 @@ fn serializeMessage(buf: *std.array_list.Managed(u8), msg: types.Message) !void 
         var tot_buf: [16]u8 = undefined;
         const tot_s = try std.fmt.bufPrint(&tot_buf, "{d}", .{u.total});
         try buf.appendSlice(tot_s);
+        if (u.cache_hit) |ch| {
+            try buf.appendSlice(",\"cache_hit\":");
+            var ch_buf: [16]u8 = undefined;
+            const ch_s = try std.fmt.bufPrint(&ch_buf, "{d}", .{ch});
+            try buf.appendSlice(ch_s);
+        }
+        if (u.cache_miss) |cm| {
+            try buf.appendSlice(",\"cache_miss\":");
+            var cm_buf: [16]u8 = undefined;
+            const cm_s = try std.fmt.bufPrint(&cm_buf, "{d}", .{cm});
+            try buf.appendSlice(cm_s);
+        }
         try buf.appendSlice("}");
     }
 

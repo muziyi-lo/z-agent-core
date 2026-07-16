@@ -18,6 +18,8 @@ pub const TokenUsage = struct {
     input: u32,
     output: u32,
     total: u32,
+    cache_hit: ?u32 = null,
+    cache_miss: ?u32 = null,
 };
 
 /// Data-only API endpoint info passed to tools that need LLM access (e.g. compact).

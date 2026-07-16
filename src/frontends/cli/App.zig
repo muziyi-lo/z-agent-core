@@ -241,23 +241,36 @@ pub const App = struct {
             signal.reset();
         }
 
-        var total_input: usize = 0;
-        var total_output: usize = 0;
-        var last_usage: ?types.TokenUsage = null;
-        const msgs = self.session.messages();
-        for (msgs) |msg| {
-            if (msg.usage) |u| {
-                total_input += u.input;
-                total_output += u.output;
-                last_usage = u;
+        if (result.finish != .interrupted) {
+            var last_usage: ?types.TokenUsage = null;
+            for (self.session.messages()) |msg| {
+                if (msg.usage) |u| last_usage = u;
             }
-        }
-        if (last_usage) |u| {
-            const context = self.model_context;
-            const label = try std.fmt.allocPrint(self.allocator, "输入 {d} | 输出 {d} | 累计 {d}/{d}", .{ u.input, u.output, total_input + total_output, context });
-            defer self.allocator.free(label);
-            try render.writeLabeled(&stdout.interface, .usage, label);
-            _ = stdout.interface.write("\n") catch {};
+            if (last_usage) |u| {
+                var t1: [16]u8 = undefined;
+                var t2: [16]u8 = undefined;
+                var t3: [16]u8 = undefined;
+                var t4: [16]u8 = undefined;
+                var cb: [32]u8 = undefined;
+                const cache_str: []const u8 = if (u.cache_hit) |ch| blk: {
+                    if (u.input > 0) {
+                        break :blk try std.fmt.bufPrint(&cb, "命中 {d}%", .{(ch * 100) / u.input});
+                    }
+                    break :blk try std.fmt.bufPrint(&cb, "命中 ?", .{});
+                } else "(缓存 N/A)";
+                const ctx_pct = (u.total * 100) / @as(u32, @intCast(self.model_context));
+                const label = try std.fmt.allocPrint(self.allocator, "输入 {s} ({s}) | 输出 {s} | 上下文 {s} / {s} ({d}%)", .{
+                    try formatToken(u.input, &t1),
+                    cache_str,
+                    try formatToken(u.output, &t2),
+                    try formatToken(u.total, &t3),
+                    try formatToken(@as(u32, @intCast(self.model_context)), &t4),
+                    ctx_pct,
+                });
+                defer self.allocator.free(label);
+                try render.writeLabeled(&stdout.interface, .usage, label);
+                _ = stdout.interface.write("\n") catch {};
+            }
         }
 
         if (result.finish == .interrupted) {
@@ -392,22 +405,36 @@ pub const App = struct {
             signal.reset();
         }
 
-        var total_input: usize = 0;
-        var total_output: usize = 0;
-        var last_usage2: ?types.TokenUsage = null;
-        for (self.session.messages()) |msg| {
-            if (msg.usage) |u| {
-                total_input += u.input;
-                total_output += u.output;
-                last_usage2 = u;
+        if (result.finish != .interrupted) {
+            var last_usage: ?types.TokenUsage = null;
+            for (self.session.messages()) |msg| {
+                if (msg.usage) |u| last_usage = u;
             }
-        }
-        if (last_usage2) |u| {
-            const context = self.model_context;
-            const label = try std.fmt.allocPrint(self.allocator, "输入 {d} | 输出 {d} | 累计 {d}/{d}", .{ u.input, u.output, total_input + total_output, context });
-            defer self.allocator.free(label);
-            try render.writeLabeled(&stdout.interface, .usage, label);
-            _ = stdout.interface.write("\n") catch {};
+            if (last_usage) |u| {
+                var t1: [16]u8 = undefined;
+                var t2: [16]u8 = undefined;
+                var t3: [16]u8 = undefined;
+                var t4: [16]u8 = undefined;
+                var cb: [32]u8 = undefined;
+                const cache_str: []const u8 = if (u.cache_hit) |ch| blk: {
+                    if (u.input > 0) {
+                        break :blk try std.fmt.bufPrint(&cb, "命中 {d}%", .{(ch * 100) / u.input});
+                    }
+                    break :blk try std.fmt.bufPrint(&cb, "命中 ?", .{});
+                } else "(缓存 N/A)";
+                const ctx_pct = (u.total * 100) / @as(u32, @intCast(self.model_context));
+                const label = try std.fmt.allocPrint(self.allocator, "输入 {s} ({s}) | 输出 {s} | 上下文 {s} / {s} ({d}%)", .{
+                    try formatToken(u.input, &t1),
+                    cache_str,
+                    try formatToken(u.output, &t2),
+                    try formatToken(u.total, &t3),
+                    try formatToken(@as(u32, @intCast(self.model_context)), &t4),
+                    ctx_pct,
+                });
+                defer self.allocator.free(label);
+                try render.writeLabeled(&stdout.interface, .usage, label);
+                _ = stdout.interface.write("\n") catch {};
+            }
         }
 
         switch (result.finish) {
@@ -671,6 +698,16 @@ fn formatDate(allocator: std.mem.Allocator, epoch_s: i64) ![]const u8 {
     const m = if (mp < 10) mp + 3 else mp - 9;
     const year = if (m <= 2) y + 1 else y;
     return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, m, d });
+}
+
+fn formatToken(n: u32, buf: []u8) ![]const u8 {
+    if (n < 1000) return try std.fmt.bufPrint(buf, "{d}t", .{n});
+    if (n < 1_000_000) {
+        const k = @as(f32, @floatFromInt(n)) / 1000;
+        return try std.fmt.bufPrint(buf, "{d:.1}K", .{k});
+    }
+    const m = @as(f32, @floatFromInt(n)) / 1_000_000;
+    return try std.fmt.bufPrint(buf, "{d:.1}M", .{m});
 }
 
 fn readLine(

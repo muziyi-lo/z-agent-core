@@ -277,11 +277,18 @@ pub const Provider = struct {
                         if (u.get("completion_tokens")) |out_val| {
                             if (u.get("total_tokens")) |tot_val| {
                                 if (in_val != .null and out_val != .null and tot_val != .null) {
-                                    usage = .{
+                                    var tu: types.TokenUsage = .{
                                         .input = @intCast(in_val.integer),
                                         .output = @intCast(out_val.integer),
                                         .total = @intCast(tot_val.integer),
                                     };
+                                    if (u.get("prompt_cache_hit_tokens")) |hit_val| {
+                                        if (hit_val != .null) tu.cache_hit = @intCast(hit_val.integer);
+                                    }
+                                    if (u.get("prompt_cache_miss_tokens")) |miss_val| {
+                                        if (miss_val != .null) tu.cache_miss = @intCast(miss_val.integer);
+                                    }
+                                    usage = tu;
                                 }
                             }
                         }
