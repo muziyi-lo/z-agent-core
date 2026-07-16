@@ -3,7 +3,9 @@
 ## 实施顺序
 
 ```
-新前端 (TUI/Web)  ← 下一项
+PHASE-3 (compat layer)  ← 下一项
+    ↓
+新前端 (TUI/Web)
     ↓
 webfetch  ← 新工具，独立
 ```
@@ -13,6 +15,8 @@ webfetch  ← 新工具，独立
 | # | Item | Plan doc | Effort |
 |---|------|----------|--------|
 | D12 | OPT-5 运行时稳定性 (P0-2 API重试 + P0-1 上下文压缩 + P1-3 死循环 + P1-4 工具上下文 + P1-5 每步重组) | docs/0.2.0/PLAN-OPT-5-STABILITY.md | High |
+| D13 | FIX-1 --参数完善 (横幅/退出码/--help/--version/--list-models/管道模式) | docs/0.2.0/PLAN-FIX-1-MODEL-ARG.md | High |
+| D14 | OPT-6 用量数据显示增强 (缓存命中/动态单位/上下文占比) | docs/0.2.0/PLAN-OPT-6-USAGE-DISPLAY.md | High |
 
 ## Done (2026-07-15)
 
@@ -57,6 +61,7 @@ webfetch  ← 新工具，独立
 
 | # | Item | Notes |
 |---|------|-------|
+| F0 | PHASE-3 compat 协议适配层 | ModelCompat + detectCompat + thinking 格式 + stream_options (planned, not started) |
 | F1 | TUI frontend | Terminal UI framework (vaxis or similar) |
 | F2 | Web frontend | Single HTML served by zig binary, SSE to browser |
 | F3 | MCP tool discovery | `mcp_connect` tool — LLM discovers remote tools at runtime |

@@ -135,7 +135,7 @@ Add a tool: `tool/xxx.zig` + 1 line in `registry.zig` `buildRegistry()`.
 ## Key design decisions
 
 - **Frontend-backend separation**: Core modules (`core/`, `io/`, `tool/`) never import render code. Three callback contracts (`PhaseWriterCb`, `ToolDisplayCb`, `SystemPromptCb`) inject display/logic at runtime.
-- **TOML config**: Self-contained parser, no external dependencies. Model params are TOML-driven JSON fragments (`params_json`), provider blind-concatenates — no hardcoded vendor logic.
+- **TOML config**: Self-contained parser, no external dependencies. Compat detection by URL pattern (DeepSeek/Qwen/OpenAI etc.), overridable per-model in TOML.
 - **SSE streaming + retry**: Provider parses `data:` lines via curl subprocess with 5× exponential backoff (500ms→8s), error classification (rate limit/503 retryable, 4xx fatal). LineBuffer renders chunks immediately for typewriter feel; Markdown-to-ANSI on complete lines.
 - **Static tool registry**: Compile-time array, one line per tool (8 tools). LLM sees tools as OpenAI-compatible JSON schema auto-generated from registry.
 - **Linear JSONL sessions**: One file per conversation. `/fork` copies messages to new file (atomic temp+rename) and auto-switches.
@@ -148,10 +148,11 @@ Add a tool: `tool/xxx.zig` + 1 line in `registry.zig` `buildRegistry()`.
 | File | Content |
 |------|---------|
 | `docs/CORE-FRONTEND.md` | Core definition, frontend integration, Phase 0/1/2 plan, architecture comparison with Pi Agent |
-| `docs/PLAN-PHASE2.md` | Phase 2 spec + implementation: hooks, abort, lifecycle, TokenUsage, /fork, compact (✅ done) |
-| `docs/PLAN-OPT-6-USAGE-DISPLAY.md` | OPT-6: usage display with cache hit ratio + dynamic units (planned) |
+| `docs/PLAN-PHASE2.md` | Phase 2 spec + implementation (✅ done): hooks, abort, lifecycle, TokenUsage, /fork, compact |
+| `docs/PLAN-PHASE-3-COMPAT.md` | Phase 3: compat protocol layer — ModelCompat, detectCompat, thinking formats (planned) |
+| `docs/设计原则整理.md` | 15 design principles accumulated from development |
 | `docs/REMAINING.md` | Remaining work tracker: done/planned/deferred/future/wishlist |
-| `docs/0.2.0/` | v0.2.0 plan docs: OPT-1 through OPT-5 (7 files, all done) |
+| `docs/0.2.0/` | v0.2.0 plan docs: OPT-1 through OPT-6 + FIX-1 (9 files, all done) |
 | `docs/0.0.1-alpha/` | v0.0.1-alpha step-by-step design docs (8 files) |
 
 ## Vibe Coding insights
