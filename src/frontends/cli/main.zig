@@ -25,20 +25,7 @@ pub fn main(process: std.process.Init) !void {
         }
     }
 
-    var app = App.init(allocator, io, single_prompt, model_override) catch |err| {
-        if (err == error.NoProjectRoot or err == error.ProviderNotFound or err == error.ApiKeyNotSet) return;
-        if (err == error.InvalidConfig_NoModels or
-            err == error.InvalidConfig_NoDefaultModel or
-            err == error.InvalidConfig_NameEmpty or
-            err == error.InvalidConfig_BaseUrlEmpty or
-            err == error.InvalidConfig_ApiKeyEnvEmpty or
-            err == error.InvalidConfig_ModelIdEmpty or
-            err == error.InvalidConfig_ContextWindowZero or
-            err == error.InvalidModelSpec or
-            err == error.ModelNotFound or
-            err == error.InvalidConfig_ProvidersNotArray) return;
-        return err;
-    };
+    var app = App.init(allocator, io, single_prompt, model_override) catch return;
     defer app.deinit();
     app.initAgent();
     try app.run();
