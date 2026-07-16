@@ -12,7 +12,7 @@
 
 ### Fixed
 - `context_window` 从 131072 修正为 DeepSeek V4 官方规格 1000000
-- `validateConfig` 增加友好 stderr 错误消息，指明具体 provider/model 问题（替代裸栈回溯）
+- `validateConfig` 增加友好 stderr 错误消息，指明具体 provider/model 问题；`main.zig` 捕获全部 config 错误避免栈回溯
 
 ## [0.2.0] 
 
