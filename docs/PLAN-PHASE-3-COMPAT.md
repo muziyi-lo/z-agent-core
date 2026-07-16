@@ -46,7 +46,16 @@
 | `high` | 深度推理 | `thinking: {level: high}` | `reasoning_effort: high` | ✅ |
 | `max` | 最大深度 | `thinking: {level: max}` | 不支持 | |
 
-实现上只需要两个字段：支持的等级列表 + 当前选择的等级。当前等级通过 `--thinking` 命令行参数传入，无参数时使用默认值。
+实现上只需要两个字段：支持的等级列表 + 当前选择的等级。当前等级通过 `--thinking` 参数设置初始值，对话中通过 `/thinking` REPL 命令随时切换。
+
+**切换入口**：
+
+| 入口 | 格式 | 示例 |
+|------|------|------|
+| 启动参数 | `--thinking <level>` | `z-agent-core --thinking max --prompt "..."` |
+| REPL 命令 | `/thinking <level>` | 对话中输入 `/thinking max` 立即切换后续回合的强度 |
+
+`/thinking` 命令行为：修改 Provider 的当前等级 → 输出确认行 → 下一回合起 `buildJsonBody` 使用新等级。用户无需退出或重连。
 
 ### 4. 流式相位独立块化
 
@@ -61,7 +70,7 @@ Pi 的做法是将 thinking 和 text 作为两个独立块并行累积，各自�
 
 ## 实施
 
-实施分四步。前三步建立 compat 数据流（从 TOML → Config → Provider → JSON body），第四步解决流式相位的架构问题。
+实施分四步。前三步建立 compat 数据流（从 TOML → Config → Provider → JSON body），第四步解决流式相位的架构问题。thinking 强度的 CLI 参数和 REPL 命令在步骤 3 中一并处理。
 
 ### 步骤 1: 定义 compat 数据结构
 
@@ -79,12 +88,12 @@ thinking 强度等级用枚举表达四个通用等级（低/中/高/最大）�
 
 不再使用 `params_json` 盲拼。thinking JSON 由代码生成（格式由 `thinking_format` 枚举控制，强度由 `thinking_level` 映射）、max_tokens 字段名由枚举选择、stream_options 按需加入。此步骤同时消化了之前的 `params_json` 拼接 Bug。
 
-### 步骤 3: TOML + CLI 支持 compat 和 thinking 强度
+### 步骤 3: TOML + CLI + REPL 支持 compat 和 thinking 强度
 
-**文件**: `src/config.zig`、`src/frontends/cli/main.zig`
-**改动**: TOML 解析新增 `compat` 和 `thinking_level` 字段；DEFAULT_TEMPLATE 加入注释；新增 `--thinking low|medium|high|max` 参数
+**文件**: `src/config.zig`、`src/frontends/cli/main.zig`、`src/frontends/cli/App.zig`
+**改动**: TOML 解析新增 `compat` 和 `thinking_level` 字段；DEFAULT_TEMPLATE 加入注释；`main.zig` 新增 `--thinking low|medium|high|max` 参数；`App.zig` 的 `processLine` 新增 `/thinking <level>` 命令
 
-用户可在 TOML 中覆盖 compat 的任意字段。未设置时回退到 URL 推断的默认值。thinking 强度通过 `--thinking` 命令行参数传入 session，无参数时使用 compat 中的默认等级。
+用户可在 TOML 中覆盖 compat 的任意字段。未设置时回退到 URL 推断的默认值。thinking 强度通过 `--thinking` 设置初始值，通过 `/thinking` 在对话中实时切换——修改 Provider 的当前等级后直接继续 REPL，无需重连。
 
 ### 步骤 4: 流式相位独立块化
 
@@ -104,7 +113,9 @@ zig build test
 |----------|----------|
 | `--model deepseek/deepseek-v4-flash` | thinking 正常显示，不闪烁 |
 | `--model deepseek/deepseek-v4-pro` | thinking 正常显示，无 JSON 解析错误 |
-| `--model aliyun/qwen3.7-max` | 不闪烁，思考文本保留在 content_buf |
+| `--model aliyun/qwen3.7-max` | 不闪烁，思考文本保留 |
+| `--thinking max` 切换 | PRO 请求体包含 `thinking.level: max` |
+| `/thinking low` REPL 切换 | 下一回合使用低强度 |
 | 未知 provider（无 TOML compat） | 默认 OpenAI 标准行为，不报错 |
 
 ## 波及
@@ -116,6 +127,7 @@ zig build test
 | `src/io/provider.zig` | `buildJsonBody` 改为 compat 驱动；流式相位改为独立块 | 否 |
 | `src/frontends/cli/App.zig` | 无结构性改动 | — |
 | `src/frontends/cli/main.zig` | 新增 `--thinking` 参数解析 | 否 |
+| `src/frontends/cli/App.zig` | 新增 `/thinking` REPL 命令 | 否 |
 
 ## 术语
 
