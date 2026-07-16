@@ -33,7 +33,22 @@
 
 用枚举 `ThinkingFormat` 统一表达这 7 种变体。`buildJsonBody` 根据枚举值生成对应的 JSON 片段，而不是拼接用户手写的 `params_json` 字符串——这同时解决了 `deepseek-v4-pro` 的 JSON 转义 Bug（之前 `params_json` 中的引号在拼接时丢失）。
 
-### 3. 流式相位独立块化
+### 3. thinking 强度等级
+
+仅是"开/关"不够。DeepSeek V4 Pro 支持高/超高两档（通过 `thinking.level` 或 `reasoning_effort` 传递），用户应能选择"日常用 fast 模式省 token，复杂问题用 max 模式深推理"。
+
+等级定义采用通用语义，由 compat 层映射到各 provider 的具体值：
+
+| 通用等级 | 含义 | DeepSeek 映射 | OpenAI 映射 | 默认 |
+|----------|------|--------------|-------------|------|
+| `low` | 快速响应 | `reasoning_effort: low` | `reasoning_effort: low` | |
+| `medium` | 平衡 | `thinking: {level: medium}` | `reasoning_effort: medium` | |
+| `high` | 深度推理 | `thinking: {level: high}` | `reasoning_effort: high` | ✅ |
+| `max` | 最大深度 | `thinking: {level: max}` | 不支持 | |
+
+实现上只需要两个字段：支持的等级列表 + 当前选择的等级。当前等级通过 `--thinking` 命令行参数传入，无参数时使用默认值。
+
+### 4. 流式相位独立块化
 
 当前 PhaseWriter 是一个单状态机——同一时刻只能是"思考"或"输出"。Qwen 的 SSE delta 同时携带两个字段，导致每 chunk 切换一次状态（闪烁）。
 
@@ -51,23 +66,25 @@ Pi 的做法是将 thinking 和 text 作为两个独立块并行累积，各自�
 ### 步骤 1: 定义 compat 数据结构
 
 **文件**: `src/types.zig`
-**改动**: 新增三个类型——compat 结构体、thinking 格式枚举、max_tokens 字段名枚举
+**改动**: 新增五个类型——compat 结构体、thinking 格式枚举、thinking 强度枚举、thinking 强度映射表、max_tokens 字段名枚举
 
 compat 结构体包含所有可适配的协议参数。每个字段有默认值（标准 OpenAI 行为），非标准 provider 通过 `detectCompat` 或 TOML 覆盖。
+
+thinking 强度等级用枚举表达四个通用等级（低/中/高/最大），由 compat 层映射到各 provider 的具体参数值。默认等级为 `high`。
 
 ### 步骤 2: JSON 构建改为 compat 驱动
 
 **文件**: `src/io/provider.zig`
 **改动**: `buildJsonBody` 函数根据 compat 值选择 JSON 格式
 
-不再使用 `params_json` 盲拼。thinking JSON 由代码生成、max_tokens 字段名由枚举选择、stream_options 按需加入。此步骤同时消化了之前的 `params_json` 拼接 Bug。
+不再使用 `params_json` 盲拼。thinking JSON 由代码生成（格式由 `thinking_format` 枚举控制，强度由 `thinking_level` 映射）、max_tokens 字段名由枚举选择、stream_options 按需加入。此步骤同时消化了之前的 `params_json` 拼接 Bug。
 
-### 步骤 3: TOML 支持 compat 字段
+### 步骤 3: TOML + CLI 支持 compat 和 thinking 强度
 
-**文件**: `src/config.zig`
-**改动**: TOML 解析新增 `compat` 字段读取；DEFAULT_TEMPLATE 加入 compat 注释
+**文件**: `src/config.zig`、`src/frontends/cli/main.zig`
+**改动**: TOML 解析新增 `compat` 和 `thinking_level` 字段；DEFAULT_TEMPLATE 加入注释；新增 `--thinking low|medium|high|max` 参数
 
-用户可在 TOML 中覆盖 compat 的任意字段。未设置时回退到 URL 推断的默认值。
+用户可在 TOML 中覆盖 compat 的任意字段。未设置时回退到 URL 推断的默认值。thinking 强度通过 `--thinking` 命令行参数传入 session，无参数时使用 compat 中的默认等级。
 
 ### 步骤 4: 流式相位独立块化
 
@@ -98,6 +115,7 @@ zig build test
 | `src/config.zig` | TOML 解析 compat 字段；DEFAULT_TEMPLATE 更新 | 否（新字段可选） |
 | `src/io/provider.zig` | `buildJsonBody` 改为 compat 驱动；流式相位改为独立块 | 否 |
 | `src/frontends/cli/App.zig` | 无结构性改动 | — |
+| `src/frontends/cli/main.zig` | 新增 `--thinking` 参数解析 | 否 |
 
 ## 术语
 
@@ -108,3 +126,4 @@ zig build test
 | 流式相位（streaming phase） | 终端显示时的"思考"/"输出"标签状态 |
 | 独立块（independent blocks） | Pi 的做法：thinking 和 text 作为两个并行累积的内容块，不互斥 |
 | 盲拼（blind concatenation） | v0.1-0.2 的做法：把 TOML 中的 JSON 字符串直接拼接到请求体 |
+| thinking 强度（thinking level） | 思考模式的深度等级（低/中/高/最大），由通用语义映射到各 provider 的具体参数 |
