@@ -218,6 +218,7 @@ pub const Provider = struct {
         var error_body_buf = std.ArrayListAligned(u8, null).empty;
 
         var seen_first_data = false;
+        var in_content_phase = false;
         var finish_reason: types.FinishReason = .unknown;
         var usage: ?types.TokenUsage = null;
 
@@ -301,7 +302,7 @@ pub const Provider = struct {
                 const delta = delta_val.object;
 
                 if (delta.get("reasoning_content")) |r_val| {
-                    if (r_val != .null) {
+                    if (r_val != .null and !in_content_phase) {
                         const r = r_val.string;
                         if (r.len > 0) {
                             if (pw) |p| p.begin_phase(p.context, .thinking);
@@ -313,8 +314,12 @@ pub const Provider = struct {
 
                 if (delta.get("content")) |c_val| {
                     if (c_val != .null) {
+                        if (!in_content_phase) {
+                            in_content_phase = true;
+                            if (pw) |p| p.end_phase(p.context);
+                            if (pw) |p| p.begin_phase(p.context, .content);
+                        }
                         const c = c_val.string;
-                        if (pw) |p| p.begin_phase(p.context, .content);
                         try content_buf.appendSlice(alloc, c);
                         if (pw) |p| p.write_raw(p.context, c);
                     }
