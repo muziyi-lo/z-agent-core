@@ -302,12 +302,16 @@ pub const Provider = struct {
                 const delta = delta_val.object;
 
                 if (delta.get("reasoning_content")) |r_val| {
-                    if (r_val != .null and !in_content_phase) {
+                    if (r_val != .null) {
                         const r = r_val.string;
                         if (r.len > 0) {
-                            if (pw) |p| p.begin_phase(p.context, .thinking);
+                            if (!in_content_phase) {
+                                if (pw) |p| p.begin_phase(p.context, .thinking);
+                            }
                             try content_buf.appendSlice(alloc, r);
-                            if (pw) |p| p.write_raw(p.context, r);
+                            if (!in_content_phase) {
+                                if (pw) |p| p.write_raw(p.context, r);
+                            }
                         }
                     }
                 }
