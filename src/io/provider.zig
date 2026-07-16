@@ -303,9 +303,11 @@ pub const Provider = struct {
                 if (delta.get("reasoning_content")) |r_val| {
                     if (r_val != .null) {
                         const r = r_val.string;
-                        if (pw) |p| p.begin_phase(p.context, .thinking);
-                        try content_buf.appendSlice(alloc, r);
-                        if (pw) |p| p.write_raw(p.context, r);
+                        if (r.len > 0) {
+                            if (pw) |p| p.begin_phase(p.context, .thinking);
+                            try content_buf.appendSlice(alloc, r);
+                            if (pw) |p| p.write_raw(p.context, r);
+                        }
                     }
                 }
 
