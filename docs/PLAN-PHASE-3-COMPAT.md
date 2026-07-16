@@ -1,136 +1,110 @@
-# Plan PHASE-3: 协议适配层 (Compat Layer)
+# Plan PHASE-3: 协议适配层
 
 ## 状态: 计划中
 
-## 来源
+## 问题
 
-对比 Pi 的 `detectCompat()` + compat 系统，z-agent-core 缺失整个协议适配层。当前 `params_json` 盲拼仅覆盖 DeepSeek 一种 thinking 格式，Qwen 能用纯属运气——恰好兼容 DeepSeek 的 thinking 格式 + OpenAI 标准的其他行为。下一个不兼容模型会再次崩。
+**现象**：当前只支持 DeepSeek 一种模型协议。添加 Qwen 时出现 SSE 流式闪烁（每个 token 都在"思考"和"输出"之间跳变），添加 `deepseek-v4-pro` 时报 JSON 解析错误。
 
-## 缺口全景
+**根因**：缺少协议适配层（compat layer）。每个模型提供商在 API 格式上有细微差异——thinking 模式的 JSON 字段名不同、最大 token 的字段名不同、是否支持流式 usage 返回不同。当前用 `params_json` 盲拼来硬编码 DeepSeek 的格式，其他模型靠运气。
 
-| 层 | Pi | z-agent-core | 影响 |
-|----|-----|-------------|------|
-| **协议适配** | `detectCompat()` URL 推断 20+ 参数 | `params_json` 盲拼 | 仅 deepseek 一种格式 |
-| **thinking 格式** | 7 种 | 硬编码 `thinking: {type}` | Qwen 恰好兼容，其他不保证 |
-| **max_tokens 字段** | `max_completion_tokens` vs `max_tokens` 自动选择 | 硬编码 `max_tokens` | Cerebras/Cloudflare 等不兼容 |
-| **流式相位** | 双独立块不互斥 | 单相位切换 | Qwen 闪烁（P0 已修复但架构未改） |
-| **usage 请求** | `stream_options: { include_usage: true }` | 缺失 | 部分 provider 不返回 usage |
-| **重试** | `retry-after` 头 + AbortSignal | 关键词 + 阻塞 sleep | 重试时机不准确 |
-| **模型注册** | `models.json` + compat 覆盖 | TOML 仅 2 个模型模板 | 用户无法自定义 |
+## 概览
 
-## compat 字段定义
+- **参考**：对比 Pi 项目的 `detectCompat()` 系统，确认了 7 项缺口
+- **改动范围**：3 个文件（types.zig、config.zig、provider.zig），不触及 render 层、不改变前后端分离架构
+- **方案思路**：在 `types.zig` 中定义一个协议适配结构体（compat），`provider.zig` 在构建 JSON 请求体时根据 compat 的字段值选择正确的格式，`config.zig` 允许用户在 TOML 中覆盖推断结果
 
-### types.zig 新增 `ModelCompat`
+## 设计要点
 
-```zig
-pub const ThinkingFormat = enum { openai, deepseek, qwen, openrouter, together, zai, disabled };
+### 1. URL 启发式推断 vs 全手动配置
 
-pub const ModelCompat = struct {
-    thinking_format: ThinkingFormat = .disabled,
-    max_tokens_field: MaxTokensField = .max_tokens,
-    supports_usage_in_streaming: bool = false,
-    supports_store: bool = true,
-    supports_developer_role: bool = true,
-    supports_reasoning_effort: bool = false,
-    supports_tool_choice: bool = true,
-    requires_reasoning_content_on_assistant: bool = false,
-    requires_assistant_content_for_tool_calls: bool = false,
-};
+当用户添加一个新模型时，两种策略：
 
-pub const MaxTokensField = enum { max_tokens, max_completion_tokens };
-```
+| 方案 | 优点 | 缺点 |
+|------|------|------|
+| 全部手动在 TOML 中配置 | 精确、可控 | 用户需要了解每种 provider 的协议差异 |
+| URL 模式自动推断 + 手动可覆盖 | 零配置即可用、专家可调优 | 推断规则可能不覆盖所有 provider |
 
-### detectCompat — URL 启发式
+**选择**：URL 推断 + 覆盖。Pi 的实践证明 URL 域名模式（`api.deepseek.com`、`aliyun`、`api.openai.com`）足以覆盖绝大多数 provider。用户在 TOML 中可通过 `compat` 字段覆盖任意推断结果。
 
-```zig
-pub fn detectCompat(base_url: []const u8) ModelCompat {
-    if (std.mem.indexOf(u8, base_url, "api.deepseek.com") != null) {
-        return .{ .thinking_format = .deepseek, .supports_developer_role = false,
-                  .supports_tool_choice = false, .requires_reasoning_content_on_assistant = true,
-                  .requires_assistant_content_for_tool_calls = true };
-    }
-    if (std.mem.indexOf(u8, base_url, "aliyun") != null) {
-        return .{ .thinking_format = .qwen, .supports_usage_in_streaming = true, .supports_developer_role = false };
-    }
-    if (std.mem.indexOf(u8, base_url, "api.openai.com") != null) {
-        return .{ .max_tokens_field = .max_completion_tokens, .supports_reasoning_effort = true };
-    }
-    // ...
-    return .{}; // default: OpenAI-compatible standard
-}
-```
+### 2. thinking 格式的七种变体
 
-### buildJsonBody — 根据 compat 构建
+不同 provider 的"思考模式"在 API 请求体中表示方式不同。DeepSeek 用 `"thinking":{"type":"enabled"}`，OpenAI 用 `"reasoning_effort":"high"`，Qwen 用 `"enable_thinking":true`。
 
-```zig
-// max_tokens 字段
-switch (compat.max_tokens_field) {
-    .max_tokens => buf.appendSlice(",\"max_tokens\":"),
-    .max_completion_tokens => buf.appendSlice(",\"max_completion_tokens\":"),
-}
+用枚举 `ThinkingFormat` 统一表达这 7 种变体。`buildJsonBody` 根据枚举值生成对应的 JSON 片段，而不是拼接用户手写的 `params_json` 字符串——这同时解决了 `deepseek-v4-pro` 的 JSON 转义 Bug（之前 `params_json` 中的引号在拼接时丢失）。
 
-// thinking 格式
-switch (compat.thinking_format) {
-    .deepseek => buf.appendSlice(",\"thinking\":{\"type\":\"enabled\"}"),
-    .qwen => buf.appendSlice(",\"enable_thinking\":true"),
-    .openai => buf.appendSlice(",\"reasoning_effort\":\"high\""),
-    .disabled => {},
-    else => {},
-}
+### 3. 流式相位独立块化
 
-// usage
-if (compat.supports_usage_in_streaming) {
-    buf.appendSlice(",\"stream_options\":{\"include_usage\":true}");
-}
-```
+当前 PhaseWriter 是一个单状态机——同一时刻只能是"思考"或"输出"。Qwen 的 SSE delta 同时携带两个字段，导致每 chunk 切换一次状态（闪烁）。
 
-### TOML 配置扩展
+Pi 的做法是将 thinking 和 text 作为两个独立块并行累积，各自跟踪是否已开始。修改后 `provider.zig` 用两个布尔标志代替单一的 `in_content_phase` 锁：
 
-```toml
-[[models]]
-id = "qwen3.7-max"
-compat = "qwen"              # 快捷方式，等于 detectCompat("aliyun") 的结果
-# 或手动覆盖单个字段：
-compat_thinking = "qwen"
-compat_usage_streaming = true
-```
+- `thinking_started`：思考块是否已开始显示
+- `text_started`：文本块是否已开始显示
 
-## 实施顺序
+两个标志互不干扰。Qwen 的首次 delta 会同时触发两个 `begin_phase`，但后续 deltas 只追加内容不切换状态。
 
-```
-Phase 3.1: types.zig — ModelCompat + detectCompat                [types + config, 无破坏性]
-Phase 3.2: provider.zig — buildJsonBody 根据 compat 构建         [IO 层, 与上述正交]
-            └─ 消化 FIX-2: params_json 盲拼 → compat.thinking_format 枚举
-               thinking JSON 由程序化生成，无需 TOML 中转义引号
-Phase 3.3: config.zig — TOML compat 字段解析                    [配置层]
-Phase 3.4: provider.zig — 流式相位独立块化                         [IO 层, 修复 Qwen 闪烁根因]
-```
+## 实施
 
-Phase 3.1-3.3 先建立 compat 数据流，Phase 3.4 解决流式相位问题。
+实施分四步。前三步建立 compat 数据流（从 TOML → Config → Provider → JSON body），第四步解决流式相位的架构问题。
 
-## 已消化文档
+### 步骤 1: 定义 compat 数据结构
 
-| 文档 | 状态 |
-|------|------|
-| `PLAN-FIX-2-PARAMS-JSON.md` | → 并入 Phase 3.2。`params_json` 盲拼被 `compat.thinking_format` 替代，JSON 拼接错误从根因消除 |
-| `PLAN-FIX-3-SSE-GAPS.md` | → 并入 Phase 3.4（流式相位）和 Phase 3.2（stream_options） |
+**文件**: `src/types.zig`
+**改动**: 新增三个类型——compat 结构体、thinking 格式枚举、max_tokens 字段名枚举
 
-## 波及
+compat 结构体包含所有可适配的协议参数。每个字段有默认值（标准 OpenAI 行为），非标准 provider 通过 `detectCompat` 或 TOML 覆盖。
 
-| 文件 | 改动 |
-|------|------|
-| `src/types.zig` | 新增 `ModelCompat`、`ThinkingFormat`、`MaxTokensField`、`detectCompat()` |
-| `src/config.zig` | TOML 解析 compat 字段；DEFAULT_TEMPLATE 更新 |
-| `src/io/provider.zig` | `buildJsonBody` 根据 compat 构建；流式相位独立块化 |
-| `src/frontends/cli/App.zig` | 无结构性改动（compat 在 Provider 内部消费） |
+### 步骤 2: JSON 构建改为 compat 驱动
+
+**文件**: `src/io/provider.zig`
+**改动**: `buildJsonBody` 函数根据 compat 值选择 JSON 格式
+
+不再使用 `params_json` 盲拼。thinking JSON 由代码生成、max_tokens 字段名由枚举选择、stream_options 按需加入。此步骤同时消化了之前的 `params_json` 拼接 Bug。
+
+### 步骤 3: TOML 支持 compat 字段
+
+**文件**: `src/config.zig`
+**改动**: TOML 解析新增 `compat` 字段读取；DEFAULT_TEMPLATE 加入 compat 注释
+
+用户可在 TOML 中覆盖 compat 的任意字段。未设置时回退到 URL 推断的默认值。
+
+### 步骤 4: 流式相位独立块化
+
+**文件**: `src/io/provider.zig`
+**改动**: 将单相位切换改为双独立块跟踪
+
+用 `thinking_started` 和 `text_started` 两个独立布尔标志替代 `in_content_phase` 锁。数据捕获（`content_buf.appendSlice`）不受任何锁影响。
 
 ## 验证
 
 ```powershell
 zig build
 zig build test
-# 回归测试：
-.\z-agent-core.exe --model aliyun/qwen3.7-max        # Qwen 不闪烁 + thinking 保留
-.\z-agent-core.exe --model deepseek/deepseek-v4-pro   # DeepSeek thinking 正常 + pro 不报 JSON 错误
-.\z-agent-core.exe --model deepseek/deepseek-v4-flash # DeepSeek flash 正常
 ```
+
+| 测试场景 | 预期结果 |
+|----------|----------|
+| `--model deepseek/deepseek-v4-flash` | thinking 正常显示，不闪烁 |
+| `--model deepseek/deepseek-v4-pro` | thinking 正常显示，无 JSON 解析错误 |
+| `--model aliyun/qwen3.7-max` | 不闪烁，思考文本保留在 content_buf |
+| 未知 provider（无 TOML compat） | 默认 OpenAI 标准行为，不报错 |
+
+## 波及
+
+| 文件 | 改动 | 破坏性 |
+|------|------|--------|
+| `src/types.zig` | 新增 `ModelCompat`、`ThinkingFormat`、`MaxTokensField`、`detectCompat()` | 否 |
+| `src/config.zig` | TOML 解析 compat 字段；DEFAULT_TEMPLATE 更新 | 否（新字段可选） |
+| `src/io/provider.zig` | `buildJsonBody` 改为 compat 驱动；流式相位改为独立块 | 否 |
+| `src/frontends/cli/App.zig` | 无结构性改动 | — |
+
+## 术语
+
+| 术语 | 含义 |
+|------|------|
+| 协议适配层（compat layer） | 根据模型 URL 自动推断 API 参数格式的中间层 |
+| thinking 格式 | 模型思考模式在 JSON 请求体中的字段名和值格式 |
+| 流式相位（streaming phase） | 终端显示时的"思考"/"输出"标签状态 |
+| 独立块（independent blocks） | Pi 的做法：thinking 和 text 作为两个并行累积的内容块，不互斥 |
+| 盲拼（blind concatenation） | v0.1-0.2 的做法：把 TOML 中的 JSON 字符串直接拼接到请求体 |
