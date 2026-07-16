@@ -92,6 +92,7 @@ pub fn main(process: std.process.Init) !void {
 
     var app = App.init(allocator, io, single_prompt, model_override) catch return;
     defer app.deinit();
+    app.pipe_mode = !(std.Io.File.isTty(.stdout(), io) catch false);
     app.initAgent();
     try app.run();
 }

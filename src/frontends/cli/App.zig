@@ -73,6 +73,7 @@ pub const App = struct {
     single_prompt: ?[]const u8,
     session_dir: []const u8,
     base_prompt: ?[]const u8,
+    pipe_mode: bool = false,
 
     render_ctx: render.RenderContext,
     tool_display: render.ToolDisplay,
@@ -220,34 +221,39 @@ pub const App = struct {
 
     fn singleTurn(self: *App, prompt: []const u8) !void {
         var obuf: [4096]u8 = undefined;
-        var stdout: Io.File.Writer = .init(.stdout(), self.io, &obuf);
+        var stdout_w: Io.File.Writer = .init(.stdout(), self.io, &obuf);
 
-        var pw = render.PhaseWriter.init(&stdout.interface);
-        var wc = WriterCtx{ .pw = &pw, .lb = &self.line_buffer, .writer = &stdout.interface };
+        var ebuf: [4096]u8 = undefined;
+        var stderr_w: Io.File.Writer = .init(.stderr(), self.io, &ebuf);
+
+        const display_w: *Io.Writer = if (self.pipe_mode) &stderr_w.interface else &stdout_w.interface;
+
+        var pw = render.PhaseWriter.init(display_w);
+        var wc = WriterCtx{ .pw = &pw, .lb = &self.line_buffer, .writer = display_w };
         if (self.provider.phase_writer) |*cb| {
             cb.context = @ptrCast(@alignCast(&wc));
         }
 
-        try render.writeLabeled(&stdout.interface, .user, prompt);
-        try stdout.interface.flush();
+        try render.writeLabeled(display_w, .user, prompt);
+        try display_w.flush();
 
         const pre_count = self.session.messages().len;
         try self.session.append(.{ .role = .user, .content = prompt });
-        _ = stdout.interface.write("\n") catch {};
+        _ = display_w.write("\n") catch {};
 
         const tool_cb = agent_mod.ToolDisplayCb{
             .context = &self.tool_display,
             .begin_tool = render.ToolDisplay.beginCb,
             .render = render.ToolDisplay.renderCb,
         };
-        self.tool_display.writer = &stdout.interface;
+        self.tool_display.writer = display_w;
         const result = self.agent.runTurn(tool_cb) catch |err| {
             if (err != error.OutOfMemory) {
                 self.rollbackTurn(pre_count);
             }
             return err;
         };
-        _ = stdout.interface.write("\n") catch {};
+        _ = display_w.write("\n") catch {};
         if (signal.isInterrupted()) {
             self.agent.abort();
             signal.reset();
@@ -280,26 +286,37 @@ pub const App = struct {
                     ctx_pct,
                 });
                 defer self.allocator.free(label);
-                try render.writeLabeled(&stdout.interface, .usage, label);
-                _ = stdout.interface.write("\n") catch {};
+                try render.writeLabeled(display_w, .usage, label);
+                _ = display_w.write("\n") catch {};
             }
         }
 
         if (result.finish == .interrupted) {
-            try render.writeLabeled(&stdout.interface, .warning, "interrupted");
+            try render.writeLabeled(display_w, .warning, "interrupted");
         }
         if (result.finish == .max_rounds) {
-            try render.writeLabeled(&stdout.interface, .warning, "max tool rounds reached");
+            try render.writeLabeled(display_w, .warning, "max tool rounds reached");
         }
         if (result.finish == .api_error or result.finish == .interrupted) {
             if (result.error_msg) |e| {
-                try render.writeLabeled(&stdout.interface, .err, e);
+                try render.writeLabeled(display_w, .err, e);
             }
             self.rollbackTurn(pre_count);
             try self.session.flush();
             std.process.exit(1);
         } else {
             try self.session.flush();
+        }
+
+        if (self.pipe_mode and result.finish == .stop) {
+            const msgs = self.session.messages();
+            for (msgs) |msg| {
+                if (msg.role == .assistant and msg.tool_calls == null) {
+                    _ = stdout_w.interface.write(msg.content) catch {};
+                    _ = stdout_w.interface.write("\n") catch {};
+                }
+            }
+            try stdout_w.interface.flush();
         }
     }
 
