@@ -436,7 +436,7 @@ const DEFAULT_TEMPLATE =
     \\id = "deepseek-v4-pro"          # used in "provider/model_id" format
     \\name = "DeepSeek V4 Pro"        # display name (shown in banner)
     \\provider = "deepseek"           # links to [[providers]].name
-    \\context_window = 131072          # model's context window in tokens (informational)
+    \\context_window = 1000000          # model's context window in tokens (informational)
     \\max_tokens = 384000             # max tokens the model can generate per response
     \\# params_json: vendor-specific JSON fragment pasted into the API request body.
     \\# Format: key:value pairs WITHOUT outer braces. Provider blindly concatenates.
@@ -449,7 +449,7 @@ const DEFAULT_TEMPLATE =
     \\id = "deepseek-v4-flash"
     \\name = "DeepSeek V4 Flash"
     \\provider = "deepseek"
-    \\context_window = 131072
+    \\context_window = 1000000
     \\max_tokens = 384000
     \\params_json = ""
     \\input = ["text"]
@@ -466,7 +466,7 @@ const DEFAULT_TEMPLATE =
     \\# id = "llama4"
     \\# name = "Llama 4"
     \\# provider = "ollama"
-    \\# context_window = 131072
+    \\# context_window = 1000000
     \\# max_tokens = 4096
     \\# params_json = ""
     \\# input = ["text"]

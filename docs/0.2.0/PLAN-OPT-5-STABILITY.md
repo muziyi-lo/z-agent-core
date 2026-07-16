@@ -1,6 +1,6 @@
 # Plan OPT-5: 运行时稳定性
 
-## 状态: 计划中
+## 状态: 已完成 (2026-07-16)
 
 ## 前置依赖
 
@@ -172,7 +172,7 @@ zig build test
 | 3 | `session.truncateTo(keep)` | `core/session.zig:193` | `pub fn truncateTo(self: *Session, keep: usize) void` | ✅ |
 | 4 | `registry.toTools(allocator)` | `tool/registry.zig:44` | `pub fn toTools(self: Registry, allocator: std.mem.Allocator) ![]types.Tool` | ✅ |
 | 5 | `TokenUsage { input, output, total }` | `types.zig:17-21` | 三个 `u32` 字段 | ✅ |
-| 6 | `ToolContext { allocator, io, project_root, api_endpoint, abort_target }` | `types.zig:40-46` | 5 个字段 + 2 个计划新增 (`messages`, `session_ref`) | ✅ |
+| 6 | `ToolContext { allocator, io, project_root, api_endpoint, abort_target }` | `types.zig:40-49` | 5 个字段 + 3 个新增 (`messages`, `session_ref`, `provider_ref`) | ✅ |
 | 7 | `ApiEndpoint { base_url, api_key, model }` | `types.zig:24-28` | 三个 `[]const u8` 字段 | ✅ |
 | 8 | `provider.chatCompletionStreaming(&arena, io, msgs, tools)` | `io/provider.zig:60` | `pub fn chatCompletionStreaming(self: *Provider, arena: *ArenaAllocator, io: Io, msgs: []const types.Message, tools: ?[]const types.Tool) anyerror!ProviderResponse` | ✅ |
 

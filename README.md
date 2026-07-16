@@ -1,6 +1,6 @@
 # z-agent-core
 
-An experiment exploring DeepSeek's coding capabilities through a pure agent loop implementation in Zig. Supports tool hooks, abort, lifecycle callbacks, token usage tracking, and session forking. No TUI, no compaction.
+An experiment exploring DeepSeek's coding capabilities through a pure agent loop implementation in Zig. Supports tool hooks, abort, lifecycle callbacks, token usage tracking, session forking, context compaction, and doom loop detection. No TUI.
 
 ## Motivation: AI knowledge lag and Zig 0.16.0
 
@@ -15,7 +15,7 @@ The 15-item trap table in `AGENTS.md` catalogs the most frequent hallucinations 
 ```bash
 zig build run                         # interactive REPL
 zig build run -- --prompt "hello"     # single-shot mode
-zig build test                        # 148 unit tests
+zig build test                        # 156 unit tests
 ```
 
 ## Requirements
@@ -57,7 +57,7 @@ models = ["deepseek-v4-pro", "deepseek-v4-flash"]
 id = "deepseek-v4-pro"
 name = "DeepSeek V4 Pro"
 provider = "deepseek"
-context_window = 131072
+context_window = 1000000
 max_tokens = 384000
 params_json = "\"thinking\":{\"type\":\"enabled\"}"
 input = ["text"]
@@ -66,7 +66,7 @@ input = ["text"]
 id = "deepseek-v4-flash"
 name = "DeepSeek V4 Flash"
 provider = "deepseek"
-context_window = 131072
+context_window = 1000000
 max_tokens = 384000
 params_json = ""
 input = ["text"]
@@ -85,19 +85,24 @@ src/frontends/cli/
   render.zig                  -- ANSI output, Markdown, streaming LineBuffer, tool display
 src/config.zig                -- TOML loading, model resolution, .env, template generation
 src/toml.zig                  -- lightweight TOML parser
-src/types.zig                 -- types: Message, Tool, ToolResult, TokenUsage, ApiEndpoint
+src/session_ops.zig           -- session lifecycle: new, load, fork, rollback
+src/types.zig                 -- types: Message, Tool, ToolResult, TokenUsage, ToolMeta
 src/core/
-  agent.zig                   -- agent loop: ToolHooks, abort(), LifecycleCb, finishTurn
-  session.zig                 -- JSONL persistence (.zagent/sessions/)
+  agent.zig                   -- agent loop: ToolHooks, abort(), LifecycleCb, SystemPromptCb,
+                              --   StormBreaker (doom loop detection), context window monitoring
+  session.zig                 -- JSONL persistence (.zagent/sessions/), updateFirstSystem
 src/io/
-  provider.zig                -- OpenAI-compat SSE streaming + retry, TokenUsage extraction
+  provider.zig                -- OpenAI-compat SSE streaming + retry (5× backoff),
+                              --   error classification (rate limit/503 → retryable)
 src/tool/
-  registry.zig                -- buildRegistry(): 6 built-in tools
+  registry.zig                -- buildRegistry(): 8 built-in tools
   read.zig                    -- read files / list directories
   write.zig                   -- create/overwrite files
   bash.zig                    -- execute shell commands (pwsh/sh)
   grep.zig                    -- regex content search
   glob.zig                    -- filename pattern matching
+  edit.zig                    -- exact string replacement with diff preview
+  compact.zig                 -- context compaction via LLM summarization
   skill.zig                   -- load .zagent/skills/*/SKILL.md
 src/util/
   path.zig                    -- path resolution with traversal guard
@@ -105,9 +110,10 @@ src/util/
   text.zig                    -- string trimming
 ```
 
-Core = all of `src/` except `src/frontends/`. The CLI frontend implements two callback contracts injected at runtime:
+Core = all of `src/` except `src/frontends/`. The CLI frontend implements three callback contracts injected at runtime:
 - **PhaseWriterCb** — provider signals phase (thinking/content) + raw text; frontend renders via LineBuffer
-- **ToolDisplayCb** — agent passes tool_name + args; frontend derives display label from args JSON
+- **ToolDisplayCb** — agent passes tool_name + args + meta; frontend derives display label
+- **SystemPromptCb** — agent calls at turn start; frontend rebuilds system prompt with env/skills/AGENTS.md
 
 Tools return only `session_content` (LLM context data) + optional `err_msg`. No display strings cross the core/frontend boundary.
 
@@ -120,17 +126,21 @@ Tools return only `session_content` (LLM context data) + optional `err_msg`. No 
 | `bash` | Execute shell command (pwsh on Windows, sh on Unix) |
 | `grep` | Regex search in files |
 | `glob` | Filename pattern matching |
+| `edit` | Exact string replacement with diff preview |
+| `compact` | Compress conversation via LLM summarization (keep system + recent N) |
 | `skill` | Load `.zagent/skills/*/SKILL.md` |
 
 Add a tool: `tool/xxx.zig` + 1 line in `registry.zig` `buildRegistry()`.
 
 ## Key design decisions
 
-- **Frontend-backend separation**: Core modules (`core/`, `io/`, `tool/`) never import render code. Two callback contracts (`PhaseWriterCb`, `ToolDisplayCb`) inject display logic at runtime. `core/ → util/` BIDIR eliminated.
+- **Frontend-backend separation**: Core modules (`core/`, `io/`, `tool/`) never import render code. Three callback contracts (`PhaseWriterCb`, `ToolDisplayCb`, `SystemPromptCb`) inject display/logic at runtime.
 - **TOML config**: Self-contained parser, no external dependencies. Model params are TOML-driven JSON fragments (`params_json`), provider blind-concatenates — no hardcoded vendor logic.
-- **SSE streaming**: Provider parses `data:` lines via curl subprocess. LineBuffer renders chunks immediately for typewriter feel; Markdown-to-ANSI on complete lines.
-- **Static tool registry**: Compile-time array, one line per tool. LLM sees tools as OpenAI-compatible JSON schema auto-generated from registry.
+- **SSE streaming + retry**: Provider parses `data:` lines via curl subprocess with 5× exponential backoff (500ms→8s), error classification (rate limit/503 retryable, 4xx fatal). LineBuffer renders chunks immediately for typewriter feel; Markdown-to-ANSI on complete lines.
+- **Static tool registry**: Compile-time array, one line per tool (8 tools). LLM sees tools as OpenAI-compatible JSON schema auto-generated from registry.
 - **Linear JSONL sessions**: One file per conversation. `/fork` copies messages to new file (atomic temp+rename) and auto-switches.
+- **Context compaction**: Token monitoring at 85% window threshold; `compact` tool uses LLM to summarize old messages and replace them in-place.
+- **StormBreaker**: FIFO queue (5 entries) tracks tool call `{name, args_hash}`; 3 consecutive identical calls injects system warning.
 - **Single binary**: Windows icon via `addWin32ResourceFile`, zero runtime dependencies.
 
 ## Documentation
@@ -138,8 +148,10 @@ Add a tool: `tool/xxx.zig` + 1 line in `registry.zig` `buildRegistry()`.
 | File | Content |
 |------|---------|
 | `docs/CORE-FRONTEND.md` | Core definition, frontend integration, Phase 0/1/2 plan, architecture comparison with Pi Agent |
-| `docs/PLAN-PHASE2.md` | Phase 2 spec + implementation status: hooks, abort, lifecycle, TokenUsage, /fork |
-| `docs/PLAN-OPT-1-TOOLRESULT-SPLIT.md` | ToolResult data-display separation plan |
+| `docs/PLAN-PHASE2.md` | Phase 2 spec + implementation: hooks, abort, lifecycle, TokenUsage, /fork, compact (✅ done) |
+| `docs/PLAN-OPT-6-USAGE-DISPLAY.md` | OPT-6: usage display with cache hit ratio + dynamic units (planned) |
+| `docs/REMAINING.md` | Remaining work tracker: done/planned/deferred/future/wishlist |
+| `docs/0.2.0/` | v0.2.0 plan docs: OPT-1 through OPT-5 (7 files, all done) |
 | `docs/0.0.1-alpha/` | v0.0.1-alpha step-by-step design docs (8 files) |
 
 ## Vibe Coding insights

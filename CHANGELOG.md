@@ -1,6 +1,12 @@
 # Changelog
 
-## [0.2.0] - 未发布
+## [0.2.1] - 未完成
+
+本版本专注于 BUG 修复
+
+## [0.2.0] 
+
+进行了运行时健壮性改进，CLI 可以简单使用
 
 ### Added
 - **OPT-5: 运行时稳定性（P0-2）API 重试增强**
@@ -48,7 +54,7 @@
 - `frontends/cli/render.zig`：`MessageType` 新增 `usage`，`writeLabeled(.usage)` 显示 token 统计
 - `frontends/cli/App.zig`：每轮结束后显示 token 用量（输入/输出/累计/窗口上限）
 
-## [0.1.0] - 未发布
+## [0.1.0] 
 
 本版本引入前后端分离架构、回调 API 清理和核心功能增强。
 
@@ -122,7 +128,9 @@
 - agent.zig：新增 7 个 test block（hooks before blocks/allows、hooks after fires、abort before runTurn/abort resets、lifecycle on_turn_start/on_turn_end fires）
 - **合计**：148 个 test block（+8 vs 0.0.1-alpha）
 
-## [0.0.1-alpha] - 2026.07.10
+## [0.0.1-alpha]
+
+基础核心完成
 
 ### Added
 - 项目脚手架：`main.zig`、`App.zig`、`build.zig`（编译 + `check-arch` 集成）

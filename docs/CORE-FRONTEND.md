@@ -10,7 +10,7 @@ Two-phase refactoring:
 |-------|------|-------|--------|
 | Phase 0 | Clean callback API (remove `writer` param, add `!void` return) | `agent.zig`, `render/cli.zig`, `App.zig` | ✅ Done |
 | Phase 1 | Move CLI files to `src/frontends/cli/` | File moves + import path fixes | ✅ Done |
-| Phase 2 | Enrich core API: hooks, abort, lifecycle events | `agent.zig`, new section below | ✅ Done (except compact.zig) |
+| Phase 2 | Enrich core API: hooks, abort, lifecycle events | `agent.zig`, new section below | ✅ Done |
 
 ### Phase 0: API cleanup
 
@@ -233,7 +233,7 @@ pub fn main(process: std.process.Init) !void {
 
 No `build.zig` changes needed. Single binary, multiple frontends selectable at runtime via CLI flag.
 
-### Phase 2: Core API enrichment (done, except compact.zig)
+### Phase 2: Core API enrichment (done)
 
 After Phase 1 is complete, add three lightweight mechanisms. No file moves — pure API additions.
 

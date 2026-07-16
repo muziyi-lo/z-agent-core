@@ -12,28 +12,28 @@ webfetch  ← 新工具，独立
 
 | # | Item | Plan doc | Effort |
 |---|------|----------|--------|
-| D12 | OPT-5 运行时稳定性 (P0-2 API重试 + P0-1 上下文压缩 + P1-3 死循环 + P1-4 工具上下文 + P1-5 每步重组) | PLAN-OPT-5-STABILITY.md | High |
+| D12 | OPT-5 运行时稳定性 (P0-2 API重试 + P0-1 上下文压缩 + P1-3 死循环 + P1-4 工具上下文 + P1-5 每步重组) | docs/0.2.0/PLAN-OPT-5-STABILITY.md | High |
 
 ## Done (2026-07-15)
 
 | # | Item | Plan doc | Effort |
 |---|------|----------|--------|
-| D5 | Thinking content: skip Markdown, plain dim text | PLAN-OPT-2-DISPLAY-GAPS.md | Low |
-| D6 | ToolResult 结构化：ToolMeta union + 全工具填 meta + edit 新工具 | PLAN-OPT-3-RENDER-TOOLS.md | High |
-| D7 | OPT-3.1 bug 修复 (B1 UTF-8截断, B2 bash二进制, B3 abort后flush) | PLAN-OPT-3.1-TECHDEBT.md | Medium |
-| D8 | OPT-3.1 快赢 (grep可选, bash 512KB/stderr/二进制, user_output过滤, 路径左截断) | PLAN-OPT-3.1-TECHDEBT.md | Medium |
-| D9 | OPT-3.1 增强 (token用量展示, 工具进度提示, bash命令标签, API错误展示) | PLAN-OPT-3.1-TECHDEBT.md | Medium |
-| D10 | OPT-4 会话管理 (session_ops分层 + base_prompt模板 + skill列表注入) | PLAN-OPT-4-AGENT-SESSION.md | High |
-| D11 | OPT-3.2 标签渲染统一化 (writeLabel + labelColor表 + 对比度/空行) | PLAN-OPT-3.2-LABEL-UNIFY.md | Low |
+| D5 | Thinking content: skip Markdown, plain dim text | docs/0.2.0/PLAN-OPT-2-DISPLAY-GAPS.md | Low |
+| D6 | ToolResult 结构化：ToolMeta union + 全工具填 meta + edit 新工具 | docs/0.2.0/PLAN-OPT-3-RENDER-TOOLS.md | High |
+| D7 | OPT-3.1 bug 修复 (B1 UTF-8截断, B2 bash二进制, B3 abort后flush) | docs/0.2.0/PLAN-OPT-3.1-TECHDEBT.md | Medium |
+| D8 | OPT-3.1 快赢 (grep可选, bash 512KB/stderr/二进制, user_output过滤, 路径左截断) | docs/0.2.0/PLAN-OPT-3.1-TECHDEBT.md | Medium |
+| D9 | OPT-3.1 增强 (token用量展示, 工具进度提示, bash命令标签, API错误展示) | docs/0.2.0/PLAN-OPT-3.1-TECHDEBT.md | Medium |
+| D10 | OPT-4 会话管理 (session_ops分层 + base_prompt模板 + skill列表注入) | docs/0.2.0/PLAN-OPT-4-AGENT-SESSION.md | High |
+| D11 | OPT-3.2 标签渲染统一化 (writeLabel + labelColor表 + 对比度/空行) | docs/0.2.0/PLAN-OPT-3.2-LABEL-UNIFY.md | Low |
 
 ## Done (2026-07-14)
 
 | # | Item | Plan doc | Effort |
 |---|------|----------|--------|
-| D1 | grep/glob label: show both pattern + path | PLAN-OPT-2-DISPLAY-GAPS.md | Low |
-| D2 | Round limit warning: user + LLM notification | PLAN-OPT-2-DISPLAY-GAPS.md | Low |
-| D3 | Bash output display: `user_output` field | PLAN-OPT-2-DISPLAY-GAPS.md | Medium |
-| D4 | Tool error display: red text + (err) suffix | PLAN-OPT-2-DISPLAY-GAPS.md | Low |
+| D1 | grep/glob label: show both pattern + path | docs/0.2.0/PLAN-OPT-2-DISPLAY-GAPS.md | Low |
+| D2 | Round limit warning: user + LLM notification | docs/0.2.0/PLAN-OPT-2-DISPLAY-GAPS.md | Low |
+| D3 | Bash output display: `user_output` field | docs/0.2.0/PLAN-OPT-2-DISPLAY-GAPS.md | Medium |
+| D4 | Tool error display: red text + (err) suffix | docs/0.2.0/PLAN-OPT-2-DISPLAY-GAPS.md | Low |
 
 ## Deferred (explicitly skipped)
 

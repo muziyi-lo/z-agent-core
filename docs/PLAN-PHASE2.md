@@ -42,7 +42,7 @@ Eight steps adding hooks, abort, lifecycle events, token tracking, ApiEndpoint, 
 | 2H (TokenUsage) | ✅ Done | TokenUsage struct + SSE parsing + session serialization | types.zig:16-20,13,97; provider.zig:271-279,374,382; agent.zig:160; session.zig:445-456,122-133 |
 | 2I (/fork) | ✅ Done | /fork command + session.writeTo() + auto-switch | App.zig:330-333,487-533; session.zig:234-255 |
 | 2E (tests) | ✅ Done | 7 new tests: hooks(3) + abort(2) + lifecycle(2) | agent.zig:580-850 |
-| 2F (compact.zig) | ⏳ Skipped | Optional; deferred to future | — |
+| 2F (compact.zig) | ✅ Done | Implemented as OPT-5 P0-1: tool/compact.zig + token monitoring + session compression | tool/compact.zig; agent.zig; session.zig |
 
 ### Implementation deviations from plan
 
