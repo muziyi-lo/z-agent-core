@@ -29,6 +29,8 @@
 
 **与 nullclaw 的差异**：nullclaw 用编译期的 `compat_providers` 表（70+ provider），每个条目是预配置的 bool 标志。我们选择 URL 启发式而非预编表，因为我们的用户模型不同——z-agent-core 面向用户自配置少量模型（5-10 个），编译期表维护成本 > 收益。但标志化字段的设计（`thinking_param: bool` 而非 `params_json: string`）可直接借鉴。
 
+**路径关键词回退**：仅域名匹配不足以覆盖自部署网关（如 LiteLLM、OneAPI 使用同一域名但代理不同后端）。`detectCompat` 增加路径关键词检查——如果 URL 路径包含 `/aliyun/`、`/deepseek/`、`/bedrock/` 等关键词，优先于域名推断。用户始终可通过 TOML 的 `compat` 字段显式覆盖所有推断。
+
 ### 2. thinking 格式的七种变体
 
 不同 provider 的"思考模式"在 API 请求体中表示方式不同。DeepSeek 用 `"thinking":{"type":"enabled"}`，OpenAI 用 `"reasoning_effort":"high"`，Qwen 用 `"enable_thinking":true`。
@@ -92,6 +94,8 @@ thinking 强度等级用枚举表达四个通用等级（低/中/高/最大）�
 
 不再使用 `params_json` 盲拼。thinking JSON 由代码生成（格式由 `thinking_format` 枚举控制，强度由 `thinking_level` 映射）、max_tokens 字段名由枚举选择、stream_options 按需加入。此步骤同时消化了之前的 `params_json` 拼接 Bug。
 
+**注意**：`stream_options.include_usage` 并非所有 provider 都支持。若返回 HTTP 400，自动重试不加此字段并标记 `supports_usage_in_streaming = false`。
+
 ### 步骤 3: TOML + CLI + REPL 支持 compat 和 thinking 强度
 
 **文件**: `src/config.zig`、`src/frontends/cli/main.zig`、`src/frontends/cli/App.zig`
@@ -143,7 +147,21 @@ zig build test
 | 独立块（independent blocks） | Pi 的做法：thinking 和 text 作为两个并行累积的内容块，不互斥 |
 | 盲拼（blind concatenation） | v0.1-0.2 的做法：把 TOML 中的 JSON 字符串直接拼接到请求体 |
 | thinking 强度（thinking level） | 思考模式的深度等级（低/中/高/最大），由通用语义映射到各 provider 的具体参数 |
+| 同步循环假设 | 当前 agent 为单线程同步架构（REPL → runTurn → curl wait → REPL），不存在并发读写。此假设是 `/thinking` 直接修改 Provider 字段而不加锁的前提 |
 | cache-first 循环 | Reasonix 的核心设计：append-only 消息历史，保持 prompt 前缀字节不变以命中 DeepSeek 自动缓存 |
+
+## 第三方评测决策记录
+
+| 条目 | 决策 | 理由 |
+|------|------|------|
+| 漏洞 1：/thinking 数据竞争 | 不通过 | 同步单线程架构无并发场景；已标注设计假设 |
+| 漏洞 2：URL 启发式过薄 | 采纳 | 增加路径关键词回退 + TOML `compat` 作为主导消歧义手段 |
+| 漏洞 3：缺失标准化 delta | 延后至 PHASE-4 | 响应解析结构化属于 reasoning 分离的范畴 |
+| 漏洞 4：stream_options 兼容黑洞 | 采纳 | 增加 400 自动回退 + 标记不支持 |
+| 漏洞 5：切换强度破坏缓存 | 延后至 PHASE-4 | 已在设计中标注矛盾，PHASE-4 专门处理缓存策略 |
+| 方案 A：VTable 编译期多态 | 不采纳 | 5-10 个模型场景下过度设计，增加调试负担而无性能收益 |
+| 方案 B：Request Context 快照 | 不采纳 | 同步架构下无收益；类型注释中标注假设 |
+| 方案 C：前瞻缓冲 | 不采纳 | 独立双标志方案已充分解决闪烁，缓冲增加延迟无必要 |
 | reasoning_content 回传 | DeepSeek 要求 tool-call 消息必须携带 reasoning_content，但普通 assistant 消息可省略以节省 token |
 | stall 检测 | nullclaw 独有功能：curl `--speed-limit 1 --speed-time 60`，60 秒无数据自动断开 |
 | stream_options | OpenAI 标准参数：`{"include_usage": true}` 让 provider 在每个 chunk 返回 token 用量 |

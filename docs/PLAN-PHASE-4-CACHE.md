@@ -69,6 +69,8 @@ system: "You are...\n<env>\nWorking directory: C:\Test\nPlatform: windows\n</env
 **文件**: `src/io/provider.zig`
 **改动**: 流式解析时，reasoning 文本累积到独立的 `reasoning_buf`，不混入 `content_buf`。`ProviderResponse` 新增 `reasoning_content: ?[]const u8` 字段
 
+此步骤同时消化了 PHASE-3 评测中"缺失标准化 delta"的反馈——Qwen 等模型同时返回 `delta.content` 和 `delta.reasoning_content` 时，分离累积自然避免了消息乱序。
+
 ### 步骤 3: Session 存储更新
 
 **文件**: `src/core/session.zig`
