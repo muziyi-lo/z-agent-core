@@ -401,6 +401,7 @@ test "agent: init stores fields" {
             .model = "test-model",
             .max_tokens = 1000,
             .vendor = .standard,
+            .compat = .{},
         },
     };
 
@@ -430,6 +431,7 @@ test "agent: runTurn stop" {
             .model = "test-model",
             .max_tokens = 1000,
             .vendor = .standard,
+            .compat = .{},
         },
     };
     const reg = registry_mod.buildRegistry();
@@ -473,6 +475,7 @@ test "agent: runTurn tool_calls" {
             .model = "test-model",
             .max_tokens = 1000,
             .vendor = .standard,
+            .compat = .{},
         },
     };
     const reg = registry_mod.buildRegistry();
@@ -524,6 +527,7 @@ test "agent: runTurn max_rounds" {
             .model = "test-model",
             .max_tokens = 1000,
             .vendor = .standard,
+            .compat = .{},
         },
     };
     const reg = registry_mod.buildRegistry();
@@ -572,6 +576,7 @@ test "agent: runTurn interrupted" {
             .model = "test-model",
             .max_tokens = 1000,
             .vendor = .standard,
+            .compat = .{},
         },
     };
     const reg = registry_mod.buildRegistry();
@@ -611,6 +616,7 @@ test "agent: runTurn api_error" {
             .model = "test-model",
             .max_tokens = 1000,
             .vendor = .standard,
+            .compat = .{},
         },
     };
     const reg = registry_mod.buildRegistry();
@@ -647,6 +653,7 @@ test "agent: runTurn appends to session" {
             .model = "test-model",
             .max_tokens = 1000,
             .vendor = .standard,
+            .compat = .{},
         },
     };
     const reg = registry_mod.buildRegistry();
@@ -727,7 +734,7 @@ test "agent: hooks before blocks execution" {
     defer sess.deinit();
 
     var p = provider.Provider{
-        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard },
+        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard, .compat = .{} },
     };
     const reg = registry_mod.buildRegistry();
 
@@ -763,7 +770,7 @@ test "agent: hooks before allows execution" {
     defer sess.deinit();
 
     var p = provider.Provider{
-        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard },
+        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard, .compat = .{} },
     };
     const reg = registry_mod.buildRegistry();
 
@@ -798,7 +805,7 @@ test "agent: hooks after fires on success" {
     defer sess.deinit();
 
     var p = provider.Provider{
-        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard },
+        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard, .compat = .{} },
     };
     const reg = registry_mod.buildRegistry();
 
@@ -834,7 +841,7 @@ test "agent: abort before runTurn returns interrupted" {
     defer sess.deinit();
 
     var p = provider.Provider{
-        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard },
+        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard, .compat = .{} },
     };
     const reg = registry_mod.buildRegistry();
 
@@ -864,7 +871,7 @@ test "agent: abort resets on next runTurn" {
     defer sess.deinit();
 
     var p = provider.Provider{
-        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard },
+        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard, .compat = .{} },
     };
     const reg = registry_mod.buildRegistry();
 
@@ -900,7 +907,7 @@ test "agent: lifecycle on_turn_start fires" {
     defer sess.deinit();
 
     var p = provider.Provider{
-        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard },
+        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard, .compat = .{} },
     };
     const reg = registry_mod.buildRegistry();
 
@@ -930,7 +937,7 @@ test "agent: lifecycle on_turn_end fires" {
     defer sess.deinit();
 
     var p = provider.Provider{
-        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard },
+        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard, .compat = .{} },
     };
     const reg = registry_mod.buildRegistry();
 

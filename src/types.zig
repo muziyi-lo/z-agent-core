@@ -135,6 +135,60 @@ pub const Model = struct {
     max_tokens: u32,
     params_json: ?[]const u8 = null,
     input: []const InputModality,
+    compat: ?ModelCompatOverride = null,
+};
+
+/// Per-model protocol quirks. Populated by detectCompat(); TOML overrides via ModelCompatOverride.
+pub const ModelCompat = struct {
+    thinking_format: ThinkingFormat = .none,
+    thinking_level: ThinkingLevel = .high,
+    max_tokens_field: MaxTokensField = .max_tokens,
+    supports_stream_options: bool = false,
+    supports_usage_in_streaming: bool = false,
+    require_reasoning_on_tool_calls: bool = false,
+};
+
+/// TOML override — all optional. Null fields keep detectCompat() value.
+pub const ModelCompatOverride = struct {
+    thinking_format: ?ThinkingFormat = null,
+    thinking_level: ?ThinkingLevel = null,
+    max_tokens_field: ?MaxTokensField = null,
+    supports_stream_options: ?bool = null,
+    supports_usage_in_streaming: ?bool = null,
+    require_reasoning_on_tool_calls: ?bool = null,
+};
+
+pub const ThinkingFormat = enum {
+    none,
+    thinking_object,
+    reasoning_effort,
+    enable_thinking_bool,
+    thinking_parameters,
+    thinking_with_budget,
+    thinking_config_object,
+};
+
+pub const ThinkingLevel = enum {
+    none,
+    minimal,
+    low,
+    medium,
+    high,
+    xhigh,
+    max,
+
+    pub fn fromString(s: []const u8) ?ThinkingLevel {
+        inline for (@typeInfo(ThinkingLevel).@"enum".fields) |field| {
+            if (std.mem.eql(u8, s, field.name)) return @field(ThinkingLevel, field.name);
+        }
+        return null;
+    }
+};
+
+pub const MaxTokensField = enum {
+    max_tokens,
+    max_tokens_to_sample,
+    max_output_tokens,
 };
 
 /// Provider configuration entry from TOML config.
@@ -172,3 +226,106 @@ pub const SessionInfo = struct {
     model: []const u8,
     msg_count: usize,
 };
+
+/// Infer protocol compat from provider base_url. Path keywords (case-insensitive,
+/// stack buffer ≤256 bytes) take priority; domain heuristic is fallback.
+pub fn detectCompat(base_url: []const u8) ModelCompat {
+    var c = ModelCompat{};
+
+    if (base_url.len <= 256) {
+        var lower: [256]u8 = undefined;
+        for (base_url, 0..) |ch, i| lower[i] = std.ascii.toLower(ch);
+        const url_lower = lower[0..base_url.len];
+
+        if (std.mem.indexOf(u8, url_lower, "/openai/") != null) {
+            c.thinking_format = .reasoning_effort;
+            c.supports_stream_options = true;
+            c.supports_usage_in_streaming = true;
+        }
+        if (std.mem.indexOf(u8, url_lower, "/deepseek/") != null) {
+            c.thinking_format = .thinking_object;
+            c.require_reasoning_on_tool_calls = true;
+        }
+        if (std.mem.indexOf(u8, url_lower, "/aliyun/") != null or
+            std.mem.indexOf(u8, url_lower, "/qwen/") != null)
+        {
+            c.thinking_format = .enable_thinking_bool;
+        }
+        if (std.mem.indexOf(u8, url_lower, "/anthropic/") != null or
+            std.mem.indexOf(u8, url_lower, "/claude/") != null)
+        {
+            c.thinking_format = .thinking_with_budget;
+            c.max_tokens_field = .max_tokens_to_sample;
+        }
+        if (std.mem.indexOf(u8, url_lower, "/gemini/") != null) {
+            c.thinking_format = .thinking_config_object;
+            c.max_tokens_field = .max_output_tokens;
+        }
+    }
+
+    var url = base_url;
+    if (std.mem.startsWith(u8, url, "https://")) url = url["https://".len..];
+    if (std.mem.startsWith(u8, url, "http://")) url = url["http://".len..];
+    const hostname = if (std.mem.indexOfAny(u8, url, "/:")) |pos| url[0..pos] else url;
+
+    if (std.mem.endsWith(u8, hostname, ".deepseek.com") or
+        std.mem.eql(u8, hostname, "api.deepseek.com"))
+    {
+        if (c.thinking_format == .none) c.thinking_format = .thinking_object;
+        c.require_reasoning_on_tool_calls = true;
+    }
+    if (std.mem.eql(u8, hostname, "api.openai.com") or
+        std.mem.endsWith(u8, hostname, ".openai.com"))
+    {
+        if (c.thinking_format == .none) c.thinking_format = .reasoning_effort;
+        c.supports_stream_options = true;
+        c.supports_usage_in_streaming = true;
+    }
+    if (std.mem.startsWith(u8, hostname, "dashscope.") or
+        std.mem.endsWith(u8, hostname, ".aliyuncs.com"))
+    {
+        if (c.thinking_format == .none) c.thinking_format = .enable_thinking_bool;
+    }
+
+    return c;
+}
+
+test "ThinkingLevel fromString all values" {
+    try @import("std").testing.expectEqual(ThinkingLevel.none, ThinkingLevel.fromString("none").?);
+    try @import("std").testing.expectEqual(ThinkingLevel.minimal, ThinkingLevel.fromString("minimal").?);
+    try @import("std").testing.expectEqual(ThinkingLevel.low, ThinkingLevel.fromString("low").?);
+    try @import("std").testing.expectEqual(ThinkingLevel.medium, ThinkingLevel.fromString("medium").?);
+    try @import("std").testing.expectEqual(ThinkingLevel.high, ThinkingLevel.fromString("high").?);
+    try @import("std").testing.expectEqual(ThinkingLevel.xhigh, ThinkingLevel.fromString("xhigh").?);
+    try @import("std").testing.expectEqual(ThinkingLevel.max, ThinkingLevel.fromString("max").?);
+    try @import("std").testing.expectEqual(@as(?ThinkingLevel, null), ThinkingLevel.fromString("invalid"));
+}
+
+test "detectCompat deepseek" {
+    const c = detectCompat("https://api.deepseek.com");
+    try @import("std").testing.expectEqual(ThinkingFormat.thinking_object, c.thinking_format);
+    try @import("std").testing.expect(c.require_reasoning_on_tool_calls);
+}
+
+test "detectCompat openai" {
+    const c = detectCompat("https://api.openai.com/v1");
+    try @import("std").testing.expectEqual(ThinkingFormat.reasoning_effort, c.thinking_format);
+    try @import("std").testing.expect(c.supports_stream_options);
+    try @import("std").testing.expect(c.supports_usage_in_streaming);
+}
+
+test "detectCompat aliyun" {
+    const c = detectCompat("https://dashscope.aliyuncs.com/compatible-mode/v1");
+    try @import("std").testing.expectEqual(ThinkingFormat.enable_thinking_bool, c.thinking_format);
+}
+
+test "detectCompat gateway path override" {
+    const c = detectCompat("https://my-gateway.example.com/deepseek/v1");
+    try @import("std").testing.expectEqual(ThinkingFormat.thinking_object, c.thinking_format);
+}
+
+test "detectCompat unknown defaults" {
+    const c = detectCompat("https://custom-llm.example.com/v1");
+    try @import("std").testing.expectEqual(ThinkingFormat.none, c.thinking_format);
+    try @import("std").testing.expect(!c.supports_stream_options);
+}

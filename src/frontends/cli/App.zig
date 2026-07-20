@@ -88,6 +88,7 @@ pub const App = struct {
         io: Io,
         single_prompt: ?[]const u8,
         model_override: ?[]const u8,
+        thinking_level: ?types.ThinkingLevel,
     ) !App {
         render.init();
         signal.init(io);
@@ -151,7 +152,7 @@ pub const App = struct {
             .write_rendered = pwWriteRendered,
             .end_phase = pwEndPhase,
         };
-        const provider = provider_mod.Provider.init(allocator, entry, model, null, io, phase_writer_cb) catch |err| {
+        var provider = provider_mod.Provider.init(allocator, entry, model, null, io, phase_writer_cb) catch |err| {
             if (err == error.ApiKeyNotSet) {
                 var sbuf: [256]u8 = undefined;
                 var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
@@ -160,6 +161,9 @@ pub const App = struct {
             }
             return err;
         };
+        if (thinking_level) |tl| {
+            provider.config.compat.thinking_level = tl;
+        }
         const registry = registry_mod.buildRegistry();
         const tools = try registry.toTools(allocator);
         errdefer allocator.free(tools);
@@ -408,6 +412,20 @@ pub const App = struct {
             try self.forkSession(stdout, line["/fork ".len..]);
             return;
         }
+        if (std.mem.startsWith(u8, line, "/thinking ")) {
+            const level_str = std.mem.trim(u8, line["/thinking ".len..], " \t");
+            if (types.ThinkingLevel.fromString(level_str)) |tl| {
+                self.provider.config.compat.thinking_level = tl;
+                const msg = try std.fmt.allocPrint(self.allocator, "thinking level: {s}", .{level_str});
+                defer self.allocator.free(msg);
+                try render.writeLabeled(&stdout.interface, .success, msg);
+                return;
+            } else {
+                try render.writeLabeled(&stdout.interface, .warning,
+                    "Usage: /thinking none|minimal|low|medium|high|xhigh|max");
+                return;
+            }
+        }
 
         const pre_count = self.session.messages().len;
         try self.session.append(.{ .role = .user, .content = line });
@@ -556,7 +574,7 @@ pub const App = struct {
 
         try stdout.interface.print("Saved sessions ({d}):\n", .{sessions.len});
         for (sessions) |s| {
-            try stdout.interface.print("  {s}  {s}  ~{d} msgs\n", .{ s.name, s.model, s.msg_count });
+            try stdout.interface.print("  {s}  \"{s}\"  {s}  ~{d} msgs\n", .{ s.id, s.name, s.model, s.msg_count });
         }
     }
 
@@ -566,10 +584,11 @@ pub const App = struct {
             \\z-agent-core commands:
             \\  /exit, /quit    Exit the REPL
             \\  /new            Start a new session
-            \\  /load <name>    Load a saved session
+            \\  /load <id>      Load session by ID (first column of /list)
             \\  /name <name>    Rename current session
             \\  /list           List saved sessions
             \\  /fork <name>    Fork current session to new file
+            \\  /thinking <lvl> Set thinking: none|minimal|low|medium|high|xhigh|max
             \\  /help           Show this help
             \\
         , .{});
@@ -578,7 +597,7 @@ pub const App = struct {
     fn loadSession(self: *App, stdout: *Io.File.Writer, name: []const u8) !void {
         const trimmed = std.mem.trim(u8, name, " \t");
         if (trimmed.len == 0) {
-            try render.writeLabeled(&stdout.interface, .err, "Usage: /load <session-name>");
+            try render.writeLabeled(&stdout.interface, .err, "Usage: /load <id> (use /list to see IDs)");
             return;
         }
         const new_session = session_ops.loadById(self.allocator, self.io, self.session_dir, trimmed) catch |err| {
@@ -592,6 +611,50 @@ pub const App = struct {
         self.initAgent();
         self.render_ctx.reset();
         try render.writeLabeled(&stdout.interface, .success, "Loaded session");
+
+        // Display all messages in the loaded session
+        const msgs = self.session.messages();
+        var last_model: ?[]const u8 = null;
+        for (msgs) |msg| {
+            if (msg.role == .system) continue;
+            const mt: render.MessageType = switch (msg.role) {
+                .user => .user,
+                .assistant => .output,
+                .tool => .tool,
+                .system => continue,
+            };
+            if (msg.role == .assistant) {
+                if (!std.mem.eql(u8, msg.model orelse "", last_model orelse "")) {
+                    last_model = msg.model;
+                }
+                try render.writeLabeled(&stdout.interface, mt, msg.content);
+                if (msg.tool_calls) |tcs| {
+                    for (tcs) |tc| {
+                        var buf: [512]u8 = undefined;
+                        const label = std.fmt.bufPrint(&buf, "{s}({s})", .{ tc.name, tc.arguments }) catch tc.name;
+                        try render.writeLabeled(&stdout.interface, .tool, label);
+                    }
+                }
+            } else {
+                try render.writeLabeled(&stdout.interface, mt, msg.content);
+            }
+        }
+
+        // Show final usage if available
+        var last_usage: ?types.TokenUsage = null;
+        for (msgs) |msg| {
+            if (msg.usage) |u| last_usage = u;
+        }
+        if (last_usage) |u| {
+            var t1: [16]u8 = undefined;
+            var t2: [16]u8 = undefined;
+            const label = try std.fmt.allocPrint(self.allocator, "输入 {s} | 输出 {s}", .{
+                try formatToken(u.input, &t1),
+                try formatToken(u.output, &t2),
+            });
+            defer self.allocator.free(label);
+            try render.writeLabeled(&stdout.interface, .usage, label);
+        }
     }
 
     fn forkSession(self: *App, stdout: *Io.File.Writer, fork_name_raw: []const u8) !void {

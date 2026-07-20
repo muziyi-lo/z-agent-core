@@ -285,6 +285,38 @@ fn parseAllModels(a: std.mem.Allocator, root: ConfigToml) ![]const types.Model {
         const mt_val = getInt(mt, "max_tokens") orelse 0;
         if (cw_val > @as(i64, @intCast(std.math.maxInt(u32)))) return error.ValueTooLarge;
         if (mt_val > @as(i64, @intCast(std.math.maxInt(u32)))) return error.ValueTooLarge;
+
+        var model_compat: ?types.ModelCompatOverride = null;
+        if (mt.get("compat")) |compat_val| {
+            if (compat_val == .table) {
+                var ov = types.ModelCompatOverride{};
+                if (compat_val.table.get("thinking_format")) |v| {
+                    if (v == .string) ov.thinking_format = parseThinkingFormat(v.string);
+                }
+                if (compat_val.table.get("max_tokens_field")) |v| {
+                    if (v == .string) ov.max_tokens_field = parseMaxTokensField(v.string);
+                }
+                if (compat_val.table.get("supports_stream_options")) |v| {
+                    if (v == .boolean) ov.supports_stream_options = v.boolean;
+                }
+                if (compat_val.table.get("supports_usage_in_streaming")) |v| {
+                    if (v == .boolean) ov.supports_usage_in_streaming = v.boolean;
+                }
+                if (compat_val.table.get("require_reasoning_on_tool_calls")) |v| {
+                    if (v == .boolean) ov.require_reasoning_on_tool_calls = v.boolean;
+                }
+                model_compat = ov;
+            }
+        }
+        if (mt.get("thinking_level")) |tl_val| {
+            if (tl_val == .string) {
+                if (types.ThinkingLevel.fromString(tl_val.string)) |tl| {
+                    if (model_compat == null) model_compat = types.ModelCompatOverride{};
+                    model_compat.?.thinking_level = tl;
+                }
+            }
+        }
+
         try list.append(a, .{
             .id = try a.dupe(u8, id_raw),
             .name = try a.dupe(u8, name_raw),
@@ -292,6 +324,7 @@ fn parseAllModels(a: std.mem.Allocator, root: ConfigToml) ![]const types.Model {
             .context_window = @intCast(cw_val),
             .max_tokens = @intCast(mt_val),
             .params_json = getString(mt, "params_json"),
+            .compat = model_compat,
             .input = try parseInputModality(a, mt),
         });
     }
@@ -320,6 +353,35 @@ fn parseInputModality(a: std.mem.Allocator, mt: ConfigToml) ![]const types.Input
         return duped;
     }
     return list.toOwnedSlice(a);
+}
+
+fn parseThinkingFormat(s: []const u8) types.ThinkingFormat {
+    inline for (@typeInfo(types.ThinkingFormat).@"enum".fields) |field| {
+        if (std.mem.eql(u8, s, field.name)) return @field(types.ThinkingFormat, field.name);
+    }
+    return .none;
+}
+
+fn parseMaxTokensField(s: []const u8) types.MaxTokensField {
+    inline for (@typeInfo(types.MaxTokensField).@"enum".fields) |field| {
+        if (std.mem.eql(u8, s, field.name)) return @field(types.MaxTokensField, field.name);
+    }
+    return .max_tokens;
+}
+
+/// Merge TOML ModelCompatOverride into detectCompat result.
+/// Only non-null override fields replace detected values.
+pub fn resolveCompat(base_url: []const u8, model: *const types.Model) types.ModelCompat {
+    var c = types.detectCompat(base_url);
+    if (model.compat) |ov| {
+        if (ov.thinking_format) |v| c.thinking_format = v;
+        if (ov.thinking_level) |v| c.thinking_level = v;
+        if (ov.max_tokens_field) |v| c.max_tokens_field = v;
+        if (ov.supports_stream_options) |v| c.supports_stream_options = v;
+        if (ov.supports_usage_in_streaming) |v| c.supports_usage_in_streaming = v;
+        if (ov.require_reasoning_on_tool_calls) |v| c.require_reasoning_on_tool_calls = v;
+    }
+    return c;
 }
 
 fn parseApi(raw: []const u8) types.Api {
@@ -436,11 +498,12 @@ const DEFAULT_TEMPLATE =
     \\provider = "deepseek"           # links to [[providers]].name
     \\context_window = 1000000          # model's context window in tokens (informational)
     \\max_tokens = 384000             # max tokens the model can generate per response
-    \\# params_json: vendor-specific JSON fragment pasted into the API request body.
-    \\# Format: key:value pairs WITHOUT outer braces. Provider blindly concatenates.
-    \\# Examples: "" (none), '"thinking":{"type":"enabled"}' (DeepSeek thinking mode),
-    \\#           '"reasoning_effort":"high"' (reasoning effort for supported models)
-    \\params_json = "\"thinking\":{\"type\":\"enabled\"}"
+    \\# thinking: auto-detected from base_url. Override via [models.compat] sub-table.
+    \\# thinking_level = "high"         # none|minimal|low|medium|high|xhigh|max (default: high)
+    \\[models.compat]
+    \\# thinking_format = "thinking_object"  # auto-detected; uncomment to force
+    \\# params_json: vendor-specific JSON fragment for non-thinking params (e.g. top_p).
+    \\# params_json = ""
     \\input = ["text"]               # supported input modalities: ["text"] or ["text", "image"]
     \\
     \\[[models]]
@@ -488,7 +551,7 @@ test "config: parse default template" {
     try std.testing.expect(deepseek.api == .openai_compat);
     try std.testing.expectEqual(@as(usize, 2), deepseek.models.len);
     try std.testing.expectEqualStrings("deepseek-v4-pro", deepseek.models[0].id);
-    try std.testing.expect(deepseek.models[0].params_json != null);
+    try std.testing.expect(deepseek.models[0].params_json == null);
     try std.testing.expectEqual(@as(usize, 1), deepseek.models[0].input.len);
     try std.testing.expect(deepseek.models[0].input[0] == .text);
 }
@@ -578,7 +641,8 @@ test "config: resolveModel deepseek/v4-pro" {
 
     const model = try resolveModel(&config, "deepseek/deepseek-v4-pro");
     try std.testing.expectEqualStrings("deepseek-v4-pro", model.id);
-    try std.testing.expect(model.params_json != null);
+    // params_json removed from default template; thinking now auto-detected via compat
+    try std.testing.expect(model.params_json == null);
 }
 
 test "config: resolveModel unknown provider" {
@@ -896,4 +960,109 @@ test "config: missing file creates default" {
     try std.testing.expectEqualStrings("deepseek/deepseek-v4-flash", config.default_model);
     try std.testing.expect(config.providers.len >= 1);
     try std.testing.expect(config.max_tokens > 0);
+}
+
+test "config: model compat override via top-level thinking_level" {
+    const allocator = std.testing.allocator;
+
+    var config = try testParseConfig(allocator,
+        \\[[providers]]
+        \\name = "test"
+        \\api = "openai_compat"
+        \\base_url = "https://test.example.com"
+        \\api_key_env = "TEST_KEY"
+        \\models = ["test-model"]
+        \\
+        \\[[models]]
+        \\id = "test-model"
+        \\name = "Test"
+        \\provider = "test"
+        \\context_window = 100000
+        \\max_tokens = 4096
+        \\thinking_level = "max"
+        \\input = ["text"]
+    );
+    defer config.deinit();
+
+    const model = &config.providers[0].models[0];
+    try std.testing.expect(model.compat != null);
+    try std.testing.expectEqual(types.ThinkingLevel.max, model.compat.?.thinking_level.?);
+    // No thinking_format set → defaults to null, resolveCompat keeps auto-detect
+    try std.testing.expect(model.compat.?.thinking_format == null);
+}
+
+test "config: model thinking_level top-level" {
+    const allocator = std.testing.allocator;
+
+    var config = try testParseConfig(allocator,
+        \\[[providers]]
+        \\name = "test"
+        \\api = "openai_compat"
+        \\base_url = "https://test.example.com"
+        \\api_key_env = "TEST_KEY"
+        \\models = ["test-model"]
+        \\
+        \\[[models]]
+        \\id = "test-model"
+        \\name = "Test"
+        \\provider = "test"
+        \\context_window = 100000
+        \\max_tokens = 4096
+        \\thinking_level = "max"
+        \\input = ["text"]
+    );
+    defer config.deinit();
+
+    const model = &config.providers[0].models[0];
+    try std.testing.expect(model.compat != null);
+    try std.testing.expectEqual(types.ThinkingLevel.max, model.compat.?.thinking_level.?);
+}
+
+test "config: resolveCompat merges override" {
+    const allocator = std.testing.allocator;
+
+    var config = try testParseConfig(allocator,
+        \\[[providers]]
+        \\name = "test"
+        \\api = "openai_compat"
+        \\base_url = "https://api.deepseek.com"
+        \\api_key_env = "TEST_KEY"
+        \\models = ["test-model"]
+        \\
+        \\[[models]]
+        \\id = "test-model"
+        \\name = "Test"
+        \\provider = "test"
+        \\context_window = 100000
+        \\max_tokens = 4096
+        \\thinking_level = "max"
+        \\input = ["text"]
+    );
+    defer config.deinit();
+
+    const model = &config.providers[0].models[0];
+    const c = resolveCompat(config.providers[0].base_url, model);
+    // auto-detect: deepseek.com → thinking_object
+    // TOML override: thinking_level = max
+    try std.testing.expectEqual(types.ThinkingFormat.thinking_object, c.thinking_format);
+    try std.testing.expectEqual(types.ThinkingLevel.max, c.thinking_level);
+    try std.testing.expect(c.require_reasoning_on_tool_calls);
+}
+
+test "config: parseThinkingFormat all values" {
+    try std.testing.expectEqual(types.ThinkingFormat.none, parseThinkingFormat("none"));
+    try std.testing.expectEqual(types.ThinkingFormat.thinking_object, parseThinkingFormat("thinking_object"));
+    try std.testing.expectEqual(types.ThinkingFormat.reasoning_effort, parseThinkingFormat("reasoning_effort"));
+    try std.testing.expectEqual(types.ThinkingFormat.enable_thinking_bool, parseThinkingFormat("enable_thinking_bool"));
+    try std.testing.expectEqual(types.ThinkingFormat.thinking_parameters, parseThinkingFormat("thinking_parameters"));
+    try std.testing.expectEqual(types.ThinkingFormat.thinking_with_budget, parseThinkingFormat("thinking_with_budget"));
+    try std.testing.expectEqual(types.ThinkingFormat.thinking_config_object, parseThinkingFormat("thinking_config_object"));
+    try std.testing.expectEqual(types.ThinkingFormat.none, parseThinkingFormat("invalid"));
+}
+
+test "config: parseMaxTokensField all values" {
+    try std.testing.expectEqual(types.MaxTokensField.max_tokens, parseMaxTokensField("max_tokens"));
+    try std.testing.expectEqual(types.MaxTokensField.max_tokens_to_sample, parseMaxTokensField("max_tokens_to_sample"));
+    try std.testing.expectEqual(types.MaxTokensField.max_output_tokens, parseMaxTokensField("max_output_tokens"));
+    try std.testing.expectEqual(types.MaxTokensField.max_tokens, parseMaxTokensField("invalid"));
 }

@@ -139,31 +139,12 @@ pub fn writeLabelBegin(writer: *std.Io.Writer, mtype: MessageType) !void {
         try writer.print("{s}\n", .{labelPlain(mtype)});
         return;
     }
-    switch (mtype) {
-        .user => {
-            try writer.print("{s}{s} 用户 {s}{s}\n", .{ C.bg_blue, C.white, C.reset, C.white });
-        },
-        .think => {
-            try writer.print("{s}{s} 思考 {s}{s}\n", .{ C.bg_gray, C.white, C.reset, C.dim });
-        },
-        .tool => {
-            try writer.print("{s}{s} 工具 {s}{s}\n", .{ C.bg_bright_magenta, C.white, C.reset, C.dim });
-        },
-        .output => {
-            try writer.print("{s}{s} 输出 {s}{s}\n", .{ C.bg_green, C.white, C.reset, C.reset });
-        },
-        .err => {
-            try writer.print("{s}ERROR {s}\n", .{ C.red, C.reset });
-        },
-        .warning => {
-            try writer.print("{s}WARN  {s}\n", .{ C.yellow, C.reset });
-        },
-        .success => {
-            try writer.print("{s}OK    {s}\n", .{ C.green, C.reset });
-        },
-        .usage => {
-            try writer.print("{s}{s} 用量 {s}{s}\n", .{ C.bg_bright_black, C.white, C.reset, C.dim });
-        },
+    const c = labelColor(mtype);
+    if (c.label.len == 0) return;
+    if (c.bg.len > 0) {
+        try writer.print("{s}{s} {s} {s}{s}\n", .{ c.bg, c.fg, c.label, C.reset, c.text_fg });
+    } else {
+        try writer.print("{s}{s}  {s}\n", .{ c.fg, c.label, C.reset });
     }
 }
 

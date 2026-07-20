@@ -13,6 +13,7 @@ pub fn main(process: std.process.Init) !void {
 
     var single_prompt: ?[]const u8 = null;
     var model_override: ?[]const u8 = null;
+    var thinking_level: ?types.ThinkingLevel = null;
     var show_help = false;
     var show_version = false;
     var list_models = false;
@@ -32,6 +33,10 @@ pub fn main(process: std.process.Init) !void {
             if (arg_iter.next()) |val| {
                 model_override = try allocator.dupe(u8, val);
             }
+        } else if (std.mem.eql(u8, arg, "--thinking")) {
+            if (arg_iter.next()) |val| {
+                thinking_level = types.ThinkingLevel.fromString(val);
+            }
         }
     }
 
@@ -43,6 +48,7 @@ pub fn main(process: std.process.Init) !void {
             \\
             \\  --prompt <text>    单次模式，直接提交一条消息
             \\  --model <spec>     指定模型，格式: provider/model_id
+            \\  --thinking <level> 设置思考强度: none|minimal|low|medium|high|xhigh|max
             \\  --list-models       列出所有可用模型
             \\  --help, -h         显示此帮助
             \\  --version, -v      显示版本号
@@ -91,7 +97,7 @@ pub fn main(process: std.process.Init) !void {
         return;
     }
 
-    var app = App.init(allocator, io, single_prompt, model_override) catch return;
+    var app = App.init(allocator, io, single_prompt, model_override, thinking_level) catch return;
     defer app.deinit();
     app.pipe_mode = !(std.Io.File.isTty(.stdout(), io) catch false);
     app.initAgent();
