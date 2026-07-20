@@ -74,6 +74,7 @@ pub const App = struct {
     session_dir: []const u8,
     base_prompt: ?[]const u8,
     pipe_mode: bool = false,
+    _env_changed: bool = true,
 
     render_ctx: render.RenderContext,
     tool_display: render.ToolDisplay,
@@ -545,6 +546,7 @@ pub const App = struct {
     fn resetSession(self: *App) !void {
         self.session.deinit();
         self.session = try session_ops.new(self.allocator, self.io, self.cfg.default_model);
+        self._env_changed = true;
         self.initAgent();
     }
 
@@ -608,26 +610,40 @@ pub const App = struct {
         };
         self.session.deinit();
         self.session = new_session;
+        self._env_changed = true;
         self.initAgent();
         self.render_ctx.reset();
         try render.writeLabeled(&stdout.interface, .success, "Loaded session");
 
-        // Display all messages in the loaded session
+        // Display all messages using the rendering pipeline
+        var pw = render.PhaseWriter.init(&stdout.interface);
+        var wc = WriterCtx{ .pw = &pw, .lb = &self.line_buffer, .writer = &stdout.interface };
         const msgs = self.session.messages();
-        var last_model: ?[]const u8 = null;
+        var last_usage: ?types.TokenUsage = null;
         for (msgs) |msg| {
             if (msg.role == .system) continue;
-            const mt: render.MessageType = switch (msg.role) {
-                .user => .user,
-                .assistant => .output,
-                .tool => .tool,
-                .system => continue,
-            };
+            if (msg.usage) |u| last_usage = u;
+
             if (msg.role == .assistant) {
-                if (!std.mem.eql(u8, msg.model orelse "", last_model orelse "")) {
-                    last_model = msg.model;
+                // Reasoning phase
+                if (msg.reasoning_content) |rc| {
+                    if (std.mem.trim(u8, rc, " \t\r\n").len > 0) {
+                        pwBeginPhase(@ptrCast(@alignCast(&wc)), .thinking);
+                        pwWriteRaw(@ptrCast(@alignCast(&wc)), rc);
+                        pwEndPhase(@ptrCast(@alignCast(&wc)));
+                    }
                 }
-                try render.writeLabeled(&stdout.interface, mt, msg.content);
+                // Content phase with Markdown rendering
+                pwBeginPhase(@ptrCast(@alignCast(&wc)), .content);
+                var line_iter = std.mem.splitScalar(u8, msg.content, '\n');
+                while (line_iter.next()) |raw_line| {
+                    const line = std.mem.trimEnd(u8, raw_line, "\r");
+                    const rendered = try render.renderLine(&self.render_ctx, self.allocator, line);
+                    defer self.allocator.free(rendered);
+                    pwWriteRendered(@ptrCast(@alignCast(&wc)), rendered);
+                }
+                pwEndPhase(@ptrCast(@alignCast(&wc)));
+                // Tool calls
                 if (msg.tool_calls) |tcs| {
                     for (tcs) |tc| {
                         var buf: [512]u8 = undefined;
@@ -636,15 +652,17 @@ pub const App = struct {
                     }
                 }
             } else {
+                const mt: render.MessageType = switch (msg.role) {
+                    .user => .user,
+                    .assistant => unreachable,
+                    .tool => .tool,
+                    .system => unreachable,
+                };
                 try render.writeLabeled(&stdout.interface, mt, msg.content);
             }
         }
 
         // Show final usage if available
-        var last_usage: ?types.TokenUsage = null;
-        for (msgs) |msg| {
-            if (msg.usage) |u| last_usage = u;
-        }
         if (last_usage) |u| {
             var t1: [16]u8 = undefined;
             var t2: [16]u8 = undefined;
@@ -683,6 +701,7 @@ pub const App = struct {
         };
         self.session.deinit();
         self.session = new_session;
+        self._env_changed = true;
         self.initAgent();
         self.render_ctx.reset();
 
@@ -712,6 +731,8 @@ fn findProviderEntry(providers: []const types.ProviderEntry, spec: []const u8) ?
 
 fn spRebuild(ctx: ?*anyopaque) anyerror!void {
     const self: *App = @ptrCast(@alignCast(ctx.?));
+    if (!self._env_changed) return;
+    self._env_changed = false;
     const prompt = try buildPromptString(self.allocator, self.io, self.project_root, self.project_context, self.base_prompt);
     defer self.allocator.free(prompt);
     try self.session.updateFirstSystem(prompt);
@@ -724,30 +745,20 @@ fn buildPromptString(
     project_context: ?[]const u8,
     base_prompt: ?[]const u8,
 ) ![]const u8 {
-    const cwd_alloc = std.process.currentPathAlloc(io, allocator) catch null;
-    defer if (cwd_alloc) |p| allocator.free(p);
-    const cwd: []const u8 = if (cwd_alloc) |p| p else ".";
-
     const os_tag = @tagName(builtin.os.tag);
-
-    const clock_ts = Io.Clock.Timestamp.now(io, .real);
-    const now_secs = Io.Timestamp.toSeconds(clock_ts.raw);
-    const date = try formatDate(allocator, now_secs);
-    defer allocator.free(date);
 
     const effective_prompt = base_prompt orelse BASE_PROMPT;
 
+    // Removed: CWD and date — they change every turn, breaking DeepSeek prefix cache
     const prompt = try std.fmt.allocPrint(allocator,
         \\{s}
         \\
         \\<env>
-        \\  Working directory: {s}
         \\  Workspace root: {s}
         \\  Platform: {s}
-        \\  Today's date: {s}
         \\</env>
         \\
-    , .{ effective_prompt, cwd, project_root, os_tag, date });
+    , .{ effective_prompt, project_root, os_tag });
     defer allocator.free(prompt);
 
     const skills = skill_tool.listAvailableSkills(allocator, io, project_root) catch &.{};

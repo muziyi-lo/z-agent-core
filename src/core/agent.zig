@@ -188,16 +188,31 @@ pub const AgentLoop = struct {
             }
 
             if (self.context_window > 0) {
-                var total_used: usize = 0;
+                // Estimate total context usage — prefer actual usage stats, fall back to length-based estimate
+                var total_used: u32 = 0;
+                var usage_based = false;
                 for (self.session_ref.messages()) |msg| {
-                    if (msg.usage) |u| total_used += u.total;
+                    if (msg.usage) |u| {
+                        total_used += u.total;
+                        usage_based = true;
+                    }
                 }
-                const threshold = (self.context_window * 85) / 100;
-                if (total_used > threshold and !self._context_warning_injected) {
+                // If no usage data available (e.g. loaded session), estimate from content length
+                if (!usage_based) {
+                    for (self.session_ref.messages()) |msg| {
+                        total_used += @as(u32, @intCast(msg.content.len / 4));
+                        if (msg.reasoning_content) |rc| {
+                            total_used += @as(u32, @intCast(rc.len / 4));
+                        }
+                    }
+                }
+                const reserved: u32 = @max(@as(u32, 20000), self.context_window / 10);
+                const usable = if (self.context_window > reserved) self.context_window - reserved else self.context_window;
+                if (total_used > usable and !self._context_warning_injected) {
                     self._context_warning_injected = true;
                     try self.session_ref.append(.{
                         .role = .system,
-                        .content = "[Notice: Approaching context window limit. Consider asking the user for guidance or focusing on the most critical task.]",
+                        .content = "[Notice: Context window nearly full. Consider summarizing earlier discussion or asking the user for guidance.]",
                     });
                     new_msgs += 1;
                 }
@@ -223,6 +238,7 @@ pub const AgentLoop = struct {
             try self.session_ref.append(.{
                 .role = .assistant,
                 .content = resp.content orelse "",
+                .reasoning_content = resp.reasoning_content,
                 .tool_calls = resp.tool_calls,
                 .usage = resp.usage,
             });

@@ -124,9 +124,9 @@ fn writeLabel(writer: *std.Io.Writer, mtype: MessageType, text: []const u8) !voi
     }
     const c = labelColor(mtype);
     if (c.bg.len > 0) {
-        try writer.print("{s}{s} {s} {s} {s}{s}{s}\n", .{ c.bg, c.fg, c.label, C.reset, c.text_fg, text, C.reset });
+        try writer.print("{s}{s}{s} {s} {s} {s}{s}{s}\n", .{ C.reset, c.bg, c.fg, c.label, C.reset, c.text_fg, text, C.reset });
     } else {
-        try writer.print("{s}[ {s} ]{s} {s}\n", .{ c.fg, c.label, C.reset, text });
+        try writer.print("{s}{s}[ {s} ]{s} {s}\n", .{ C.reset, c.fg, c.label, C.reset, text });
     }
 }
 
@@ -142,7 +142,7 @@ pub fn writeLabelBegin(writer: *std.Io.Writer, mtype: MessageType) !void {
     const c = labelColor(mtype);
     if (c.label.len == 0) return;
     if (c.bg.len > 0) {
-        try writer.print("{s}{s} {s} {s}{s}\n", .{ c.bg, c.fg, c.label, C.reset, c.text_fg });
+        try writer.print("{s}{s}{s} {s} {s}{s}\n", .{ C.reset, c.bg, c.fg, c.label, C.reset, c.text_fg });
     } else {
         try writer.print("{s}{s}  {s}\n", .{ c.fg, c.label, C.reset });
     }
@@ -458,9 +458,12 @@ pub const ToolDisplay = struct {
         }
 
         fn begin(self: *ToolDisplay, tool_name: []const u8) !void {
-            if (colorize) self.writer.print("{s}~ ", .{C.dim}) catch |err| return err;
-            self.writer.print("{s}", .{tool_name}) catch |err| return err;
-            if (colorize) self.writer.print("{s} ...", .{C.dim}) catch |err| return err;
+            const c = labelColor(.tool);
+            if (colorize) {
+                self.writer.print("{s}~ {s}{s}{s} ...", .{ C.dim, c.text_fg, tool_name, C.dim }) catch |err| return err;
+            } else {
+                self.writer.print("~ {s} ...", .{tool_name}) catch |err| return err;
+            }
             writeToolLabelClose(self.writer);
             self.writer.flush() catch {};
         }
@@ -498,11 +501,20 @@ pub const ToolDisplay = struct {
             if (user_output) |out| {
                 var out_filtered: [4096]u8 = undefined;
                 var oi: usize = 0;
-                for (out) |b| {
-                    if (oi >= out_filtered.len) break;
-                    if (b < 0x20 and b != '\n' and b != '\r' and b != '\t') continue;
-                    out_filtered[oi] = b;
-                    oi += 1;
+                var i: usize = 0;
+                while (i < out.len and oi < out_filtered.len) {
+                    if (out[i] == 0x1B and i + 1 < out.len and out[i + 1] == '[') {
+                        i += 2;
+                        while (i < out.len and out[i] != 'm') i += 1;
+                        if (i < out.len) i += 1;
+                        continue;
+                    }
+                    const b = out[i];
+                    if (b >= 0x20 or b == '\n' or b == '\r' or b == '\t') {
+                        out_filtered[oi] = b;
+                        oi += 1;
+                    }
+                    i += 1;
                 }
                 self.writer.print("\n{s}", .{out_filtered[0..oi]}) catch |err| {
                     return err;
@@ -511,10 +523,10 @@ pub const ToolDisplay = struct {
         }
 
     fn writeToolLabelOpen(writer: *std.Io.Writer) void {
-        if (colorize) {
-            writer.print("{s}{s} 工具 {s} ", .{ C.bg_bright_magenta, C.white, C.reset }) catch |err| {
-                if (err == error.BrokenPipe) return; // BrokenPipe non-fatal; best-effort display
-                // other IO errors non-fatal; best-effort display
+        const c = labelColor(.tool);
+        if (colorize and c.bg.len > 0) {
+            writer.print("{s}{s}{s} {s} {s}{s} ", .{ C.reset, c.bg, c.fg, c.label, C.reset, c.text_fg }) catch |err| {
+                if (err == error.BrokenPipe) return;
             };
         }
     }
@@ -529,7 +541,8 @@ pub fn writePrompt(writer: *std.Io.Writer) !void {
         try writer.print("> ", .{});
         return;
     }
-    try writer.print("{s}{s} 用户 {s} ", .{ C.bg_blue, C.white, C.reset });
+    const c = labelColor(.user);
+    try writer.print("{s}{s}{s} {s} {s} ", .{ C.reset, c.bg, c.fg, c.label, C.reset });
 }
 
 fn labelPlain(mtype: MessageType) []const u8 {
@@ -873,7 +886,8 @@ test "render: writeLabeled user" {
     var result = aw.toArrayList();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expect(std.mem.startsWith(u8, result.items, C.bg_blue));
+    try std.testing.expect(std.mem.indexOf(u8, result.items, C.reset) != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.items, C.bg_blue) != null);
     try std.testing.expect(std.mem.indexOf(u8, result.items, "read src/main.zig") != null);
 }
 
@@ -889,7 +903,7 @@ test "render: writeLabeled tool" {
     var result = aw.toArrayList();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expect(std.mem.startsWith(u8, result.items, C.bg_bright_magenta));
+    try std.testing.expect(std.mem.indexOf(u8, result.items, C.bg_bright_magenta) != null);
     try std.testing.expect(std.mem.indexOf(u8, result.items, "read.md") != null);
 }
 
@@ -905,7 +919,7 @@ test "render: writeLabeled think" {
     var result = aw.toArrayList();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expect(std.mem.startsWith(u8, result.items, C.bg_gray));
+    try std.testing.expect(std.mem.indexOf(u8, result.items, C.bg_gray) != null);
     try std.testing.expect(std.mem.indexOf(u8, result.items, "analyzing") != null);
 }
 
@@ -921,7 +935,7 @@ test "render: writeLabeled output" {
     var result = aw.toArrayList();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expect(std.mem.startsWith(u8, result.items, C.bg_green));
+    try std.testing.expect(std.mem.indexOf(u8, result.items, C.bg_green) != null);
     try std.testing.expect(std.mem.indexOf(u8, result.items, "Result") != null);
 }
 
@@ -937,7 +951,7 @@ test "render: writeLabeled err" {
     var result = aw.toArrayList();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expect(std.mem.startsWith(u8, result.items, C.red));
+    try std.testing.expect(std.mem.indexOf(u8, result.items, C.red) != null);
     try std.testing.expect(std.mem.indexOf(u8, result.items, "ERROR") != null);
 }
 
@@ -953,7 +967,7 @@ test "render: writeLabeled warning" {
     var result = aw.toArrayList();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expect(std.mem.startsWith(u8, result.items, C.yellow));
+    try std.testing.expect(std.mem.indexOf(u8, result.items, C.yellow) != null);
     try std.testing.expect(std.mem.indexOf(u8, result.items, "WARN") != null);
 }
 
@@ -969,7 +983,7 @@ test "render: writeLabeled success" {
     var result = aw.toArrayList();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expect(std.mem.startsWith(u8, result.items, C.green));
+    try std.testing.expect(std.mem.indexOf(u8, result.items, C.green) != null);
     try std.testing.expect(std.mem.indexOf(u8, result.items, "OK") != null);
 }
 

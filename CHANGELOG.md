@@ -1,6 +1,34 @@
 # Changelog
 
-## [0.2.1] - 未完成
+## [0.2.2] — 未完成
+
+### Added
+- **协议适配层**: types.zig 新增 ModelCompat/Override、ThinkingFormat(7种)/ThinkingLevel(7级)/MaxTokensField、detectCompat() URL 启发式推断
+- **兼容 7 种 thinking JSON 格式**: thinking_object(DeepSeek)、reasoning_effort(OpenAI)、enable_thinking_bool(Qwen)、thinking_parameters(Aliyun)、thinking_with_budget(Anthropic)、thinking_config_object(Gemini)、none
+- **CLI + REPL 思考强度**: `--thinking <level>` 参数 + `/thinking` REPL 命令 (none/minimal/low/medium/high/xhigh/max)
+- **reasoning_content 独立字段**: Message + ProviderResponse 新增 `reasoning_content: ?[]const u8`，SSE 分离 reasoning_buf + session 序列化/反序列化
+- **buildJsonBody 条件回传**: DeepSeek compat 模式下 tool-call 回合才回传 reasoning_content
+- **system prompt 前缀稳定**: spRebuild 冻结 (_env_changed 标志) + buildPromptString 移除日期/CWD
+- **/load 完整回放渲染**: 思考→内容相位管线 + Markdown→ANSI 渲染
+- **bash 工具增强**: ANSI escape 过滤 (0x1B[..m) + `"(no output)"` + `"Command exited with code N."` + workdir 参数
+- **错误分类**: isAuthError/isHtmlError/isStreamOptions400Error 基于体内容匹配（不依赖 HTTP 状态码）
+- **stream_options 400 自动回退**: 内部一次重试，!declined 守卫防无限循环
+- **/list 显示 session ID**: 三列格式 `{id} "{name}" {model}`，可直接 `/load <id>`
+- **测试**: +10 个 buildJsonBody compat 测试、+6 个 types detectCompat 测试、+4 个 config compat 测试、+3 个 bash 工具测试
+
+### Changed
+- **流式相位**: 单 in_content_phase → thinking_started/text_started 双独立标志（修复 Qwen 闪烁 + 支持交错式推理）
+- **错误处理**: 增强溢出检测（usage+长度双估计 + 20K 预留缓冲）、classifyError 5 类体内容匹配、isRetryableBody/isRetryableError 扩增
+- **DEFAULT_TEMPLATE**: params_json → [models.compat] 子表 + thinking_level 顶层键
+- **Config**: 新增 resolveCompat() 合并函数、parseThinkingFormat/parseMaxTokensField 枚举解析
+
+### Fixed
+- **标签统一**: labelColor() 单一事实来源，writeLabelBegin/writeToolLabelOpen/writePrompt/ToolDisplay.begin 全部统一
+- **ANSI dim 污染**: 6 个标签函数防御性前置 `C.reset`（dim+white=灰色 bug）
+- **/list 与 /load 不一致**: /list 新增 ID 列（之前仅显示 name 无法加载）
+- **render.zig format 字符串参数数量**: writeLabelBegin 新增 reset 前置后补齐格式说明符
+
+## [0.2.1] — 未完成
 
 ### Added
 - **OPT-6: 用量数据显示增强**

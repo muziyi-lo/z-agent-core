@@ -6,6 +6,7 @@ pub const VERSION = @import("build_options").version;
 pub const Message = struct {
     role: Role,
     content: []const u8,
+    reasoning_content: ?[]const u8 = null,
     tool_calls: ?[]const ToolCall = null,
     tool_call_id: ?[]const u8 = null,
     timestamp: i64 = 0,
@@ -203,6 +204,7 @@ pub const ProviderEntry = struct {
 /// Streaming LLM response. content and tool_calls own their data (arena-backed).
 pub const ProviderResponse = struct {
     content: ?[]const u8,
+    reasoning_content: ?[]const u8 = null,
     tool_calls: ?[]ToolCall,
     finish_reason: FinishReason,
     usage: ?TokenUsage = null,
@@ -328,4 +330,20 @@ test "detectCompat unknown defaults" {
     const c = detectCompat("https://custom-llm.example.com/v1");
     try @import("std").testing.expectEqual(ThinkingFormat.none, c.thinking_format);
     try @import("std").testing.expect(!c.supports_stream_options);
+}
+
+test "Message default no reasoning_content" {
+    const msg = Message{ .role = .user, .content = "hello" };
+    try @import("std").testing.expect(msg.reasoning_content == null);
+}
+
+test "Message with reasoning_content" {
+    const msg = Message{
+        .role = .assistant,
+        .content = "I'll read that file.",
+        .reasoning_content = "The user wants me to read a file.",
+        .tool_calls = &.{.{ .id = "c1", .name = "read", .arguments = "{}" }},
+    };
+    try @import("std").testing.expect(msg.reasoning_content != null);
+    try @import("std").testing.expectEqualStrings("I'll read that file.", msg.content);
 }

@@ -217,6 +217,7 @@ pub const Provider = struct {
         const stdout_file = child.stdout orelse return error.NoStdout;
 
         var content_buf = std.ArrayListAligned(u8, null).empty;
+        var reasoning_buf = std.ArrayListAligned(u8, null).empty;
         var tool_calls_buf = std.ArrayListAligned(types.ToolCall, null).empty;
 
         const sse_read_buf = try alloc.alloc(u8, 4096);
@@ -321,7 +322,7 @@ pub const Provider = struct {
                                 }
                                 if (pw) |p| p.begin_phase(p.context, .thinking);
                             }
-                            try content_buf.appendSlice(alloc, r);
+                            try reasoning_buf.appendSlice(alloc, r);
                             if (pw) |p| p.write_raw(p.context, r);
                         }
                     }
@@ -453,6 +454,7 @@ pub const Provider = struct {
         if (tool_calls_buf.items.len > 0) {
             return types.ProviderResponse{
                 .content = null,
+                .reasoning_content = if (reasoning_buf.items.len > 0) reasoning_buf.items else null,
                 .tool_calls = tool_calls_buf.items,
                 .finish_reason = finish_reason,
                 .usage = usage,
@@ -461,6 +463,7 @@ pub const Provider = struct {
 
         return types.ProviderResponse{
             .content = content_buf.items,
+            .reasoning_content = if (reasoning_buf.items.len > 0) reasoning_buf.items else null,
             .tool_calls = null,
             .finish_reason = finish_reason,
             .usage = usage,
@@ -493,7 +496,16 @@ pub const Provider = struct {
             }
 
             if (msg.tool_calls) |tcs| {
-                try buf.appendSlice(allocator, ",\"content\":null,\"tool_calls\":[");
+                try buf.appendSlice(allocator, ",\"content\":null");
+                // Include reasoning_content on tool-call messages when compat requires it (DeepSeek)
+                if (self.config.compat.require_reasoning_on_tool_calls) {
+                    if (msg.reasoning_content) |rc| {
+                        try buf.appendSlice(allocator, ",\"reasoning_content\":\"");
+                        try appendEscapedJsonString(&buf, allocator, rc);
+                        try buf.appendSlice(allocator, "\"");
+                    }
+                }
+                try buf.appendSlice(allocator, ",\"tool_calls\":[");
                 for (tcs, 0..) |tc, j| {
                     if (j > 0) try buf.appendSlice(allocator, ",");
                     try buf.appendSlice(allocator, "{\"id\":\"");

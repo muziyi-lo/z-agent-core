@@ -90,6 +90,8 @@ pub const Session = struct {
 
             const content_val = if (obj.get("content")) |v| if (v == .string) v.string else "" else "";
 
+            const reasoning_content: ?[]const u8 = if (obj.get("reasoning_content")) |v| if (v == .string) try arena.dupe(u8, v.string) else null else null;
+
             var tool_calls: ?[]types.ToolCall = null;
             if (obj.get("tool_calls")) |tcs_val| {
                 if (tcs_val == .array) {
@@ -143,6 +145,7 @@ pub const Session = struct {
             try self._messages.append(arena, .{
                 .role = role,
                 .content = try arena.dupe(u8, content_val),
+                .reasoning_content = reasoning_content,
                 .tool_calls = tool_calls,
                 .tool_call_id = tool_call_id,
                 .timestamp = ts,
@@ -169,6 +172,7 @@ pub const Session = struct {
         }
 
         duped.content = try arena.dupe(u8, msg.content);
+        if (msg.reasoning_content) |rc| duped.reasoning_content = try arena.dupe(u8, rc);
         if (msg.model) |m| duped.model = try arena.dupe(u8, m);
         if (msg.tool_call_id) |tci| duped.tool_call_id = try arena.dupe(u8, tci);
         if (msg.tool_calls) |tcs| {
@@ -448,6 +452,12 @@ fn serializeMessage(buf: *std.array_list.Managed(u8), msg: types.Message) !void 
     try buf.appendSlice(",\"content\":\"");
     try appendEscapedJsonString(buf, msg.content);
     try buf.appendSlice("\"");
+
+    if (msg.reasoning_content) |rc| {
+        try buf.appendSlice(",\"reasoning_content\":\"");
+        try appendEscapedJsonString(buf, rc);
+        try buf.appendSlice("\"");
+    }
 
     if (msg.tool_calls) |tcs| {
         try buf.appendSlice(",\"tool_calls\":[");
