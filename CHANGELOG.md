@@ -24,6 +24,7 @@
 - **Config**: 新增 resolveCompat() 合并函数、parseThinkingFormat/parseMaxTokensField 枚举解析
 - **lookupModel**: 倒序遍历替代正序 for，重复 (provider, id) 条目后写覆盖前写（用户可添加同名模型覆盖默认值）
 - **DEFAULT_TEMPLATE**: 补充 model provider 共享说明（空字符串 = 所有供应商共享）与重复覆盖规则注释
+- **/ 命令输出标签**: /help、/list、/name、/new 输出统一使用 render.writeLabeled 添加彩色标签
 
 ### Fixed
 - **标签统一**: labelColor() 单一事实来源，writeLabelBegin/writeToolLabelOpen/writePrompt/ToolDisplay.begin 全部统一
@@ -31,6 +32,7 @@
 - **/list 与 /load 不一致**: /list 新增 ID 列（之前仅显示 name 无法加载）
 - **render.zig format 字符串参数数量**: writeLabelBegin 新增 reset 前置后补齐格式说明符
 - **ANSI 行尾冗余 C.reset**: renderLine 移除代码块/标题/引用块/行内格式末尾的 C.reset（避免终端边界伪影）
+- **Windows 盘符大小写**: normalize() 盘符统一转大写，修复小写盘符绝对路径被误判为逃逸（影响 read/write/edit/grep/glob/skill 全部工具）
 
 ## [0.2.1] — 未完成
 

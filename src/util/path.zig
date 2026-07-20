@@ -56,8 +56,10 @@ fn normalize(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 
     var rest = path;
     var drive_prefix: []const u8 = "";
+    var _drive_buf: [2]u8 = undefined;
     if (builtin.os.tag == .windows and path.len >= 2 and path[1] == ':') {
-        drive_prefix = path[0..2];
+        _drive_buf = [_]u8{ std.ascii.toUpper(path[0]), ':' };
+        drive_prefix = &_drive_buf;
         if (path.len > 2) {
             rest = path[2..];
         } else {
@@ -224,4 +226,11 @@ test "resolvePath: Windows absolute within root" {
 test "resolvePath: Windows absolute escape" {
     if (builtin.os.tag != .windows) return error.SkipZigTest;
     try std.testing.expectError(error.PathEscape, resolvePath(std.testing.allocator, "C:\\project", "D:\\other"));
+}
+
+test "resolvePath: Windows lowercase drive letter within root" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const r = try resolvePath(std.testing.allocator, "C:\\project", "c:\\project\\src");
+    defer std.testing.allocator.free(r);
+    try std.testing.expect(std.mem.eql(u8, r, "C:\\project\\src"));
 }
