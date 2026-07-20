@@ -390,7 +390,7 @@ pub const App = struct {
         if (line.len == 0) return;
         if (std.mem.eql(u8, line, "/exit") or std.mem.eql(u8, line, "/quit")) return error.ExitRepl;
         if (std.mem.eql(u8, line, "/new")) {
-            try self.resetSession();
+            try self.resetSession(stdout);
             return;
         }
         if (std.mem.startsWith(u8, line, "/name ")) {
@@ -543,11 +543,12 @@ pub const App = struct {
         return session_ops.sanitizeForkName(allocator, name);
     }
 
-    fn resetSession(self: *App) !void {
+    fn resetSession(self: *App, stdout: *Io.File.Writer) !void {
         self.session.deinit();
         self.session = try session_ops.new(self.allocator, self.io, self.cfg.default_model);
         self._env_changed = true;
         self.initAgent();
+        try render.writeLabeled(&stdout.interface, .success, "New session started.");
     }
 
     fn renameSession(self: *App, new_name: []const u8) !void {
@@ -555,14 +556,16 @@ pub const App = struct {
         if (trimmed.len == 0) {
             var ebuf: [256]u8 = undefined;
             var ew: Io.File.Writer = .init(.stderr(), self.io, &ebuf);
-            try ew.interface.print("Usage: /name <new-name>\n", .{});
+            try render.writeLabeled(&ew.interface, .warning, "Usage: /name <new-name>");
             return;
         }
         try self.session.rename(trimmed);
         try self.session.flush();
+        const msg = try std.fmt.allocPrint(self.allocator, "Session renamed to: {s}", .{trimmed});
+        defer self.allocator.free(msg);
         var ebuf: [256]u8 = undefined;
         var ew: Io.File.Writer = .init(.stderr(), self.io, &ebuf);
-        try ew.interface.print("Session renamed to: {s}\n", .{trimmed});
+        try render.writeLabeled(&ew.interface, .success, msg);
     }
 
     fn listSessions(self: *App, stdout: *Io.File.Writer) !void {
@@ -570,11 +573,13 @@ pub const App = struct {
         defer session_mod.freeSessionInfoList(self.allocator, sessions);
 
         if (sessions.len == 0) {
-            try stdout.interface.print("No saved sessions.\n", .{});
+            try render.writeLabeled(&stdout.interface, .success, "No saved sessions.");
             return;
         }
 
-        try stdout.interface.print("Saved sessions ({d}):\n", .{sessions.len});
+        const header = try std.fmt.allocPrint(self.allocator, "Saved sessions ({d}):", .{sessions.len});
+        defer self.allocator.free(header);
+        try render.writeLabeled(&stdout.interface, .success, header);
         for (sessions) |s| {
             try stdout.interface.print("  {s}  \"{s}\"  {s}  ~{d} msgs\n", .{ s.id, s.name, s.model, s.msg_count });
         }
@@ -582,8 +587,8 @@ pub const App = struct {
 
     fn showHelp(self: *App, stdout: *Io.File.Writer) !void {
         _ = self;
+        try render.writeLabeled(&stdout.interface, .success, "z-agent-core commands:");
         try stdout.interface.print(
-            \\z-agent-core commands:
             \\  /exit, /quit    Exit the REPL
             \\  /new            Start a new session
             \\  /load <id>      Load session by ID (first column of /list)
@@ -733,7 +738,7 @@ fn spRebuild(ctx: ?*anyopaque) anyerror!void {
     const self: *App = @ptrCast(@alignCast(ctx.?));
     if (!self._env_changed) return;
     self._env_changed = false;
-    const prompt = try buildPromptString(self.allocator, self.io, self.project_root, self.project_context, self.base_prompt);
+    const prompt = try buildPromptString(self.allocator, self.io, self.project_root, self.project_context, self.base_prompt, self.single_prompt != null);
     defer self.allocator.free(prompt);
     try self.session.updateFirstSystem(prompt);
 }
@@ -744,21 +749,27 @@ fn buildPromptString(
     project_root: []const u8,
     project_context: ?[]const u8,
     base_prompt: ?[]const u8,
+    single_shot: bool,
 ) ![]const u8 {
     const os_tag = @tagName(builtin.os.tag);
 
+    const interactive_hint: []const u8 = if (single_shot)
+        \\  Interaction mode: single-shot, no user interaction possible. Produce complete final output.
+        \\
+    else
+        "";
+
     const effective_prompt = base_prompt orelse BASE_PROMPT;
 
-    // Removed: CWD and date — they change every turn, breaking DeepSeek prefix cache
     const prompt = try std.fmt.allocPrint(allocator,
         \\{s}
         \\
         \\<env>
         \\  Workspace root: {s}
         \\  Platform: {s}
-        \\</env>
+        \\{s}\\</env>
         \\
-    , .{ effective_prompt, project_root, os_tag });
+    , .{ effective_prompt, project_root, os_tag, interactive_hint });
     defer allocator.free(prompt);
 
     const skills = skill_tool.listAvailableSkills(allocator, io, project_root) catch &.{};
@@ -841,4 +852,20 @@ fn readLine(
         if (buf.items.len >= 4096) return error.LineTooLong;
         try buf.append(allocator, byte);
     }
+}
+
+test "buildPromptString: single_shot adds interaction mode" {
+    const allocator = std.testing.allocator;
+    const result = try buildPromptString(allocator, std.testing.io, "/root", null, null, true);
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "Interaction mode: single-shot") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "no user interaction possible") != null);
+}
+
+test "buildPromptString: REPL mode omits interaction hint" {
+    const allocator = std.testing.allocator;
+    const result = try buildPromptString(allocator, std.testing.io, "/root", null, null, false);
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "Interaction mode") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "single-shot") == null);
 }
