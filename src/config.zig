@@ -261,7 +261,10 @@ fn parseProviders(a: std.mem.Allocator, root: ConfigToml, all_models: []const ty
 }
 
 fn lookupModel(all_models: []const types.Model, provider_name: []const u8, model_id: []const u8) ?types.Model {
-    for (all_models) |m| {
+    var i: usize = all_models.len;
+    while (i > 0) {
+        i -= 1;
+        const m = all_models[i];
         if ((m.provider.len == 0 or std.mem.eql(u8, m.provider, provider_name)) and
             std.mem.eql(u8, m.id, model_id))
         {
@@ -492,10 +495,11 @@ const DEFAULT_TEMPLATE =
     \\
     \\# Model: defines an LLM model and its capabilities.
     \\# Add one [[models]] block per model. Models are shared across providers.
+    \\# Duplicate (id, provider) pairs: last entry wins (override).
     \\[[models]]
     \\id = "deepseek-v4-pro"          # used in "provider/model_id" format
     \\name = "DeepSeek V4 Pro"        # display name (shown in banner)
-    \\provider = "deepseek"           # links to [[providers]].name
+    \\provider = "deepseek"           # links to [[providers]].name; empty = shared by all providers
     \\context_window = 1000000          # model's context window in tokens (informational)
     \\max_tokens = 384000             # max tokens the model can generate per response
     \\# thinking: auto-detected from base_url. Override via [models.compat] sub-table.
