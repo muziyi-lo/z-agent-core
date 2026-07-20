@@ -14,7 +14,8 @@
 - **错误分类**: isAuthError/isHtmlError/isStreamOptions400Error 基于体内容匹配（不依赖 HTTP 状态码）
 - **stream_options 400 自动回退**: 内部一次重试，!declined 守卫防无限循环
 - **/list 显示 session ID**: 三列格式 `{id} "{name}" {model}`，可直接 `/load <id>`
-- **测试**: +10 个 buildJsonBody compat 测试、+6 个 types detectCompat 测试、+4 个 config compat 测试、+3 个 bash 工具测试
+- **single-shot 交互提示**: buildPromptString 新增 `single_shot` 参数，单次模式向 `<env>` 块注入 "no user interaction possible" 提示
+- **测试**: +10 个 buildJsonBody compat 测试、+6 个 types detectCompat 测试、+4 个 config compat 测试、+3 个 bash 工具测试、+2 个 single-shot 提示测试、App.zig 加入 test.zig 导入
 
 ### Changed
 - **流式相位**: 单 in_content_phase → thinking_started/text_started 双独立标志（修复 Qwen 闪烁 + 支持交错式推理）
@@ -29,6 +30,7 @@
 - **ANSI dim 污染**: 6 个标签函数防御性前置 `C.reset`（dim+white=灰色 bug）
 - **/list 与 /load 不一致**: /list 新增 ID 列（之前仅显示 name 无法加载）
 - **render.zig format 字符串参数数量**: writeLabelBegin 新增 reset 前置后补齐格式说明符
+- **ANSI 行尾冗余 C.reset**: renderLine 移除代码块/标题/引用块/行内格式末尾的 C.reset（避免终端边界伪影）
 
 ## [0.2.1] — 未完成
 
