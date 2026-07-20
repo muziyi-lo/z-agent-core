@@ -571,25 +571,25 @@ pub fn renderLine(ctx: *RenderContext, allocator: std.mem.Allocator, line: []con
     if (std.mem.startsWith(u8, line, "```")) {
         ctx.code_block_active = !ctx.code_block_active;
         if (!ctx.colorize) return try allocator.dupe(u8, line);
-        return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ C.dim, line, C.reset });
+        return std.fmt.allocPrint(allocator, "{s}{s}", .{ C.dim, line });
     }
 
     if (!ctx.colorize) return try allocator.dupe(u8, line);
 
     // Inside code block
     if (ctx.code_block_active) {
-        return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ C.dim, line, C.reset });
+        return std.fmt.allocPrint(allocator, "{s}{s}", .{ C.dim, line });
     }
 
     // 1. heading
     if (isHeading(line)) |len| {
         const rest = line[len..];
-        return std.fmt.allocPrint(allocator, "{s}{s}{s}{s}{s}", .{ C.bold, C.cyan, line[0..len], rest, C.reset });
+        return std.fmt.allocPrint(allocator, "{s}{s}{s}{s}", .{ C.bold, C.cyan, line[0..len], rest });
     }
 
     // 2. blockquote
     if (std.mem.startsWith(u8, line, "> ")) {
-        return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ C.dim, line, C.reset });
+        return std.fmt.allocPrint(allocator, "{s}{s}", .{ C.dim, line });
     }
 
     // 3. list -- keep as-is
@@ -755,7 +755,10 @@ fn applyWrapped(allocator: std.mem.Allocator, line: []const u8, marker: []const 
                 try buf.appendSlice(allocator, ansi);
                 try buf.appendSlice(allocator, line[first + marker.len .. second]);
                 try buf.appendSlice(allocator, C.reset);
-                try buf.appendSlice(allocator, line[second + marker.len ..]);
+                const after = line[second + marker.len ..];
+                if (after.len > 0) {
+                    try buf.appendSlice(allocator, after);
+                }
                 const remainder = try buf.toOwnedSlice(allocator);
                 buf = .empty;
                 defer allocator.free(remainder);
@@ -995,7 +998,6 @@ test "render: renderLine heading" {
 
     try std.testing.expect(std.mem.startsWith(u8, result, C.bold));
     try std.testing.expect(std.mem.indexOf(u8, result, C.cyan) != null);
-    try std.testing.expect(std.mem.endsWith(u8, result, C.reset));
 }
 
 test "render: renderLine code block" {
@@ -1008,7 +1010,6 @@ test "render: renderLine code block" {
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.startsWith(u8, result, C.dim));
-    try std.testing.expect(std.mem.endsWith(u8, result, C.reset));
 
     const close = try renderLine(&ctx, std.testing.allocator, "```");
     defer std.testing.allocator.free(close);
@@ -1070,7 +1071,6 @@ test "render: renderLine blockquote" {
     defer std.testing.allocator.free(result);
 
     try std.testing.expect(std.mem.startsWith(u8, result, C.dim));
-    try std.testing.expect(std.mem.endsWith(u8, result, C.reset));
 }
 
 test "render: renderLine mixed" {

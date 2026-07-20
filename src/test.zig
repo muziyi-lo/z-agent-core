@@ -15,4 +15,5 @@ test {
     _ = @import("util/signal.zig");
     _ = @import("toml.zig");
     _ = @import("frontends/cli/render.zig");
+    _ = @import("frontends/cli/App.zig");
 }
