@@ -21,6 +21,8 @@
 - **错误处理**: 增强溢出检测（usage+长度双估计 + 20K 预留缓冲）、classifyError 5 类体内容匹配、isRetryableBody/isRetryableError 扩增
 - **DEFAULT_TEMPLATE**: params_json → [models.compat] 子表 + thinking_level 顶层键
 - **Config**: 新增 resolveCompat() 合并函数、parseThinkingFormat/parseMaxTokensField 枚举解析
+- **lookupModel**: 倒序遍历替代正序 for，重复 (provider, id) 条目后写覆盖前写（用户可添加同名模型覆盖默认值）
+- **DEFAULT_TEMPLATE**: 补充 model provider 共享说明（空字符串 = 所有供应商共享）与重复覆盖规则注释
 
 ### Fixed
 - **标签统一**: labelColor() 单一事实来源，writeLabelBegin/writeToolLabelOpen/writePrompt/ToolDisplay.begin 全部统一
