@@ -3,14 +3,25 @@
 ## 实施顺序
 
 ```
-PHASE-3 (compat layer)  ← 下一项
+PHASE-3 (compat layer)  ← 下一项（计划文档已完善）
     ↓
-PHASE-4 (cache-first + reasoning 分离)
+PHASE-4 (cache-first + reasoning 分离) （计划文档已完善）
     ↓
-新前端 (TUI/Web)
+PHASE-5 (webfetch) — 独立于架构，可随时实施（计划文档已完善）
     ↓
-webfetch  ← 新工具，独立
+新前端 (TUI/Web) （架构设计阶段）
 ```
+
+## 计划文档状态
+
+| 计划 | 文档 | 详细度 | 状态 |
+|------|------|--------|------|
+| PHASE-3 | `docs/PLAN-PHASE-3-COMPAT.md` (~430行) | 含数据结构定义、伪代码、12 个测试用例 | 计划中 |
+| PHASE-4 | `docs/PLAN-PHASE-4-CACHE.md` (~350行) | 含数据结构定义、伪代码、9 个测试用例 | 计划中 |
+| PHASE-5 | `docs/PLAN-PHASE-5-WEBFETCH.md` (~270行) | 含完整代码、注册方式、5 个测试用例 | 计划中 |
+| PHASE-6 | `docs/PLAN-PHASE-6-TUI.md` (~210行) | 架构设计 + 框架选型（详细实现待 vaxis 验证后） | 架构设计 |
+| MCP | 无文档 | — | 未计划 |
+| Web 前端 | 无独立文档（在 PHASE-6 中作为备选方案提及） | — | 未计划 |
 
 ## Done (2026-07-16)
 
@@ -41,11 +52,17 @@ webfetch  ← 新工具，独立
 | D3 | Bash output display: `user_output` field | docs/0.2.0/PLAN-OPT-2-DISPLAY-GAPS.md | Medium |
 | D4 | Tool error display: red text + (err) suffix | docs/0.2.0/PLAN-OPT-2-DISPLAY-GAPS.md | Low |
 
+## Done (2026-07-13 — Phase 2)
+
+| # | Item | Plan doc | Effort |
+|---|------|----------|--------|
+| D0 | PHASE-2 全 9 步 (ToolHooks + abort + LifecycleCb + Ctrl+C + ApiEndpoint + compact + TokenUsage + /fork + tests) | docs/PLAN-PHASE2.md | Very High |
+
 ## Deferred (explicitly skipped)
 
 | # | Item | Reason |
 |---|------|--------|
-| R1 | compact.zig (Phase 2F) | ✅ **→ OPT-5 P0-1 已完成** — compact 工具 + session 压缩 |
+| R1 | compact.zig (Phase 2F) | → OPT-5 P0-1 — compact 工具 + session 压缩 |
 | R2 | DisplayHint (v2 tool metadata) | OPT-3 已覆盖 — ToolMeta 替代 |
 | R3 | Tool event streaming (start/update/end) | Requires significant protocol change |
 | R4 | Edit 模糊匹配 | 待 opencode 实现后跟进 |
@@ -55,7 +72,7 @@ webfetch  ← 新工具，独立
 | R8 | write 竞争防护 (writeIfUnchanged) | 需文件 hash 基础设施，单进程无并发 |
 | R9 | grep ripgrep 外部二进制 | `std.regex` 满足需求 |
 | R10 | bash 外部目录警告 | 权限系统范式不同 |
-| R11 | 死循环检测（StormBreaker） | ✅ **→ OPT-5 P1-3 已完成** — 连续 3 次相同 (name, args_hash) → 追加系统消息提示 |
+| R11 | 死循环检测（StormBreaker） | → OPT-5 P1-3 — 连续 3 次相同 (name, args_hash) → 追加系统消息提示 |
 | R12 | 证据回执系统（Evidence Ledger） | 工具间交叉验证，需独立设计 |
 | R13 | 并行调度分区 | 后期性能优化 |
 
@@ -63,17 +80,12 @@ webfetch  ← 新工具，独立
 
 | # | Item | Notes |
 |---|------|-------|
-| F0 | PHASE-3 compat 协议适配层 | ModelCompat + detectCompat + thinking 格式 + stream_options (planned, not started) |
-| F0.5 | PHASE-4 cache-first + reasoning 分离 | Message 结构扩展 + reasoning_content 选择性回传 + system prompt 按需重建 (planned, not started) |
-| F1 | TUI frontend | Terminal UI framework (vaxis or similar) |
-| F2 | Web frontend | Single HTML served by zig binary, SSE to browser |
 | F3 | MCP tool discovery | `mcp_connect` tool — LLM discovers remote tools at runtime |
-| F4 | webfetch (web fetch) | HTTP GET tool, HTML→Markdown, 基于 opencode `webfetch.ts` |
 
 ## Architecture wishlist
 
 | # | Item | Notes |
 |---|------|-------|
-| W1 | Agent file size reduction | agent.zig ~850 lines; extract test helpers, split runTurn |
-| W2 | Provider file size reduction | provider.zig ~790 lines; split SSE parsing, JSON building, retry logic |
+| W1 | Agent file size reduction | agent.zig ~950 lines; extract test helpers, split runTurn |
+| W2 | Provider file size reduction | provider.zig ~880 lines; split SSE parsing, JSON building, retry logic |
 | W3 | Tool test coverage for error paths | OOM on allocation failure in error paths |
