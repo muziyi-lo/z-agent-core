@@ -49,14 +49,25 @@ pub fn init(
     allocator: std.mem.Allocator,
     io: std.Io,
     opts: struct {
-        project_root: ?[]const u8 = null,    // 显式指定 / env ZAGENT_ROOT / CWD 查找
-        model_override: ?[]const u8 = null,
+        project_root: ?[]const u8 = null,
+        api_key_override: ?[]const u8 = null,   // CLI --api-key
         phase_writer_cb: ?provider_mod.PhaseWriterCb = null,
     },
 ) !FrontendState
 ```
 
-CLI 和 Web 都调用同一函数，区别仅在 `phase_writer_cb` 不同（CLI → ANSI 渲染，Web → SSE 映射）。
+CLI 和 Web 都调用同一函数，区别仅在 `phase_writer_cb` 不同（CLI → ANSI 渲染，Web → SSE 映射），CLI 额外传入 `api_key_override`（来自 `--api-key` 参数）。
+
+初始化管线顺序：
+1. resolve project_root
+2. `Config.load`
+3. `loadDotEnv` → 按优先级注入 API key：`api_key_override` > shell env > `.zagent/.env` > error
+4. `resolveModel`
+5. find provider entry
+6. `Provider.init`
+7. `buildRegistry`
+8. `Session.init`
+9. `session_dir` + `session_mod.list`
 
 ### 3. .env 注入与 API key 加载优先级
 
@@ -114,6 +125,40 @@ Web `server.zig.main()` 同样精简，`main()` 总长从 ~115 行 → ~60 行�
 - 不引入 DI 容器或接口抽象（过度设计）
 - 不修改 `main.zig`（4 行 shim 不变）
 - 不移除 `loadDotEnv` 函数（保持向后兼容，后续清理）
+
+## API Key 加载架构决策
+
+参见 `docs/api-key-loading-comparison.md` 对 5 个 agent 项目的横向对比。以下逐项说明本方案吸收和放弃的原因，均以 zAgentCore 的定位（单二进制、单用户、零运行时依赖、127.0.0.1 本地）为基础。
+
+### 吸收
+
+| 项目 | 特性 | 采纳理由 | 对应设计 |
+|------|------|---------|---------|
+| **pi-repos** | 3 层优先级：CLI flag > auth 文件 > env var | 清晰可预测，CI/CD 友好。shell env 覆盖 `.env` 文件是行业标准（Docker、dotenv） | 优先级链：shell env > `.zagent/.env` > error |
+| **DeepSeek-Reasonix** | Config 仅引用 env var 名（`api_key_env`），不存 key 值 | TOML 配置可安全共享/提交。我们已有 `api_key_env = "DEEPSEEK_API_KEY"` 实现 | 已具备，无需改动 |
+| **pi-repos** | CLI `--api-key` 运行时覆盖 | 临时测试、CI/CD 管道一次性注入，不污染 env | 本方案新增（`opts.api_key_override: ?[]const u8`） |
+| **opencode** | 启动时校验 `MissingCredentialError`，清晰提示缺失哪个 env var | 用户启动后立即知道缺什么，而非请求时才报错 | `formatInitError` 返回具体 env var 名 |
+| **pi-repos** | `auth.json` 作为本地凭据存储 | 单文件、JSON 格式、用户主目录隔离。`.zagent/.env` 等价于此角色 | 保留 `.env` 格式（更简单，无 JSON 解析成本） |
+
+### 放弃
+
+| 项目 | 特性 | 放弃理由 |
+|------|------|---------|
+| **nullclaw** | ChaCha20-Poly1305 加密存储 | 单用户本地 dev tool，无共享密钥场景。加密 key 与数据同目录时安全收益为零（调研文档已指出此缺陷） |
+| **nullclaw** | Key 轮换 (`reliability.api_keys[]`) | 单 API 调用序列，rate limit 由 provider 5× 指数退避已覆盖。多 key 轮换增加配置复杂度 |
+| **nullclaw** | 6 层 fallback 链 | 过设计——我们只有 1 个 provider (DeepSeek)，45+ env var 映射表无意义 |
+| **pi-repos** | `!command` shell 插值 | 安全风险。允许配置触发任意命令执行，单用户场景也用不到密码管理器集成 |
+| **opencode** | 8 层配置发现 (remote→global→project→MDM) | 我们无远程配置、无 MDM 管理、无工作区层级。3 层已够（CLI arg > env > file） |
+| **opencode** | OAuth 浏览器流 | 无 provider 支持 OAuth。当前仅 API key 模式 |
+| **oh-my-openagent** | 全委托模式（零 key 管理） | 我们是 standalone 二进制，无上层 harness 可委托 |
+| **pi-repos** | `proper-lockfile` 文件锁 | 单进程运行，`.env` 只读一次，无并发写入竞争 |
+
+### 延后
+
+| 特性 | 理由 |
+|------|------|
+| `{env:}` / `{file:}` 配置值内联插值 | 需扩展 TOML 解析器。当前 `api_key_env` 间接引用已满足需求 |
+| Provider 级 env var 映射表（多 provider 场景） | 当前仅 DeepSeek。多 provider 时基于 `api_key_env` 字段自动映射即可 |
 
 ## 实施
 
