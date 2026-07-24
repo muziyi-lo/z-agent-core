@@ -71,25 +71,11 @@ pub fn init(
     opts: struct {
         project_root: ?[]const u8 = null,
         api_key_override: ?[]const u8 = null,   // CLI --api-key
-        phase_writer_cb: ?provider_mod.PhaseWriterCb = null,
     },
 ) !FrontendState
 ```
 
-CLI 和 Web 都调用同一函数，区别仅在 `phase_writer_cb` 不同（CLI → ANSI 渲染，Web → SSE 映射），CLI 额外传入 `api_key_override`（来自 `--api-key` 参数）。
-
-**PhaseWriterCb 两阶段生命周期**：
-
-```
-阶段 1 (init)                        阶段 2 (per-turn, 由前端调用)
-────────────────────                  ──────────────────────────────
-init(opts.phase_writer_cb)           provider.phase_writer.context = &sse_state
-  → Provider.init(..., cb)               ↓
-  → 存储函数指针，context=null        agent.runTurn() 回调中通过
-                                       @ptrCast 取回 SseState
-```
-
-`init()` 只负责**存储函数指针**（`begin_phase`/`write_raw`/`write_rendered`/`end_phase`），`context` 字段保持 `null`。每轮 turn 开始前，由前端代码将 `context` 指向当前帧的写入器状态（CLI → `WriterCtx`，Web → `SseState`）。这与当前 CLI App.zig:237-240 的模式一致——`init()` 不改变此契约，仅统一 `Provider.init` 的调用方。
+CLI 和 Web 都调用同一函数。`PhaseWriterCb` 不在此处传入——REF-1 已将其改为 per-turn 参数（`agent.runTurn(tool_cb, phase_cb)`），前端在每次 `runTurn` 调用时自行创建（CLI → `pwBeginPhase` 等，Web → `sse.createPhaseWriter`）。
 
 初始化管线顺序：
 1. resolve project_root（`init()` 内部 `dupe` 一份——切断调用方生命周期依赖）
