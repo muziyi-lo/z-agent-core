@@ -43,8 +43,6 @@ pub fn main(process: std.process.Init) !void {
 
     var agent = agent_mod.AgentLoop.init(gpa, io, &state.provider, state.registry, &state.session, state.config.max_tool_rounds, state.project_root, 0, .{});
 
-    printStderrFmt(io, "z-agent-core web server\n  -> http://localhost:{d}\n  -> Project root: {s}\n", .{ default_port, state.project_root });
-
     var ctx = handler.Context{
         .io = io,
         .allocator = gpa,
