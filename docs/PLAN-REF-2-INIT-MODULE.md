@@ -42,6 +42,8 @@ pub const FrontendState = struct {
 
 `session_list` 不在 struct 中——改为惰性加载（见设计要点 6），避免数据陈旧和额外的 deinit 清理。
 
+**不可变约束**：`init()` 返回后，所有字段视为只读。`provider` 内部的 `_stream_options_retried` 和 `session` 的 `_messages` 在运行时自然变更（属于各自内部状态，非 `FrontendState` 字段级赋值）。调用方不通过 `state.provider = ...` 或 `state.session = ...` 替换字段引用的保证。`deinit()` 是唯一例外——仅在进程退出时调用一次。
+
 **deinit 清理链**：
 
 ```zig
