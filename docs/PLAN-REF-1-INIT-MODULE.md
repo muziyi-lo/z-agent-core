@@ -135,6 +135,32 @@ const key_raw = if (config.explicit_key) |k| k else blk: {
 
 `init.zig.init()` 解析密钥后设置 `Config.explicit_key`，Provider 内部优先使用。**零平台依赖**，Windows/Linux/macOS 行为一致。
 
+### 5. 临时 Arena 隔离
+
+`init()` 内部有两类分配：**持久分配**（`session_dir`、`session_list`，需伴随 `FrontendState` 全生命周期）和**临时分配**（`loadDotEnv` 的 HashMap 键值对、中间路径拼接等）。
+
+如果一律使用调用方传入的 `allocator`（server-lifetime arena），临时数据永不释放。解决方案：`init()` 内创建子 arena 专门处理临时分配：
+
+```zig
+pub fn init(allocator: std.mem.Allocator, io: std.Io, opts: ...) !FrontendState {
+    var tmp = std.heap.ArenaAllocator.init(allocator);
+    defer tmp.deinit();
+    const ta = tmp.allocator();
+
+    // 临时分配——使用 ta
+    const dotenv_map = config_mod.loadDotEnv(ta, project_root, io) catch ...;
+    // loadDotEnv 的 key/value dupe、env_path、content 全部在 ta 上
+    // tmp.deinit() 时统一释放
+
+    // 持久分配——使用 allocator
+    const session_dir = try std.fs.path.join(allocator, &.{ ... });
+    const session_list = session_mod.list(allocator, io, session_dir) catch &.{};
+    // ...
+}
+```
+
+**效果**：无论 `init()` 成功还是中途失败，临时分配的内存由 `defer tmp.deinit()` 保证释放。`FrontendState` 只持有持久分配，`deinit()` 无需关心临时数据。
+
 | 方案 | 优点 | 缺点 |
 |------|------|------|
 | A: `init()` 内遍历 HashMap → `std.process.setEnv()` | 简单 | Windows 0.16 无 setEnv |
