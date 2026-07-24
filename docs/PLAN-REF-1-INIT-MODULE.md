@@ -220,11 +220,23 @@ pub fn formatInitError(
 }
 ```
 
-**内存所有权**：调用方提供栈缓冲区（建议 256 字节），`formatInitError` 将格式化结果写入 `buf`。返回的切片指向调用方缓冲区，不涉及堆分配。调用方用完即丢弃。
+**缓冲区大小**：定义常量 `pub const init_error_max_len = 128;`，确保最坏情况（`ApiKeyNotSet` + 长 env var 名）可容纳。`bufPrint` 返回 `error.NoSpaceLeft` 时调用方应增大缓冲区。
+
+```zig
+pub const init_error_max_len = 128;
+
+pub fn formatInitError(
+    buf: []u8,
+    err: InitError,
+    ctx: struct { api_key_env: ?[]const u8, model_spec: ?[]const u8 },
+) ![]const u8 {
+```
+
+**内存所有权**：调用方提供栈缓冲区（`[init_error_max_len]u8`），`formatInitError` 将格式化结果写入 `buf`。返回的切片指向调用方缓冲区，不涉及堆分配。调用方用完即丢弃。
 
 调用侧的典型用法：
 ```zig
-var buf: [256]u8 = undefined;
+var buf: [init.init_error_max_len]u8 = undefined;
 const msg = try init.formatInitError(&buf, err, .{ .api_key_env = entry.api_key_env, .model_spec = cfg.default_model });
 printStderr(io, msg);
 ```
