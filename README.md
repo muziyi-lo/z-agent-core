@@ -15,7 +15,6 @@ The 33-item trap table in `AGENTS.md` catalogs the most frequent hallucinations 
 ```bash
 zig build run                         # interactive REPL
 zig build run -- --prompt "hello"     # single-shot mode
-zig build check                       # compile + architecture scan
 ```
 
 Tests (GPA leak traces cause `zig build test` to deadlock — use this instead):
@@ -176,13 +175,12 @@ Add a tool: `tool/xxx.zig` + 1 line in `registry.zig` `buildRegistry()`.
 | File | Content |
 |------|---------|
 | `docs/CORE-FRONTEND.md` | Core definition, frontend integration, Phase 0/1/2 plan, architecture comparison |
-| `docs/PLAN-PHASE2.md` | Phase 2 spec + implementation (done): hooks, abort, lifecycle, /fork, compact |
-| `docs/PLAN-PHASE-3-COMPAT.md` | Phase 3: compat protocol layer (done): ModelCompat, detectCompat, 7 thinking formats |
-| `docs/PLAN-PHASE-4-CACHE.md` | Phase 4: cache-first loop + reasoning separation (done): reasoning_content, prompt freeze |
+| `docs/PLAN-PHASE-7-WEB-FRONTEND.md` | Phase 7: Web frontend — HTTP server + browser UI (planned) |
 | `docs/PLAN-PHASE-5-WEBFETCH.md` | Phase 5: webfetch tool — HTTP GET with HTML→Markdown conversion (planned) |
 | `docs/PLAN-PHASE-6-TUI.md` | Phase 6: TUI frontend architecture + framework evaluation (design stage) |
 | `docs/设计原则整理.md` | 15 design principles accumulated from development |
 | `docs/REMAINING.md` | Remaining work tracker: done/planned/deferred/future/wishlist |
+| `docs/0.2.2/` | v0.2.2 plan docs: PHASE-3, PHASE-4, FIX-1, FIX-2 (4 files, all done) |
 | `docs/0.2.0/` | v0.2.0 plan docs: OPT-1 through OPT-6 + FIX-1 (9 files, all done) |
 | `docs/0.0.1-alpha/` | v0.0.1-alpha step-by-step design docs (8 files) |
 

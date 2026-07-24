@@ -571,25 +571,25 @@ pub fn renderLine(ctx: *RenderContext, allocator: std.mem.Allocator, line: []con
     if (std.mem.startsWith(u8, line, "```")) {
         ctx.code_block_active = !ctx.code_block_active;
         if (!ctx.colorize) return try allocator.dupe(u8, line);
-        return std.fmt.allocPrint(allocator, "{s}{s}", .{ C.dim, line });
+        return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ C.dim, line, C.reset });
     }
 
     if (!ctx.colorize) return try allocator.dupe(u8, line);
 
     // Inside code block
     if (ctx.code_block_active) {
-        return std.fmt.allocPrint(allocator, "{s}{s}", .{ C.dim, line });
+        return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ C.dim, line, C.reset });
     }
 
     // 1. heading
     if (isHeading(line)) |len| {
         const rest = line[len..];
-        return std.fmt.allocPrint(allocator, "{s}{s}{s}{s}", .{ C.bold, C.cyan, line[0..len], rest });
+        return std.fmt.allocPrint(allocator, "{s}{s}{s}{s}{s}", .{ C.bold, C.cyan, line[0..len], rest, C.reset });
     }
 
     // 2. blockquote
     if (std.mem.startsWith(u8, line, "> ")) {
-        return std.fmt.allocPrint(allocator, "{s}{s}", .{ C.dim, line });
+        return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ C.dim, line, C.reset });
     }
 
     // 3. list -- keep as-is
