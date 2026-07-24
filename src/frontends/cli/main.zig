@@ -1,8 +1,16 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("../../types.zig");
 const App = @import("App.zig").App;
 
 pub fn main(process: std.process.Init) !void {
+    if (builtin.os.tag == .windows) {
+        const win32 = struct {
+            extern "kernel32" fn SetConsoleOutputCP(wCodePageID: u32) callconv(.winapi) i32;
+        };
+        _ = win32.SetConsoleOutputCP(65001);
+    }
+
     const allocator = process.arena.allocator();
     const io = process.io;
 
