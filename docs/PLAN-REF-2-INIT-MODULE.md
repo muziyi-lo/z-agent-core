@@ -1,4 +1,4 @@
-# Plan REF-1: 抽取共享初始化模块 `frontends/init.zig`
+# Plan REF-2: 抽取共享初始化模块 `frontends/init.zig`
 
 ## 状态: 计划中
 
@@ -7,6 +7,7 @@
 | 阻塞者 | 状态 | 被阻塞 |
 |--------|------|--------|
 | PHASE-7 Web MVP | ✅ 已完成 | 本方案 |
+| **PLAN-REF-1** (PhaseWriterCb per-call 化) | **计划中** | 本方案——消除 context swap 逻辑 + 并发风险 |
 
 ## 问题
 
@@ -360,7 +361,6 @@ zig test src/test.zig --cache-dir .zig-cache
 | `explicit_key` 与 Provider 内部 Environ 读取冲突 | 低 | `explicit_key` 优先级最高，非 null 时跳过 Environ 读取，逻辑互斥 |
 | `--api-key` CLI 参数同时有不同前端使用方式 | 无 | CLI 通过 `opts.api_key_override` 传入，Web 通过同字段传入，`init()` 不区分来源 |
 | Provider.Config 新增 `explicit_key` 字段后所有构造点需同步 | 低 | 当前仅 `init.zig` 和 provider 测试构造 Config，两处同步更新 |
-| `FrontendState.provider.phase_writer.context` 共享写入在并发场景下存在 data race | 仅并发时 | 当前 CLI 单线程 + Web 顺序 accept，无并发。后续引入 `Group.concurrent` 时需改为 per-request 的 PhaseWriterCb（而非共享 provider 字段），或使用 per-connection Provider 实例 |
 | 调用方传入栈上 `project_root` 导致悬垂指针 | 已修复 | `init()` 内部 `dupe` 一份副本，切断对调用方生命周期的依赖 |
 
 ## 波及
