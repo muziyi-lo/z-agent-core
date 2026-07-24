@@ -42,6 +42,24 @@ pub const FrontendState = struct {
 
 所有初始化产物打包为一个 struct，调用方 `defer state.deinit()` 统一清理。
 
+**deinit 清理链**——逐字段清单，确保无遗漏：
+
+```zig
+pub fn deinit(self: *FrontendState) void {
+    self.config.deinit();                              // 内部 arena
+    self.session.deinit();                             // 内部 arena + messages
+    self.allocator.free(self.session_dir);             // join() 分配的路径字符串
+    session_mod.freeSessionInfoList(self.allocator, self.session_list); // list 结果
+}
+```
+
+不需要清理的字段（由 `self.allocator` arena 统一回收）：
+- `provider` — 仅有 api_key 字符串由 arena 分配，无独立 deinit
+- `registry` — handlers 全是编译期常量，无堆分配
+- `project_root` — 由调用方 allocator 分配，与 FrontendState 共享生命周期
+
+调用方的 `gpa_alloc.deinit()` 作为最终防线回收剩余内存。
+
 ### 2. 初始化入口
 
 ```zig
