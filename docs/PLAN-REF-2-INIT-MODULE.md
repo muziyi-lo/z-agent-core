@@ -211,7 +211,7 @@ pub fn formatInitError(
 }
 ```
 
-**缓冲区大小**：定义常量 `pub const init_error_max_len = 128;`，确保最坏情况（`ApiKeyNotSet` + 长 env var 名）可容纳。`bufPrint` 返回 `error.NoSpaceLeft` 时调用方应增大缓冲区。
+**缓冲区大小**：定义常量 `pub const init_error_max_len = 256;`，确保最坏情况（`ModelResolveFailed` + 长模型名 `provider/long-model-id`）可容纳。`bufPrint` 返回 `error.NoSpaceLeft` 时调用方应增大缓冲区。
 
 ```zig
 pub const init_error_max_len = 128;
