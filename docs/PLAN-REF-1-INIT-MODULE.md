@@ -96,16 +96,31 @@ CLI 和 Web 都调用同一函数，区别仅在 `phase_writer_cb` 不同（CLI 
 2. `.zagent/.env` 文件中的值 — 仅在系统环境不存在时注入
 3. 无任何来源 → `error.ApiKeyNotSet`
 
-**实现**：`init()` 在调用 `Provider.init` 之前完成密钥解析，按优先级逐层检查：
+**实现**：`init()` 在调用 `Provider.init` 之前完成密钥解析，按优先级逐层检查。不走 OS 环境变量注入（Zig 0.16 `std.process` 只有读 API，无跨平台 `setenv`），改为将解析结果作为参数直接传递：
 
 ```
-1. opts.api_key_override  →  注入 env（Provider.init 通过 Environ 可见）
-2. shell 环境变量已存在     →  跳过（不覆盖）
-3. .zagent/.env 有值        →  注入 env
-4. 全部为空                  →  返回 error.ApiKeyNotSet
+1. opts.api_key_override  →  使用该值
+2. shell 环境变量已存在     →  从 environ_map 读取
+3. .zagent/.env 有值        →  从 loadDotEnv HashMap 读取
+4. 全部为空                  →  返回 error.ApiKeyNotSet (附带 env var 名称)
 ```
 
-关键：解析逻辑放在 `init()` 中（而非 Provider 内部），保证 CLI `--api-key` 和 `.env` 文件在 Provider 读取环境变量之前已被注入。Provider.init 签名不变（仍从 Environ 读取），`init()` 负责确保 Environ 中存在所需值。
+**Provider 接口扩展**：新增可选字段 `explicit_key: ?[]const u8`，优先级高于 Environ 读取。
+
+```zig
+// Provider.Config 新增
+explicit_key: ?[]const u8 = null,
+
+// Provider.init 内部
+const key_raw = if (config.explicit_key) |k| k else blk: {
+    var env = std.process.Environ{ .block = .{ .use_global = true } };
+    var map = try env.createMap(allocator);
+    defer map.deinit();
+    break :blk map.get(config.api_key_env) orelse return error.ApiKeyNotSet;
+};
+```
+
+`init.zig.init()` 解析密钥后设置 `Config.explicit_key`，Provider 内部优先使用。**零平台依赖**，Windows/Linux/macOS 行为一致。
 
 | 方案 | 优点 | 缺点 |
 |------|------|------|
@@ -148,10 +163,11 @@ Web `server.zig.main()` 同样精简，`main()` 总长从 ~115 行 → ~60 行�
 
 ## 不做
 
-- 不改 `provider.zig` / `session.zig` / `config.zig` 核心模块
+- 不改 `session.zig` / `config.zig` 核心模块
 - 不引入 DI 容器或接口抽象（过度设计）
 - 不修改 `main.zig`（4 行 shim 不变）
 - 不移除 `loadDotEnv` 函数（保持向后兼容，后续清理）
+- 不走 OS 级环境变量注入（Zig 0.16 无跨平台 setenv，方案改为参数直传）
 
 ## API Key 加载架构决策
 
@@ -249,16 +265,19 @@ zig test src/test.zig --cache-dir .zig-cache
 
 | 风险 | 概率 | 缓解 |
 |------|------|------|
-| 0.16 `std.process.Environ` 不支持写入 | 中 | 降级：Provider.init 新增可选参数 `explicit_key: ?[]const u8`，`init()` 直接传入解析后的 key，绕过 Environ |
 | `session_mod.list` 调用 allocator 与 `gpa` arena 冲突 | 低 | list 使用调用方传入的 allocator |
 | CLI AGENTS.md 读取逻辑耦合进 init.zig | 无 | 保留在 App.zig，init.zig 不含前端特有逻辑 |
-| `--api-key` 传入了但 init() 在 Provider.init 前过早报错 | 已修复 | 密钥解析在步骤 4（Provider.init 之前），四个来源依次检查后注入 Environ |
+| `--api-key` 传入了但 init() 在 Provider.init 前过早报错 | 已修复 | 密钥解析在步骤 4（Provider.init 之前），四个来源依次检查 |
+| `explicit_key` 与 Provider 内部 Environ 读取冲突 | 低 | `explicit_key` 优先级最高，非 null 时跳过 Environ 读取，逻辑互斥 |
+| `--api-key` CLI 参数同时有不同前端使用方式 | 无 | CLI 通过 `opts.api_key_override` 传入，Web 通过同字段传入，`init()` 不区分来源 |
+| Provider.Config 新增 `explicit_key` 字段后所有构造点需同步 | 低 | 当前仅 `init.zig` 和 provider 测试构造 Config，两处同步更新 |
 
 ## 波及
 
 | 文件 | 改动 | 破坏性? |
 |------|------|----------|
 | `src/frontends/init.zig` | 新建 | 否 |
+| `src/io/provider.zig` | Provider.Config 新增 `explicit_key: ?[]const u8` 字段 | 否（新增可选字段，默认 null） |
 | `src/frontends/cli/App.zig` | `init()` 精简 ~60 行，调用 init.zig | 否 |
 | `src/frontends/web/server.zig` | `main()` 精简 ~40 行，调用 init.zig | 否 |
 | `src/test.zig` | 新增 `_ = @import("frontends/init.zig");` | 否 |
