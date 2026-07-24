@@ -48,13 +48,16 @@ pub fn deinit(self: *FrontendState) void {
     self.config.deinit();                              // 内部 arena
     self.session.deinit();                             // 内部 arena + messages
     self.allocator.free(self.session_dir);             // join() 分配的路径字符串
+    self.allocator.free(self.project_root);            // init 内 dupe 的副本
 }
 ```
 
 不需要清理的字段（由 `self.allocator` arena 统一回收）：
 - `provider` — 仅有 api_key 字符串由 arena 分配，无独立 deinit
 - `registry` — handlers 全是编译期常量，无堆分配
-- `project_root` — 由调用方 allocator 分配，与 FrontendState 共享生命周期
+- `project_root` — 由 init() 内部 dupe，deinit 中 allocator.free 释放，不依赖调用方生命周期
+
+**project_root 所有权**：`init()` 始终内部 `allocator.dupe(u8, ...)` 一份副本，不直接持有调用方传入的切片。即使调用方传入栈上字符串（如 `--root` CLI 参数、`environ_map.get` 返回值），`FrontendState` 生命周期也不依赖外部。
 
 调用方的 `gpa_alloc.deinit()` 作为最终防线回收剩余内存。
 
@@ -88,7 +91,8 @@ init(opts.phase_writer_cb)           provider.phase_writer.context = &sse_state
 `init()` 只负责**存储函数指针**（`begin_phase`/`write_raw`/`write_rendered`/`end_phase`），`context` 字段保持 `null`。每轮 turn 开始前，由前端代码将 `context` 指向当前帧的写入器状态（CLI → `WriterCtx`，Web → `SseState`）。这与当前 CLI App.zig:237-240 的模式一致——`init()` 不改变此契约，仅统一 `Provider.init` 的调用方。
 
 初始化管线顺序：
-1. resolve project_root
+1. resolve project_root（`init()` 内部 `dupe` 一份——切断调用方生命周期依赖）
+2. `Config.load`
 2. `Config.load`
 3. `loadDotEnv` → 密钥解析（`api_key_override` > shell env > .env > ApiKeyNotSet）
 4. `resolveModel`
@@ -357,6 +361,7 @@ zig test src/test.zig --cache-dir .zig-cache
 | `--api-key` CLI 参数同时有不同前端使用方式 | 无 | CLI 通过 `opts.api_key_override` 传入，Web 通过同字段传入，`init()` 不区分来源 |
 | Provider.Config 新增 `explicit_key` 字段后所有构造点需同步 | 低 | 当前仅 `init.zig` 和 provider 测试构造 Config，两处同步更新 |
 | `FrontendState.provider.phase_writer.context` 共享写入在并发场景下存在 data race | 仅并发时 | 当前 CLI 单线程 + Web 顺序 accept，无并发。后续引入 `Group.concurrent` 时需改为 per-request 的 PhaseWriterCb（而非共享 provider 字段），或使用 per-connection Provider 实例 |
+| 调用方传入栈上 `project_root` 导致悬垂指针 | 已修复 | `init()` 内部 `dupe` 一份副本，切断对调用方生命周期的依赖 |
 
 ## 波及
 
