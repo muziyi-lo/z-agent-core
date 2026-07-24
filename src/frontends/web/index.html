@@ -26,6 +26,7 @@ body{font-family:system-ui,sans-serif;background:var(--bg-base);color:var(--text
 #session-list .session.active{background:var(--bg-layer-01);border-left:2px solid var(--accent-base)}
 #session-list .session .name{color:var(--text-base)}
 #session-list .session .meta{font-size:var(--text-xs);color:var(--text-muted)}
+.section-header{padding:8px 12px 4px;font-size:var(--text-xs);color:var(--text-faint);text-transform:uppercase;letter-spacing:0.5px}
 #new-session-btn{margin:8px;padding:8px;background:var(--bg-layer-01);border:1px solid var(--border-base);border-radius:var(--radius-sm);color:var(--text-base);cursor:pointer;font-size:var(--text-sm)}
 #new-session-btn:hover{background:var(--bg-layer-02)}
 #main{flex:1;display:flex;flex-direction:column;min-width:0}
@@ -97,16 +98,36 @@ async function loadSessions() {
   const list = await api('/session');
   const el = document.getElementById('session-list');
   el.innerHTML = '';
+  if (list.length === 0) return;
+
+  list.sort((a, b) => b.timestamp - a.timestamp);
+  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+  const todaySec = Math.floor(todayStart.getTime() / 1000);
+
+  const groups = { today: [], earlier: [] };
   list.forEach(s => {
-    const div = document.createElement('div');
-    div.className = 'session' + (s.id === currentId ? ' active' : '');
-    div.innerHTML = `<div class="name">${esc(s.name)}</div><div class="meta">${esc(s.model)} &middot; ${s.msg_count} msgs</div>`;
-    div.onclick = () => loadSession(s.id);
-    el.appendChild(div);
+    if (s.timestamp >= todaySec) groups.today.push(s);
+    else groups.earlier.push(s);
   });
-  if (list.length > 0) {
-    document.getElementById('model-name').textContent = list[0].model;
+
+  function renderGroup(label, items) {
+    if (items.length === 0) return;
+    const hdr = document.createElement('div');
+    hdr.className = 'section-header';
+    hdr.textContent = label;
+    el.appendChild(hdr);
+    items.forEach(s => {
+      const div = document.createElement('div');
+      div.className = 'session' + (s.id === currentId ? ' active' : '');
+      div.innerHTML = `<div class="name">${esc(s.name)}</div><div class="meta">${esc(s.model)} &middot; ${s.msg_count} msgs</div>`;
+      div.onclick = () => loadSession(s.id);
+      el.appendChild(div);
+    });
   }
+
+  renderGroup('Today', groups.today);
+  renderGroup('Earlier', groups.earlier);
+  document.getElementById('model-name').textContent = list[0].model;
 }
 
 async function loadSession(id) {
