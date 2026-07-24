@@ -34,22 +34,20 @@ pub const FrontendState = struct {
     registry: registry_mod.Registry,
     session: session_mod.Session,
     session_dir: []const u8,
-    session_list: []const types.SessionInfo,
 
     pub fn deinit(self: *FrontendState) void { ... }
 };
 ```
 
-所有初始化产物打包为一个 struct，调用方 `defer state.deinit()` 统一清理。
+`session_list` 不在 struct 中——改为惰性加载（见设计要点 6），避免数据陈旧和额外的 deinit 清理。
 
-**deinit 清理链**——逐字段清单，确保无遗漏：
+**deinit 清理链**：
 
 ```zig
 pub fn deinit(self: *FrontendState) void {
     self.config.deinit();                              // 内部 arena
     self.session.deinit();                             // 内部 arena + messages
     self.allocator.free(self.session_dir);             // join() 分配的路径字符串
-    session_mod.freeSessionInfoList(self.allocator, self.session_list); // list 结果
 }
 ```
 
@@ -92,13 +90,13 @@ init(opts.phase_writer_cb)           provider.phase_writer.context = &sse_state
 初始化管线顺序：
 1. resolve project_root
 2. `Config.load`
-3. `loadDotEnv` → 按优先级注入 API key：`api_key_override` > shell env > `.zagent/.env` > error
+3. `loadDotEnv` → 密钥解析（`api_key_override` > shell env > .env > ApiKeyNotSet）
 4. `resolveModel`
 5. find provider entry
 6. `Provider.init`
 7. `buildRegistry`
 8. `Session.init`
-9. `session_dir` + `session_mod.list`
+9. `session_dir = join(project_root, ".zagent", "sessions")`
 
 ### 3. .env 注入与 API key 加载优先级
 
@@ -137,7 +135,7 @@ const key_raw = if (config.explicit_key) |k| k else blk: {
 
 ### 5. 临时 Arena 隔离
 
-`init()` 内部有两类分配：**持久分配**（`session_dir`、`session_list`，需伴随 `FrontendState` 全生命周期）和**临时分配**（`loadDotEnv` 的 HashMap 键值对、中间路径拼接等）。
+`init()` 内部有两类分配：**持久分配**（`session_dir`，需伴随 `FrontendState` 全生命周期）和**临时分配**（`loadDotEnv` 的 HashMap 键值对、中间路径拼接等）。
 
 如果一律使用调用方传入的 `allocator`（server-lifetime arena），临时数据永不释放。解决方案：`init()` 内创建子 arena 专门处理临时分配：
 
@@ -154,12 +152,28 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io, opts: ...) !FrontendState 
 
     // 持久分配——使用 allocator
     const session_dir = try std.fs.path.join(allocator, &.{ ... });
-    const session_list = session_mod.list(allocator, io, session_dir) catch &.{};
     // ...
 }
 ```
 
 **效果**：无论 `init()` 成功还是中途失败，临时分配的内存由 `defer tmp.deinit()` 保证释放。`FrontendState` 只持有持久分配，`deinit()` 无需关心临时数据。
+
+### 6. session_list 惰性加载
+
+不在 `init()` 中加载 session 列表，改为按需调用：
+
+```zig
+pub fn loadSessionList(state: *const FrontendState) ![]types.SessionInfo {
+    return session_mod.list(state.allocator, state.io, state.session_dir);
+}
+```
+
+调用方（Web handler 的 `GET /api/session`）每次请求时调用 `loadSessionList`，用完 `freeSessionInfoList` 释放。CLI 的 `/list` 命令同理。
+
+**理由**：
+- **数据一致性**：`POST /api/session` 创建新 session 后，下次 list 请求返回最新数据，无需刷新机制
+- **启动速度**：init 阶段不扫描 `.zagent/sessions/` 目录
+- **简化 deinit**：`session_list` 不在 `FrontendState` 中，少 1 个字段 + 1 行清理
 
 | 方案 | 优点 | 缺点 |
 |------|------|------|
@@ -269,18 +283,17 @@ Web `server.zig.main()` 同样精简，`main()` 总长从 ~115 行 → ~60 行�
 
 **新建**，包含 `FrontendState` struct + `init()` 函数 + `InitError` 枚举 + `formatInitError()`。
 
-管线顺序（从 CLI App.zig:97-175 提取）：
+管线顺序（从 CLI App.zig:97-175 提取，移除 session_mod.list）：
 1. resolve project_root (参数 → ZAGENT_ROOT env → findZagentRoot → CWD)
 2. `Config.load`
-3. `loadDotEnv` → 解析 .env 到 HashMap
+3. `loadDotEnv` → 解析 .env 到 HashMap（临时 arena）
 4. **密钥解析**（新增核心逻辑）：`api_key_override` → shell env → .env → `ApiKeyNotSet`
 5. `resolveModel`
 6. find provider entry
-7. `Provider.init`（此时 Environ 中已有 key，步骤 4 保证）
+7. `Provider.init`（`explicit_key` 设值后 Environmental 回退）
 8. `buildRegistry`
 9. `Session.init`
 10. `session_dir = join(project_root, ".zagent", "sessions")`
-11. `session_mod.list` (失败返回空列表)
 
 ### 步骤 2: 修改 `src/frontends/cli/App.zig`
 
