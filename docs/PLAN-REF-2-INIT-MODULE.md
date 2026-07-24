@@ -166,14 +166,6 @@ pub fn loadSessionList(state: *const FrontendState) ![]types.SessionInfo {
 - **启动速度**：init 阶段不扫描 `.zagent/sessions/` 目录
 - **简化 deinit**：`session_list` 不在 `FrontendState` 中，少 1 个字段 + 1 行清理
 
-| 方案 | 优点 | 缺点 |
-|------|------|------|
-| A: `init()` 内遍历 HashMap → `std.process.setEnv()` | 简单 | Windows 0.16 无 setEnv |
-| B: `init()` 内构建合并 `Environ`，传给 `Provider.init` 新参数 | 平台无关 | 需改 Provider 接口 |
-| C: 遍历 HashMap，系统环境已存在则跳过，否则注入 | 不覆盖已有值 | 需验证 0.16 环境写入 API |
-
-**选择**：方案 C，降级路径为方案 B。
-
 ### 4. 错误处理统一
 
 当前每个前端手动 `catch` + `stderr.write`。改为 `init()` 返回结构化 Error：
