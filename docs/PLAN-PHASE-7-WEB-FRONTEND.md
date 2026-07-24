@@ -1,6 +1,6 @@
 # Plan PHASE-7: Web 前端 (HTTP Server + Browser)
 
-## 状态: 实施中 (MVP 完成，SSE 流式待实现)
+## 状态: 实施中 (SSE 流式端点已实现，Web UI 交互待完善)
 
 ## 前置依赖
 
@@ -749,7 +749,7 @@ zig build run -- --web --root C:\my-project
 | # | 计划 | 实施 | 原因 |
 |---|------|------|------|
 | 1 | `Group.concurrent` 并发连接 | 顺序 `accept` (ep1 模式) | 0.16 `Group.concurrent` API 签名不确定，MVP 单用户场景无并发需求 |
-| 2 | `respondStreaming` SSE 流式 | SSE 端点返回 "not yet implemented" | `Io.Writer` vs `Io.net.Stream.Writer` 类型不兼容，待桥接 |
+| 2 | `respondStreaming` SSE 流式 | SSE 端点已实现 — `sse.SseWriter` 函数指针表桥接 `Io.net.Stream.Writer.interface` | 使用 `writer.interface` + `sseWriterFrom()` factory 函数 |
 | 3 | handler 使用 long-lived arena | Per-request arena (`handleRequest` 入口创建) | 审查发现原设计内存泄漏：server-lifetime arena 不释放请求分配 |
 | 4 | `Session.sessionsDir()` | `std.fs.path.join(project_root, ".zagent", "sessions")` | Session 无此方法，直接构造路径 |
 | 5 | `ArrayList(writer).init()` | `ArrayListAligned(u8,null).empty` + `bufPrint` + `appendSlice` | 0.16 ArrayList API 变更 |

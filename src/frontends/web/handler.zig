@@ -2,7 +2,9 @@ const std = @import("std");
 const types = @import("../../types.zig");
 const config_mod = @import("../../config.zig");
 const session_mod = @import("../../core/session.zig");
+const agent_mod = @import("../../core/agent.zig");
 const init_mod = @import("../init.zig");
+const sse = @import("sse.zig");
 const err_mod = @import("error.zig");
 
 const AlignedU8 = std.ArrayListAligned(u8, null);
@@ -14,6 +16,7 @@ pub const Context = struct {
     config: *config_mod.Config,
     agent: *anyopaque,
     provider: *anyopaque,
+    sse_writer: ?*anyopaque = null,
 };
 
 pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, request: *std.http.Server.Request) !void {
@@ -39,6 +42,14 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
         }
     } else if (method == .POST) {
         if (std.mem.eql(u8, path, "/api/session")) return handleSessionCreate(ctx, request, a);
+        if (std.mem.startsWith(u8, path, "/api/session/")) {
+            const rest = path["/api/session/".len..];
+            if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+                const id = rest[0..slash];
+                const sub = rest[slash + 1 ..];
+                if (std.mem.eql(u8, sub, "prompt")) return handlePrompt(ctx, request, id);
+            }
+        }
     }
 
     return err_mod.respondError(request, .not_found, "endpoint not found", a);
@@ -154,6 +165,33 @@ fn handleSessionCreate(ctx: *Context, request: *std.http.Server.Request, a: std.
     try session.flush();
     try respondJson(request, "{\"status\":\"created\"}");
     _ = a;
+}
+
+fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8) !void {
+    _ = session_id;
+    const sw: *sse.SseWriter = @ptrCast(@alignCast(ctx.sse_writer orelse return err_mod.respondError(request, .internal_error, "SSE writer not available", ctx.allocator)));
+    try sw.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\nCache-Control: no-cache\r\n\r\n");
+
+    var sse_state = sse.SseState{
+        .w = sw.*,
+        .io = ctx.io,
+    };
+    const phase_cb = sse.createPhaseWriter(&sse_state);
+    const tool_cb = sse.createToolDisplay(&sse_state);
+
+    const agent: *agent_mod.AgentLoop = @ptrCast(@alignCast(ctx.agent));
+    const result = agent.runTurn(tool_cb, phase_cb) catch |err| {
+        const err_msg = @errorName(err);
+        var buf: [256]u8 = undefined;
+        const payload = std.fmt.bufPrint(&buf, "{{\"code\":\"api_error\",\"message\":\"{s}\"}}", .{err_msg}) catch "{}";
+        sse_state.writeFrame("error", payload) catch {};
+        sse_state.writeFrame("done", "{}") catch {};
+        return;
+    };
+
+    var done_buf: [64]u8 = undefined;
+    const msg = try std.fmt.bufPrint(&done_buf, "{{\"new_messages\":{d}}}", .{result.new_message_count});
+    try sse_state.writeFrame("done", msg);
 }
 
 fn loadSession(ctx: *Context, id: []const u8) !session_mod.Session {

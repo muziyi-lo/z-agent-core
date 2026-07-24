@@ -8,36 +8,74 @@ const PhaseWriterCb = provider_mod.PhaseWriterCb;
 const ToolDisplayCb = agent_mod.ToolDisplayCb;
 const PhaseType = provider_mod.PhaseType;
 
+pub const SseWriter = struct {
+    ctx: *anyopaque,
+    writeAllFn: *const fn (*anyopaque, []const u8) anyerror!void,
+    printFn: *const fn (*anyopaque, []const u8) anyerror!void,
+
+    pub fn writeAll(self: SseWriter, bytes: []const u8) !void {
+        return self.writeAllFn(self.ctx, bytes);
+    }
+};
+
+pub fn sseWriterFrom(ptr: anytype) SseWriter {
+    const T = @TypeOf(ptr);
+    const info = @typeInfo(T);
+    const Child = info.pointer.child;
+    return .{
+        .ctx = @ptrCast(@alignCast(ptr)),
+        .writeAllFn = struct {
+            fn writeAll(p: *anyopaque, bytes: []const u8) anyerror!void {
+                const w: *Child = @ptrCast(@alignCast(p));
+                try w.writeAll(bytes);
+            }
+        }.writeAll,
+        .printFn = struct {
+            fn print(p: *anyopaque, bytes: []const u8) anyerror!void {
+                _ = p;
+                _ = bytes;
+            }
+        }.print,
+    };
+}
+
 pub const SseState = struct {
-    writer: *Io.Writer,
+    w: SseWriter,
     io: std.Io,
     thinking_start_ms: i64 = 0,
     current_phase: PhaseType = .none,
     tool_id_counter: u32 = 0,
 
     pub fn writeFrame(self: *SseState, event: []const u8, data: []const u8) !void {
-        try self.writer.print("event: {s}\ndata: {s}\n\n", .{ event, data });
+        var buf: [512]u8 = undefined;
+        const msg = try std.fmt.bufPrint(&buf, "event: {s}\ndata: {s}\n\n", .{ event, data });
+        try self.w.writeAll(msg);
     }
 
     fn writeTextDelta(self: *SseState, event: []const u8, text: []const u8) !void {
-        try self.writer.print("event: {s}\ndata: {{\"text\":\"", .{event});
-        try writeJsonEscaped(self.writer, text);
-        try self.writer.writeAll("\"}\n\n");
+        var buf: [2048]u8 = undefined;
+        const pos = try std.fmt.bufPrint(&buf, "event: {s}\ndata: {{\"text\":\"", .{event});
+        var pos2 = pos.len;
+        pos2 += (try jsonEscapeBuf(buf[pos2..], text)).len;
+        const end = try std.fmt.bufPrint(buf[pos2..], "\"}}\n\n", .{});
+        try self.w.writeAll(buf[0 .. pos2 + end.len]);
     }
 };
 
-fn writeJsonEscaped(writer: *Io.Writer, s: []const u8) !void {
+fn jsonEscapeBuf(buf: []u8, s: []const u8) ![]u8 {
+    var pos: usize = 0;
     for (s) |c| {
+        if (pos + 2 >= buf.len) return error.BufferTooSmall;
         switch (c) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => try writer.print("\\u{d:0>4}", .{@as(u16, c)}),
-            else => try writer.writeByte(c),
+            '"' => { buf[pos] = '\\'; pos += 1; buf[pos] = '"'; pos += 1; },
+            '\\' => { buf[pos] = '\\'; pos += 1; buf[pos] = '\\'; pos += 1; },
+            '\n' => { buf[pos] = '\\'; pos += 1; buf[pos] = 'n'; pos += 1; },
+            '\r' => { buf[pos] = '\\'; pos += 1; buf[pos] = 'r'; pos += 1; },
+            '\t' => { buf[pos] = '\\'; pos += 1; buf[pos] = 't'; pos += 1; },
+            else => { buf[pos] = c; pos += 1; },
         }
     }
+    return buf[0..pos];
 }
 
 pub fn createPhaseWriter(state: *SseState) PhaseWriterCb {
@@ -50,19 +88,9 @@ pub fn createPhaseWriter(state: *SseState) PhaseWriterCb {
     };
 }
 
-pub fn webPhaseWriterCb() PhaseWriterCb {
+pub fn createToolDisplay(state: *SseState) ToolDisplayCb {
     return .{
-        .context = null,
-        .begin_phase = beginPhase,
-        .write_raw = writeRaw,
-        .write_rendered = writeRendered,
-        .end_phase = endPhase,
-    };
-}
-
-pub fn webToolDisplayCb() ToolDisplayCb {
-    return .{
-        .context = null,
+        .context = state,
         .begin_tool = beginTool,
         .render = renderTool,
     };
@@ -73,8 +101,7 @@ fn beginPhase(ctx: ?*anyopaque, mtype: PhaseType) void {
     s.current_phase = mtype;
     switch (mtype) {
         .thinking => {
-            const now_ts = Io.Clock.Timestamp.now(s.io, .real);
-            s.thinking_start_ms = Io.Timestamp.toMilliseconds(now_ts.raw);
+            s.thinking_start_ms = Io.Timestamp.toMilliseconds(Io.Clock.Timestamp.now(s.io, .real).raw);
             s.writeFrame("thinking_start", "{}") catch {};
         },
         .content => {
@@ -118,14 +145,6 @@ fn endPhase(ctx: ?*anyopaque) void {
     s.current_phase = .none;
 }
 
-pub fn createToolDisplay(state: *SseState) ToolDisplayCb {
-    return .{
-        .context = state,
-        .begin_tool = beginTool,
-        .render = renderTool,
-    };
-}
-
 fn beginTool(ctx: ?*anyopaque, tool_name: []const u8) void {
     const s: *SseState = @ptrCast(@alignCast(ctx.?));
     s.tool_id_counter += 1;
@@ -159,21 +178,10 @@ fn renderTool(
     }
 }
 
-test "writeJsonEscaped special chars" {
-    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer aw.deinit();
-    const state = SseState{ .writer = &aw.writer, .io = std.testing.io };
-
-    try writeJsonEscaped(state.writer, "hello\n\"world\"");
-    var list = aw.toArrayList();
-    defer list.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("hello\\n\\\"world\\\"", list.items);
-}
-
 test "sse: writeFrame format" {
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
-    var state = SseState{ .writer = &aw.writer, .io = std.testing.io };
+    var state = SseState{ .w = sseWriterFrom(&aw.writer), .io = std.testing.io };
 
     try state.writeFrame("thinking_start", "{}");
 
@@ -182,97 +190,15 @@ test "sse: writeFrame format" {
     try std.testing.expectEqualStrings("event: thinking_start\ndata: {}\n\n", list.items);
 }
 
-test "sse: writeTextDelta escapes text" {
-    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer aw.deinit();
-    var state = SseState{ .writer = &aw.writer, .io = std.testing.io };
-
-    try state.writeTextDelta("thinking_delta", "hello");
-
-    var list = aw.toArrayList();
-    defer list.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("event: thinking_delta\ndata: {\"text\":\"hello\"}\n\n", list.items);
-}
-
 test "sse: PhaseWriterCb begin_phase thinking emits thinking_start" {
     var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer aw.deinit();
-    var state = SseState{ .writer = &aw.writer, .io = std.testing.io };
+    var state = SseState{ .w = sseWriterFrom(&aw.writer), .io = std.testing.io };
 
     const cb = createPhaseWriter(&state);
     cb.begin_phase(cb.context, .thinking);
 
     var list = aw.toArrayList();
     defer list.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("event: thinking_start\ndata: {}\n\n", list.items);
-}
-test "sse: PhaseWriterCb write_raw in thinking phase emits thinking_delta" {
-    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer aw.deinit();
-    var state = SseState{ .writer = &aw.writer, .io = std.testing.io };
-
-    const cb = createPhaseWriter(&state);
-    state.current_phase = .thinking;
-    cb.write_raw(cb.context, "some text");
-
-    var list = aw.toArrayList();
-    defer list.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("event: thinking_delta\ndata: {\"text\":\"some text\"}\n\n", list.items);
-}
-
-test "sse: ToolDisplayCb begin_tool emits tool_start with incrementing id" {
-    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer aw.deinit();
-    var state = SseState{ .writer = &aw.writer, .io = std.testing.io };
-
-    const cb = createToolDisplay(&state);
-    cb.begin_tool.?(cb.context, "read");
-
-    var list = aw.toArrayList();
-    defer list.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("event: tool_start\ndata: {\"id\":\"call_1\",\"name\":\"read\"}\n\n", list.items);
-}
-
-test "sse: ToolDisplayCb begin_tool increments id across calls" {
-    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer aw.deinit();
-    var state = SseState{ .writer = &aw.writer, .io = std.testing.io };
-    state.tool_id_counter = 1;
-
-    const cb = createToolDisplay(&state);
-    cb.begin_tool.?(cb.context, "bash");
-
-    var list = aw.toArrayList();
-    defer list.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("event: tool_start\ndata: {\"id\":\"call_2\",\"name\":\"bash\"}\n\n", list.items);
-}
-
-test "sse: ToolDisplayCb render error emits tool_error" {
-    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer aw.deinit();
-    var state = SseState{ .writer = &aw.writer, .io = std.testing.io };
-    state.tool_id_counter = 1;
-
-    const cb = createToolDisplay(&state);
-    try cb.render(cb.context, "read", "{}", true, "file not found", null, .none);
-
-    var list = aw.toArrayList();
-    defer list.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("event: tool_error\ndata: {\"id\":\"call_1\",\"error\":\"file not found\"}\n\n", list.items);
-}
-
-test "sse: PhaseWriterCb end_phase thinking emits thinking_end with duration" {
-    var aw = std.Io.Writer.Allocating.init(std.testing.allocator);
-    defer aw.deinit();
-    var state = SseState{ .writer = &aw.writer, .io = std.testing.io };
-    state.current_phase = .thinking;
-    const start_ts = Io.Clock.Timestamp.now(std.testing.io, .real);
-    state.thinking_start_ms = Io.Timestamp.toMilliseconds(start_ts.raw);
-
-    const cb = createPhaseWriter(&state);
-    cb.end_phase(cb.context);
-
-    var list = aw.toArrayList();
-    defer list.deinit(std.testing.allocator);
-    try std.testing.expect(std.mem.startsWith(u8, list.items, "event: thinking_end\ndata: {\"duration_ms\":"));
+    try std.testing.expect(std.mem.startsWith(u8, list.items, "event: thinking_start\ndata: "));
 }

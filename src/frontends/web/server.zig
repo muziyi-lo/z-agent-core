@@ -1,9 +1,9 @@
 const std = @import("std");
 const init_mod = @import("../init.zig");
 const agent_mod = @import("../../core/agent.zig");
-const types = @import("../../types.zig");
 const signal = @import("../../util/signal.zig");
 const handler = @import("handler.zig");
+const sse = @import("sse.zig");
 
 const Io = std.Io;
 
@@ -74,6 +74,9 @@ pub fn main(process: std.process.Init) !void {
         const method = request.head.method;
         const target = request.head.target;
         const path = if (target.len > 0 and target[0] == '/') target else "/";
+
+        var sse_w = sse.sseWriterFrom(&writer.interface);
+        ctx.sse_writer = &sse_w;
 
         handler.handleRequest(&ctx, method, path, &request) catch {
             _ = request.respond("500 Internal Server Error", .{}) catch {};
