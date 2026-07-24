@@ -143,17 +143,38 @@ pub const InitError = error{
     ApiKeyNotSet,
 };
 
-pub fn formatInitError(err: InitError, ctx: struct { api_key_env: ?[]const u8, model_spec: ?[]const u8 }) []const u8 {
+pub fn formatInitError(
+    buf: []u8,
+    err: InitError,
+    ctx: struct { api_key_env: ?[]const u8, model_spec: ?[]const u8 },
+) ![]const u8 {
     return switch (err) {
-        error.NoProjectRoot => "cannot resolve project root",
-        error.ConfigLoadFailed => "cannot load config",
-        error.ApiKeyNotSet => if (ctx.api_key_env) |env| ... else "API key not set",
-        ...
+        error.NoProjectRoot => std.fmt.bufPrint(buf, "z-agent-core: error: cannot resolve project root", .{}),
+        error.ConfigLoadFailed => std.fmt.bufPrint(buf, "z-agent-core: error: cannot load config", .{}),
+        error.ModelResolveFailed => if (ctx.model_spec) |s|
+            std.fmt.bufPrint(buf, "z-agent-core: error: cannot resolve model '{s}'", .{s})
+        else
+            std.fmt.bufPrint(buf, "z-agent-core: error: cannot resolve default model", .{}),
+        error.ProviderNotFound => if (ctx.model_spec) |s|
+            std.fmt.bufPrint(buf, "z-agent-core: error: provider for '{s}' not found", .{s})
+        else
+            std.fmt.bufPrint(buf, "z-agent-core: error: provider not found", .{}),
+        error.ApiKeyNotSet => if (ctx.api_key_env) |env|
+            std.fmt.bufPrint(buf, "z-agent-core: Error: {s} environment variable not set", .{env})
+        else
+            std.fmt.bufPrint(buf, "z-agent-core: Error: API key not set", .{}),
     };
 }
 ```
 
-调用方只负责打印，不再各自实现错误文案。
+**内存所有权**：调用方提供栈缓冲区（建议 256 字节），`formatInitError` 将格式化结果写入 `buf`。返回的切片指向调用方缓冲区，不涉及堆分配。调用方用完即丢弃。
+
+调用侧的典型用法：
+```zig
+var buf: [256]u8 = undefined;
+const msg = try init.formatInitError(&buf, err, .{ .api_key_env = entry.api_key_env, .model_spec = cfg.default_model });
+printStderr(io, msg);
+```
 
 ### 5. CLI App 精简
 
