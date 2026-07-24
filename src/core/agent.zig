@@ -100,6 +100,11 @@ pub const AgentLoop = struct {
         self._aborted = true;
     }
 
+    /// Swap the session reference — used by web frontend for per-request session isolation.
+    pub fn setSession(self: *AgentLoop, session: *session_mod.Session) void {
+        self.session_ref = session;
+    }
+
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,

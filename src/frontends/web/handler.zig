@@ -156,7 +156,10 @@ fn handleSessionCreate(ctx: *Context, request: *std.http.Server.Request, a: std.
     var session = try session_mod.Session.init(ctx.allocator, ctx.io, ctx.config.default_model);
     defer session.deinit();
     try session.flush();
-    try respondJson(request, "{\"status\":\"created\"}");
+    const id = if (session.path) |p| std.fs.path.stem(p) else "new";
+    var buf: [256]u8 = undefined;
+    const body = try std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\"}}", .{ id, session.name, session.model });
+    try respondJson(request, body);
     _ = a;
 }
 
@@ -171,6 +174,9 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
     const prompt = extractPrompt(target) orelse return err_mod.respondError(request, .bad_request, "missing ?prompt= parameter", ctx.allocator);
     try session.append(.{ .role = .user, .content = prompt });
 
+    const agent: *agent_mod.AgentLoop = @ptrCast(@alignCast(ctx.agent));
+    agent.setSession(&session);
+
     const sw: *sse.SseWriter = @ptrCast(@alignCast(ctx.sse_writer orelse return err_mod.respondError(request, .internal_error, "SSE writer not available", ctx.allocator)));
     try sw.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\nCache-Control: no-cache\r\n\r\n");
 
@@ -181,15 +187,17 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
     const phase_cb = sse.createPhaseWriter(&sse_state);
     const tool_cb = sse.createToolDisplay(&sse_state);
 
-    const agent: *agent_mod.AgentLoop = @ptrCast(@alignCast(ctx.agent));
     const result = agent.runTurn(tool_cb, phase_cb) catch |err| {
         const err_msg = @errorName(err);
         var buf: [256]u8 = undefined;
         const payload = std.fmt.bufPrint(&buf, "{{\"code\":\"api_error\",\"message\":\"{s}\"}}", .{err_msg}) catch "{}";
         sse_state.writeFrame("error", payload) catch {};
         sse_state.writeFrame("done", "{}") catch {};
+        session.flush() catch {};
         return;
     };
+
+    session.flush() catch {};
 
     var done_buf: [64]u8 = undefined;
     const msg = try std.fmt.bufPrint(&done_buf, "{{\"new_messages\":{d}}}", .{result.new_message_count});
