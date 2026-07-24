@@ -1,5 +1,6 @@
 const std = @import("std");
 const init_mod = @import("../init.zig");
+const config_mod = @import("../../config.zig");
 const agent_mod = @import("../../core/agent.zig");
 const signal = @import("../../util/signal.zig");
 const handler = @import("handler.zig");
@@ -41,7 +42,11 @@ pub fn main(process: std.process.Init) !void {
     };
     defer state.deinit();
 
-    var agent = agent_mod.AgentLoop.init(gpa, io, &state.provider, state.registry, &state.session, state.config.max_tool_rounds, state.project_root, 0, .{});
+    const model = config_mod.resolveModel(&state.config, state.config.default_model) catch {
+        printStderr(io, "z-agent-core: error: cannot resolve model\n");
+        return;
+    };
+    var agent = agent_mod.AgentLoop.init(gpa, io, &state.provider, state.registry, &state.session, state.config.max_tool_rounds, state.project_root, model.context_window, .{});
 
     var ctx = handler.Context{
         .io = io,

@@ -3,7 +3,6 @@ const types = @import("../../types.zig");
 const config_mod = @import("../../config.zig");
 const session_mod = @import("../../core/session.zig");
 const agent_mod = @import("../../core/agent.zig");
-const init_mod = @import("../init.zig");
 const sse = @import("sse.zig");
 const err_mod = @import("error.zig");
 

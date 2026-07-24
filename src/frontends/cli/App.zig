@@ -704,15 +704,6 @@ pub const App = struct {
     }
 };
 
-fn findProviderEntry(providers: []const types.ProviderEntry, spec: []const u8) ?types.ProviderEntry {
-    const slash = std.mem.indexOfScalar(u8, spec, '/') orelse return null;
-    const provider_name = spec[0..slash];
-    for (providers) |p| {
-        if (std.mem.eql(u8, p.name, provider_name)) return p;
-    }
-    return null;
-}
-
 fn spRebuild(ctx: ?*anyopaque) anyerror!void {
     const self: *App = @ptrCast(@alignCast(ctx.?));
     if (!self._env_changed) return;
@@ -778,20 +769,6 @@ fn buildPromptString(
         return try std.fmt.allocPrint(allocator, "{s}\n<project_context>\n{s}\n</project_context>\n", .{ result, ctx });
     }
     return if (std.mem.eql(u8, result, prompt)) try allocator.dupe(u8, result) else result;
-}
-
-fn formatDate(allocator: std.mem.Allocator, epoch_s: i64) ![]const u8 {
-    const z = @divFloor(epoch_s, 86400) + 719468;
-    const era = @divFloor(if (z >= 0) z else z - 146096, 146097);
-    const doe = @as(u64, @intCast(z - era * 146097));
-    const yoe = @as(u64, @intCast((doe - doe / 1460 + doe / 36524 - doe / 146096) / 365));
-    const y = @as(i64, @intCast(yoe)) + @as(i64, @intCast(era * 400));
-    const doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    const mp = (5 * doy + 2) / 153;
-    const d = doy - (153 * mp + 2) / 5 + 1;
-    const m = if (mp < 10) mp + 3 else mp - 9;
-    const year = if (m <= 2) y + 1 else y;
-    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, m, d });
 }
 
 fn formatToken(n: u32, buf: []u8) ![]const u8 {
