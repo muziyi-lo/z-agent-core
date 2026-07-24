@@ -212,7 +212,9 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
 fn loadSession(ctx: *Context, id: []const u8) !session_mod.Session {
     const sessions_dir = try std.fs.path.join(ctx.allocator, &.{ ctx.project_root, ".zagent", "sessions" });
     defer ctx.allocator.free(sessions_dir);
-    const path = try std.fs.path.join(ctx.allocator, &.{ sessions_dir, id });
+    const filename = try std.fmt.allocPrint(ctx.allocator, "{s}.jsonl", .{id});
+    defer ctx.allocator.free(filename);
+    const path = try std.fs.path.join(ctx.allocator, &.{ sessions_dir, filename });
     defer ctx.allocator.free(path);
     return session_mod.Session.load(ctx.allocator, ctx.io, path);
 }
