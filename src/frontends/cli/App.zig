@@ -94,15 +94,41 @@ pub const App = struct {
         render.init();
         signal.init(io);
 
-        const project_root = config_mod.findZagentRoot(allocator, io) orelse blk: {
-            var pr_buf: [4096]u8 = undefined;
-            const len = Io.Dir.cwd().realPath(io, &pr_buf) catch return error.NoProjectRoot;
-            break :blk try allocator.dupe(u8, pr_buf[0..len]);
-        };
+        const init_mod = @import("../init.zig");
+        var state = try init_mod.init(allocator, io, .{
+            .api_key_override = null,
+        });
+        errdefer state.deinit();
+
+        if (model_override) |spec| {
+            const duped = try allocator.dupe(u8, spec);
+            state.config.default_model = duped;
+        }
+
+        {
+            var sbuf: [256]u8 = undefined;
+            var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
+            var md: [128]u8 = undefined;
+            var pd: [64]u8 = undefined;
+            const model = config_mod.resolveModel(&state.config, state.config.default_model) catch unreachable;
+            sw.interface.print("z-agent-core v{s} | {s} | {s}\n", .{
+                types.VERSION,
+                config_mod.formatModelDisplay(model.name, &md),
+                config_mod.formatProviderDisplay(model.provider, &pd),
+            }) catch {};
+            sw.interface.flush() catch {};
+        }
+
+        if (thinking_level) |tl| {
+            state.provider.config.compat.thinking_level = tl;
+        }
+
+        const tools = try state.registry.toTools(allocator);
+        errdefer allocator.free(tools);
 
         var project_context: ?[]const u8 = null;
         readAgents: {
-            const ap = std.fs.path.join(allocator, &.{ project_root, "AGENTS.md" }) catch break :readAgents;
+            const ap = std.fs.path.join(allocator, &.{ state.project_root, "AGENTS.md" }) catch break :readAgents;
             defer allocator.free(ap);
             const f = Io.Dir.cwd().openFile(io, ap, .{ .mode = .read_only }) catch break :readAgents;
             defer f.close(io);
@@ -117,74 +143,25 @@ pub const App = struct {
             project_context = content[0..n];
         }
 
-        var cfg = try config_mod.Config.load(allocator, project_root, io);
-        if (model_override) |spec| {
-            const duped = try allocator.dupe(u8, spec);
-            cfg.default_model = duped;
-        }
-
-        _ = config_mod.loadDotEnv(allocator, project_root, io) catch {}; // .env is optional
-
-        const model = try config_mod.resolveModel(&cfg, cfg.default_model);
-        {
-            var sbuf: [256]u8 = undefined;
-            var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
-            var md: [128]u8 = undefined;
-            var pd: [64]u8 = undefined;
-            sw.interface.print("z-agent-core v{s} | {s} | {s}\n", .{
-                types.VERSION,
-                config_mod.formatModelDisplay(model.name, &md),
-                config_mod.formatProviderDisplay(model.provider, &pd),
-            }) catch {};
-            sw.interface.flush() catch {};
-        }
-        const entry = findProviderEntry(cfg.providers, cfg.default_model) orelse {
-            var sbuf: [256]u8 = undefined;
-            var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
-            sw.interface.print("z-agent-core: Error: provider for '{s}' not found\n", .{cfg.default_model}) catch {}; // stderr gone
-            sw.interface.flush() catch {};
-            return error.ProviderNotFound;
-        };
-
-        var provider = provider_mod.Provider.init(allocator, entry, model, null, io) catch |err| {
-            if (err == error.ApiKeyNotSet) {
-                var sbuf: [256]u8 = undefined;
-                var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
-                sw.interface.print("z-agent-core: Error: {s} environment variable not set\n", .{entry.api_key_env}) catch {};
-                sw.interface.flush() catch {};
-            }
-            return err;
-        };
-        if (thinking_level) |tl| {
-            provider.config.compat.thinking_level = tl;
-        }
-        const registry = registry_mod.buildRegistry();
-        const tools = try registry.toTools(allocator);
-        errdefer allocator.free(tools);
-
-        var session = try session_mod.Session.init(allocator, io, cfg.default_model);
-        errdefer session.deinit();
-
-        const session_dir = try std.fs.path.join(allocator, &.{ project_root, ".zagent", "sessions" });
-
+        const model_ctx = config_mod.resolveModel(&state.config, state.config.default_model) catch unreachable;
         return App{
             .allocator = allocator,
             .io = io,
-            .cfg = cfg,
-            .provider = provider,
-            .registry = registry,
+            .cfg = state.config,
+            .provider = state.provider,
+            .registry = state.registry,
             .tools = tools,
-            .session = session,
+            .session = state.session,
             .agent = undefined,
-            .project_root = project_root,
+            .project_root = state.project_root,
             .project_context = project_context,
             .single_prompt = single_prompt,
-            .session_dir = session_dir,
-            .base_prompt = cfg.base_prompt,
+            .session_dir = state.session_dir,
+            .base_prompt = state.config.base_prompt,
             .render_ctx = render.RenderContext{ .colorize = render.isColorized() },
             .tool_display = render.ToolDisplay{ .ctx = undefined, .writer = undefined },
             .line_buffer = undefined,
-            .model_context = model.context_window,
+            .model_context = model_ctx.context_window,
         };
     }
 

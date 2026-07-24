@@ -2,6 +2,7 @@ const std = @import("std");
 const types = @import("../../types.zig");
 const config_mod = @import("../../config.zig");
 const session_mod = @import("../../core/session.zig");
+const init_mod = @import("../init.zig");
 const err_mod = @import("error.zig");
 
 const AlignedU8 = std.ArrayListAligned(u8, null);
@@ -13,7 +14,6 @@ pub const Context = struct {
     config: *config_mod.Config,
     agent: *anyopaque,
     provider: *anyopaque,
-    session_list: []const types.SessionInfo,
 };
 
 pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, request: *std.http.Server.Request) !void {
@@ -89,10 +89,13 @@ fn handleProviderList(ctx: *Context, request: *std.http.Server.Request, a: std.m
 }
 
 fn handleSessionList(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
+    const sessions_dir = try std.fs.path.join(a, &.{ ctx.project_root, ".zagent", "sessions" });
+    const list = session_mod.list(a, ctx.io, sessions_dir) catch &.{};
+
     var buf: AlignedU8 = .empty;
     try buf.appendSlice(a, "[");
     var first = true;
-    for (ctx.session_list) |s| {
+    for (list) |s| {
         if (!first) try buf.appendSlice(a, ",");
         first = false;
         var item: [256]u8 = undefined;

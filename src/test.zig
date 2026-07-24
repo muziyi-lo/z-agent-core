@@ -21,4 +21,5 @@ test {
     _ = @import("frontends/web/error.zig");
     _ = @import("frontends/web/api_types.zig");
     _ = @import("frontends/web/handler.zig");
+    _ = @import("frontends/init.zig");
 }

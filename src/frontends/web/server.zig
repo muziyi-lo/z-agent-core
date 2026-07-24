@@ -1,13 +1,9 @@
 const std = @import("std");
-const config_mod = @import("../../config.zig");
-const session_mod = @import("../../core/session.zig");
+const init_mod = @import("../init.zig");
 const agent_mod = @import("../../core/agent.zig");
-const provider_mod = @import("../../io/provider.zig");
-const registry_mod = @import("../../tool/registry.zig");
 const types = @import("../../types.zig");
 const signal = @import("../../util/signal.zig");
 const handler = @import("handler.zig");
-const sse = @import("sse.zig");
 
 const Io = std.Io;
 
@@ -25,81 +21,43 @@ pub fn main(process: std.process.Init) !void {
     defer arg_iter.deinit();
     _ = arg_iter.next();
 
-    var root_arg: ?[]const u8 = null;
+    var root_override: ?[]const u8 = null;
     while (arg_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--root")) {
             if (arg_iter.next()) |val| {
-                root_arg = val;
+                root_override = val;
             }
         }
     }
+    if (root_override == null) {
+        root_override = process.environ_map.get("ZAGENT_ROOT");
+    }
 
-    const project_root = if (root_arg) |r| try findRootExplicit(gpa, r, io)
-        else if (process.environ_map.get("ZAGENT_ROOT")) |r| try findRootExplicit(gpa, r, io)
-    else config_mod.findZagentRoot(allocator, io) orelse blk: {
-        var buf: [4096]u8 = undefined;
-        const len = Io.Dir.cwd().realPath(io, &buf) catch {
-            printStderr(io, "z-agent-core: error: cannot resolve working directory\n");
-            return error.NoProjectRoot;
-        };
-        break :blk try allocator.dupe(u8, buf[0..len]);
-    };
-
-    var cfg = config_mod.Config.load(gpa, project_root, io) catch {
-        printStderr(io, "z-agent-core: error: cannot load config\n");
+    var state = init_mod.init(gpa, io, .{ .project_root = root_override }) catch |err| {
+        var buf: [init_mod.init_error_max_len]u8 = undefined;
+        const msg = init_mod.formatInitError(&buf, err, null, null) catch "z-agent-core: fatal init error";
+        printStderr(io, msg);
         return;
     };
-    defer cfg.deinit();
+    defer state.deinit();
 
-    _ = config_mod.loadDotEnv(allocator, project_root, io) catch {};
+    var agent = agent_mod.AgentLoop.init(gpa, io, &state.provider, state.registry, &state.session, state.config.max_tool_rounds, state.project_root, 0, .{});
 
-    const model = config_mod.resolveModel(&cfg, cfg.default_model) catch {
-        printStderr(io, "z-agent-core: error: cannot resolve default model\n");
-        return;
-    };
-
-    const entry = for (cfg.providers) |p| {
-        if (std.mem.eql(u8, p.name, model.provider)) break p;
-    } else {
-        printStderr(io, "z-agent-core: error: provider not found\n");
-        return;
-    };
-
-    var provider = provider_mod.Provider.init(gpa, entry, model, null, io) catch |err| {
-        if (err == error.ApiKeyNotSet) {
-            printStderrFmt(io, "z-agent-core: Error: {s} environment variable not set\n", .{entry.api_key_env});
-        } else {
-            printStderr(io, "z-agent-core: error: cannot create provider\n");
-        }
-        return;
-    };
-
-    const registry = registry_mod.buildRegistry();
-
-    const sessions_dir = try std.fs.path.join(allocator, &.{ project_root, ".zagent", "sessions" });
-    const session_list = session_mod.list(allocator, io, sessions_dir) catch blk: {
-        break :blk &[_]types.SessionInfo{};
-    };
-
-    var session = try session_mod.Session.init(gpa, io, cfg.default_model);
-    defer session.deinit();
-
-    var agent = agent_mod.AgentLoop.init(gpa, io, &provider, registry, &session, cfg.max_tool_rounds, project_root, model.context_window, .{});
+    printStderrFmt(io, "z-agent-core web server\n  -> http://localhost:{d}\n  -> Project root: {s}\n", .{ default_port, state.project_root });
 
     var ctx = handler.Context{
         .io = io,
         .allocator = gpa,
-        .project_root = project_root,
-        .config = &cfg,
+        .project_root = state.project_root,
+        .config = &state.config,
         .agent = &agent,
-        .provider = &provider,
-        .session_list = session_list,
+        .provider = &state.provider,
     };
 
     const addr = try Io.net.IpAddress.resolve(io, "127.0.0.1", default_port);
     var tcp_server = try addr.listen(io, .{ .reuse_address = true });
 
-    printStderrFmt(io, "z-agent-core web server\n  -> http://localhost:{d}\n  -> Project root: {s}\n  -> Sessions: {d} found\n", .{ default_port, project_root, session_list.len });
+    printStderrFmt(io, "z-agent-core web server\n  -> http://localhost:{d}\n  -> Project root: {s}\n", .{ default_port, state.project_root });
 
     while (true) {
         if (signal.isInterrupted()) break;
@@ -121,11 +79,6 @@ pub fn main(process: std.process.Init) !void {
             _ = request.respond("500 Internal Server Error", .{}) catch {};
         };
     }
-}
-
-fn findRootExplicit(allocator: std.mem.Allocator, path: []const u8, io: Io) ![]const u8 {
-    _ = io;
-    return allocator.dupe(u8, path);
 }
 
 fn printStderr(io: Io, msg: []const u8) void {
