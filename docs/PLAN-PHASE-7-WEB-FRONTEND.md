@@ -686,6 +686,7 @@ Invoke-WebRequest -Uri "https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.5/p
 | PATCH | `/api/session/:id` | 重命名 / 切换模型 |
 | POST | `/api/session/:id/fork` | fork session |
 | POST | `/api/session/:id/prompt` | **SSE 流**：绕过 `respond()`，手动写 `HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n` 到 stream writer，然后 PhaseWriterCb + ToolDisplayCb 直写 SSE 帧 |
+| GET | `/api/session/:id/message` | 消息列表（JSON） |
 | POST | `/api/session/:id/reset` | 重置 session |
 
 **权限审批（延后到 Phase 7.1）：**

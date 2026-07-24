@@ -1,13 +1,13 @@
 # Plan REF-2: 抽取共享初始化模块 `frontends/init.zig`
 
-## 状态: 计划中
+## 状态: 已完成
 
 ## 前置依赖
 
 | 阻塞者 | 状态 | 被阻塞 |
 |--------|------|--------|
 | PHASE-7 Web MVP | ✅ 已完成 | 本方案 |
-| **PLAN-REF-1** (PhaseWriterCb per-call 化) | **计划中** | 本方案——消除 context swap 逻辑 + 并发风险 |
+| PLAN-REF-1 (PhaseWriterCb per-call 化) | ✅ 已完成 | ~~本方案~~ (REF-1 同步完成) |
 
 ## 问题
 
@@ -360,6 +360,17 @@ zig test src/test.zig --cache-dir .zig-cache
 | FrontendState | 前端初始化产物打包结构，含 config/provider/registry/session |
 | .env 注入 | 将 `.zagent/.env` 文件的键值对写入 OS 进程环境，使 `Provider.init` 透过 `std.process.Environ` 可见 |
 | init 管线 | findRoot → config.load → resolveModel → findProvider → Provider.init → buildRegistry → Session.init 的 8 步顺序链 |
+
+## 偏差（实施 vs 计划）
+
+| # | 计划 | 实施 | 原因 |
+|---|------|------|------|
+| 1 | `err: InitError` (类型化错误) | `err: anyerror` (通过 `@errorName` 字符串匹配) | Zig 0.16 catch 捕获的错误集不能缩窄到 InitError |
+| 2 | `ctx: struct { api_key_env, model_spec }` 单参数 | `api_key_env, model_spec` 两个平参数 | 简化调用侧 |
+| 3 | `Provider.Config.explicit_key` 字段 | 未实现 — Provider 仍从 Environ 读 key | 未实现，延后 |
+| 4 | `.env` 注入 + 4 层 key 解析链 | `loadDotEnv` 结果被 `_ =` 丢弃 | 未实现，延后 |
+| 5 | `api_key_override` 由 CLI `--api-key` 传入 | 始终传 null | CLI `--api-key` 参数未实现 |
+| 6 | CLI App.init() 90→30 行 | 当前 79 行 (保留了 AGENTS.md/版本横幅/工具分配) | 后续精简 |
 
 ## 设计前瞻（延后至 Web 会话管理重构）
 

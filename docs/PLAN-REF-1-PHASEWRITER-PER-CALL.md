@@ -1,6 +1,6 @@
 # Plan REF-1: PhaseWriterCb per-call 化 — 消除共享 context 字段
 
-## 状态: 计划中
+## 状态: 已完成
 
 ## 前置依赖
 
