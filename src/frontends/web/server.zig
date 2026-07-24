@@ -47,25 +47,31 @@ pub fn main(process: std.process.Init) !void {
 
     var cfg = config_mod.Config.load(gpa, project_root, io) catch {
         printStderr(io, "z-agent-core: error: cannot load config\n");
-        return error.ConfigLoadFailed;
+        return;
     };
     defer cfg.deinit();
 
+    _ = config_mod.loadDotEnv(allocator, project_root, io) catch {};
+
     const model = config_mod.resolveModel(&cfg, cfg.default_model) catch {
         printStderr(io, "z-agent-core: error: cannot resolve default model\n");
-        return error.ModelResolveFailed;
+        return;
     };
 
     const entry = for (cfg.providers) |p| {
         if (std.mem.eql(u8, p.name, model.provider)) break p;
     } else {
         printStderr(io, "z-agent-core: error: provider not found\n");
-        return error.ProviderNotFound;
+        return;
     };
 
-    var provider = provider_mod.Provider.init(gpa, entry, model, null, io, sse.webPhaseWriterCb()) catch {
-        printStderr(io, "z-agent-core: error: cannot create provider (API key not set?)\n");
-        return error.ProviderCreateFailed;
+    var provider = provider_mod.Provider.init(gpa, entry, model, null, io, sse.webPhaseWriterCb()) catch |err| {
+        if (err == error.ApiKeyNotSet) {
+            printStderrFmt(io, "z-agent-core: Error: {s} environment variable not set\n", .{entry.api_key_env});
+        } else {
+            printStderr(io, "z-agent-core: error: cannot create provider\n");
+        }
+        return;
     };
 
     const registry = registry_mod.buildRegistry();
