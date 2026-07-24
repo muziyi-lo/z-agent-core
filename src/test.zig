@@ -10,10 +10,15 @@ test {
     _ = @import("tool/grep.zig");
     _ = @import("tool/glob.zig");
     _ = @import("tool/skill.zig");
+    _ = @import("tool/edit.zig");
     _ = @import("util/text.zig");
     _ = @import("util/path.zig");
     _ = @import("util/signal.zig");
     _ = @import("toml.zig");
     _ = @import("frontends/cli/render.zig");
     _ = @import("frontends/cli/App.zig");
+    _ = @import("frontends/web/sse.zig");
+    _ = @import("frontends/web/error.zig");
+    _ = @import("frontends/web/api_types.zig");
+    _ = @import("frontends/web/handler.zig");
 }

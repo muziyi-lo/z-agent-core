@@ -3,25 +3,23 @@
 ## 实施顺序
 
 ```
-PHASE-3 (compat layer)  ← 下一项（计划文档已完善）
-    ↓
-PHASE-4 (cache-first + reasoning 分离) （计划文档已完善）
+PHASE-7 (Web 前端)  ← 当前（计划文档已创建）
     ↓
 PHASE-5 (webfetch) — 独立于架构，可随时实施（计划文档已完善）
     ↓
-新前端 (TUI/Web) （架构设计阶段）
+PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 ```
 
 ## 计划文档状态
 
-| 计划 | 文档 | 详细度 | 状态 |
-|------|------|--------|------|
-| PHASE-3 | `docs/PLAN-PHASE-3-COMPAT.md` (~430行) | 含数据结构定义、伪代码、12 个测试用例 | 计划中 |
-| PHASE-4 | `docs/PLAN-PHASE-4-CACHE.md` (~350行) | 含数据结构定义、伪代码、9 个测试用例 | 计划中 |
-| PHASE-5 | `docs/PLAN-PHASE-5-WEBFETCH.md` (~270行) | 含完整代码、注册方式、5 个测试用例 | 计划中 |
-| PHASE-6 | `docs/PLAN-PHASE-6-TUI.md` (~210行) | 架构设计 + 框架选型（详细实现待 vaxis 验证后） | 架构设计 |
-| MCP | 无文档 | — | 未计划 |
-| Web 前端 | 无独立文档（在 PHASE-6 中作为备选方案提及） | — | 未计划 |
+| 计划 | 文档 | 状态 |
+|------|------|------|
+| PHASE-3 | `docs/0.2.2/PLAN-PHASE-3-COMPAT.md` | ✅ 已完成 (v0.2.2) |
+| PHASE-4 | `docs/0.2.2/PLAN-PHASE-4-CACHE.md` | ✅ 已完成 (v0.2.2) |
+| PHASE-7 | `docs/PLAN-PHASE-7-WEB-FRONTEND.md` | 实施中 (MVP — `zig build -- --web` 可用，SSE 流式待实现) |
+| PHASE-5 | `docs/PLAN-PHASE-5-WEBFETCH.md` | 计划中 |
+| PHASE-6 | `docs/PLAN-PHASE-6-TUI.md` | 架构设计 |
+| MCP | 无文档 | 未计划 |
 
 ## Done (2026-07-16)
 

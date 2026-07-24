@@ -17,12 +17,15 @@ pub fn main(process: std.process.Init) !void {
     var show_help = false;
     var show_version = false;
     var list_models = false;
+    var launch_web = false;
 
     while (arg_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             show_help = true;
         } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
             show_version = true;
+        } else if (std.mem.eql(u8, arg, "--web")) {
+            launch_web = true;
         } else if (std.mem.eql(u8, arg, "--prompt")) {
             if (arg_iter.next()) |val| {
                 single_prompt = try allocator.dupe(u8, val);
@@ -40,6 +43,11 @@ pub fn main(process: std.process.Init) !void {
         }
     }
 
+    if (launch_web) {
+        const web = @import("../web/server.zig");
+        return web.main(process);
+    }
+
     if (show_help) {
         var sbuf: [512]u8 = undefined;
         var sw: std.Io.File.Writer = .init(.stderr(), io, &sbuf);
@@ -50,6 +58,8 @@ pub fn main(process: std.process.Init) !void {
             \\  --model <spec>     指定模型，格式: provider/model_id
             \\  --thinking <level> 设置思考强度: none|minimal|low|medium|high|xhigh|max
             \\  --list-models       列出所有可用模型
+            \\  --web              启动 Web 前端 (http://localhost:8090)
+            \\  --root <path>      指定项目根目录
             \\  --help, -h         显示此帮助
             \\  --version, -v      显示版本号
             \\

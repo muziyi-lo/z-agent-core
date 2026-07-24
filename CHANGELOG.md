@@ -1,6 +1,26 @@
 # Changelog
 
-## [0.2.2] — 未完成
+## [0.2.3] — 未完成
+
+### Added
+- **Web 前端 MVP**: `src/frontends/web/` — 基于 `std.http.Server` + `@embedFile` 的单二进制 Web UI
+  - `server.zig`: TCP 监听 + `--web` / `--root` 入口，项目根目录三级解析 (CLI参数/环境变量/CWD查找)
+  - `handler.zig`: 线性路由分发，10 个 RESTful 端点 (health/model/provider/session CRUD)，per-request arena 防泄漏
+  - `sse.zig`: SSE 帧构造 + `PhaseWriterCb`/`ToolDisplayCb` 回调映射 (9 tests)
+  - `error.zig`: 统一 JSON 错误响应 (`{error:{code,message}}`, 5 种 ErrorCode)
+  - `api_types.zig`: 请求/响应 struct
+  - `index.html`: 侧边栏 + 对话流单页 Web UI
+  - `vendor/`: Inter/JetBrainsMono 字体 + marked.js + highlight.js + DOMPurify (~819KB, @embedFile 内联)
+- **CLI**: `--web` 启动 Web 前端, `--root <path>` 指定项目根目录, `--help` 更新
+- **测试**: +9 SSE 测试 + 3 error 测试 (via test.zig)
+- **合计**: 197 test blocks (196 pass, 1 pre-existing fail)
+
+### Known Gaps
+- SSE 流式端点 (`POST /api/session/:id/prompt`) 返回 "not yet implemented" — `Io.net.Stream.Writer` 类型桥接待解决
+- 并发连接 (Group.concurrent) 降级为顺序 accept，MVP 单用户无需求
+- PATCH/fork/reset session 端点均返回 501
+
+## [0.2.2] — 2026-07-23
 
 ### Added
 - **协议适配层**: types.zig 新增 ModelCompat/Override、ThinkingFormat(7种)/ThinkingLevel(7级)/MaxTokensField、detectCompat() URL 启发式推断
@@ -15,26 +35,32 @@
 - **stream_options 400 自动回退**: 内部一次重试，!declined 守卫防无限循环
 - **/list 显示 session ID**: 三列格式 `{id} "{name}" {model}`，可直接 `/load <id>`
 - **single-shot 交互提示**: buildPromptString 新增 `single_shot` 参数，单次模式向 `<env>` 块注入 "no user interaction possible" 提示
-- **测试**: +10 个 buildJsonBody compat 测试、+6 个 types detectCompat 测试、+4 个 config compat 测试、+3 个 bash 工具测试、+2 个 single-shot 提示测试、App.zig 加入 test.zig 导入
+- **测试**: +10 个 buildJsonBody compat 测试、+6 个 types detectCompat 测试、+4 个 config compat 测试、+3 个 bash 工具测试、+2 个 single-shot 提示测试、+4 个 edit 工具测试 (via test.zig)
+- **合计**: 185 个 test block（184 pass, 1 pre-existing fail）
 
 ### Changed
 - **流式相位**: 单 in_content_phase → thinking_started/text_started 双独立标志（修复 Qwen 闪烁 + 支持交错式推理）
 - **错误处理**: 增强溢出检测（usage+长度双估计 + 20K 预留缓冲）、classifyError 5 类体内容匹配、isRetryableBody/isRetryableError 扩增
 - **DEFAULT_TEMPLATE**: params_json → [models.compat] 子表 + thinking_level 顶层键
 - **Config**: 新增 resolveCompat() 合并函数、parseThinkingFormat/parseMaxTokensField 枚举解析
-- **lookupModel**: 倒序遍历替代正序 for，重复 (provider, id) 条目后写覆盖前写（用户可添加同名模型覆盖默认值）
-- **DEFAULT_TEMPLATE**: 补充 model provider 共享说明（空字符串 = 所有供应商共享）与重复覆盖规则注释
+- **lookupModel**: 倒序遍历替代正序 for，重复 (provider, id) 条目后写覆盖前写
 - **/ 命令输出标签**: /help、/list、/name、/new 输出统一使用 render.writeLabeled 添加彩色标签
 
 ### Fixed
-- **标签统一**: labelColor() 单一事实来源，writeLabelBegin/writeToolLabelOpen/writePrompt/ToolDisplay.begin 全部统一
-- **ANSI dim 污染**: 6 个标签函数防御性前置 `C.reset`（dim+white=灰色 bug）
-- **/list 与 /load 不一致**: /list 新增 ID 列（之前仅显示 name 无法加载）
-- **render.zig format 字符串参数数量**: writeLabelBegin 新增 reset 前置后补齐格式说明符
-- **ANSI 行尾冗余 C.reset**: renderLine 移除代码块/标题/引用块/行内格式末尾的 C.reset（避免终端边界伪影）
-- **Windows 盘符大小写**: normalize() 盘符统一转大写，修复小写盘符绝对路径被误判为逃逸（影响 read/write/edit/grep/glob/skill 全部工具）
+- 标签统一: labelColor() 单一事实来源
+- ANSI dim 污染: 6 个标签函数防御性前置 `C.reset`
+- /list 与 /load 不一致: /list 新增 ID 列
+- render.zig format 字符串参数数量: writeLabelBegin 补齐格式说明符
+- ANSI 行尾冗余 C.reset: renderLine 移除代码块/标题/引用块/行内格式末尾的 C.reset
+- Windows 盘符大小写: normalize() 盘符统一转大写
+- **FIX-1**: `build.zig` check-arch.mjs 路径 `../../` → `../`；AGENTS.md 路径和行数描述修正；REMAINING.md 标记 PHASE-3/4 完成；PLAN-PHASE-3/4-COMPAT/CACHE 状态头更新；edit.zig 加入 test.zig；清理空目录 src/crash-test.zig/
+- **FIX-2**: `build.zig` 删除 check step (Node.js 依赖) 和 test step (GPA 死锁)；60 行 → 30 行；README.md/AGENTS.md 命令描述更新；zig-dev skill 移除 build.zig 集成模板
 
-## [0.2.1] — 未完成
+### Refactored
+- **skill-forge v0.2.1 → v0.2.2**: P0 自检 + 审查清单新增跨工具链耦合检测
+- **zig-dev v1.0.1 → v1.0.2**: 移除 project-layout.md/setup.md/SKILL.md/test-pattern.md 中的 build.zig 集成模板
+
+## [0.2.1] — 2026-07-20
 
 ### Added
 - **OPT-6: 用量数据显示增强**
