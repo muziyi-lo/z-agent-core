@@ -146,14 +146,7 @@ pub const App = struct {
             return error.ProviderNotFound;
         };
 
-        const phase_writer_cb = provider_mod.PhaseWriterCb{
-            .context = null,
-            .begin_phase = pwBeginPhase,
-            .write_raw = pwWriteRaw,
-            .write_rendered = pwWriteRendered,
-            .end_phase = pwEndPhase,
-        };
-        var provider = provider_mod.Provider.init(allocator, entry, model, null, io, phase_writer_cb) catch |err| {
+        var provider = provider_mod.Provider.init(allocator, entry, model, null, io) catch |err| {
             if (err == error.ApiKeyNotSet) {
                 var sbuf: [256]u8 = undefined;
                 var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
@@ -235,9 +228,14 @@ pub const App = struct {
 
         var pw = render.PhaseWriter.init(display_w);
         var wc = WriterCtx{ .pw = &pw, .lb = &self.line_buffer, .writer = display_w };
-        if (self.provider.phase_writer) |*cb| {
-            cb.context = @ptrCast(@alignCast(&wc));
-        }
+
+        const phase_cb = provider_mod.PhaseWriterCb{
+            .context = @ptrCast(@alignCast(&wc)),
+            .begin_phase = pwBeginPhase,
+            .write_raw = pwWriteRaw,
+            .write_rendered = pwWriteRendered,
+            .end_phase = pwEndPhase,
+        };
 
         try render.writeLabeled(display_w, .user, prompt);
         try display_w.flush();
@@ -252,7 +250,7 @@ pub const App = struct {
             .render = render.ToolDisplay.renderCb,
         };
         self.tool_display.writer = display_w;
-        const result = self.agent.runTurn(tool_cb) catch |err| {
+        const result = self.agent.runTurn(tool_cb, phase_cb) catch |err| {
             if (err != error.OutOfMemory) {
                 self.rollbackTurn(pre_count);
             }
@@ -432,16 +430,20 @@ pub const App = struct {
         try self.session.append(.{ .role = .user, .content = line });
         _ = stdout.interface.write("\n") catch {};
 
-        if (self.provider.phase_writer) |*cb| {
-            cb.context = @ptrCast(@alignCast(wc));
-        }
+        const phase_cb = provider_mod.PhaseWriterCb{
+            .context = @ptrCast(@alignCast(wc)),
+            .begin_phase = pwBeginPhase,
+            .write_raw = pwWriteRaw,
+            .write_rendered = pwWriteRendered,
+            .end_phase = pwEndPhase,
+        };
         const tool_cb = agent_mod.ToolDisplayCb{
             .context = &self.tool_display,
             .begin_tool = render.ToolDisplay.beginCb,
             .render = render.ToolDisplay.renderCb,
         };
         self.tool_display.writer = &stdout.interface;
-        const result = self.agent.runTurn(tool_cb) catch |err| {
+        const result = self.agent.runTurn(tool_cb, phase_cb) catch |err| {
             if (err != error.OutOfMemory) {
                 self.rollbackTurn(pre_count);
             }

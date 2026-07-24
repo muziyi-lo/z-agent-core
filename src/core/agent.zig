@@ -143,9 +143,11 @@ pub const AgentLoop = struct {
 
     /// Execute one LLM turn. User message must already be in session.
     /// tool_display: callback struct for tool result rendering (null = headless).
+    /// phase_writer: callback struct for streaming phase events (null = silent).
     pub fn runTurn(
         self: *AgentLoop,
         tool_display: ?ToolDisplayCb,
+        phase_writer: ?provider.PhaseWriterCb,
     ) !RoundResult {
         if (self.lifecycle) |lc| {
             if (lc.on_turn_start) |cb| cb(lc.context);
@@ -220,13 +222,13 @@ pub const AgentLoop = struct {
 
             const msgs = self.session_ref.messages();
 
-            const raw_resp = blk: {
-                const result = if (self.chat_fn) |cf|
-                    cf(self.chat_ctx, &arena, self.io, msgs, tools)
-                else
-                    self.provider_ref.chatCompletionStreaming(&arena, self.io, msgs, tools);
-                break :blk result;
-            };
+        const raw_resp = blk: {
+            const result = if (self.chat_fn) |cf|
+                cf(self.chat_ctx, &arena, self.io, msgs, tools)
+            else
+                self.provider_ref.chatCompletionStreaming(&arena, self.io, msgs, tools, phase_writer);
+            break :blk result;
+        };
             const resp = raw_resp catch |err| {
                 const err_name = @errorName(err);
                 return switch (err) {
@@ -465,7 +467,7 @@ test "agent: runTurn stop" {
 
     try sess.append(.{ .role = .user, .content = "hi" });
 
-    const result = try agent.runTurn(null);
+    const result = try agent.runTurn(null, null);
 
     try std.testing.expectEqual(TurnFinish.stop, result.finish);
     try std.testing.expectEqual(@as(usize, 1), result.new_message_count);
@@ -513,7 +515,7 @@ test "agent: runTurn tool_calls" {
 
     try sess.append(.{ .role = .user, .content = "find zig files" });
 
-    const result = try agent.runTurn(null);
+    const result = try agent.runTurn(null, null);
 
     try std.testing.expectEqual(TurnFinish.stop, result.finish);
     try std.testing.expectEqual(@as(usize, 3), result.new_message_count);
@@ -565,7 +567,7 @@ test "agent: runTurn max_rounds" {
 
     try sess.append(.{ .role = .user, .content = "task" });
 
-    const result = try agent.runTurn(null);
+    const result = try agent.runTurn(null, null);
 
     try std.testing.expectEqual(TurnFinish.max_rounds, result.finish);
     try std.testing.expectEqual(@as(usize, 3), result.new_message_count);
@@ -612,7 +614,7 @@ test "agent: runTurn interrupted" {
 
     agent.abort();
 
-    const result = try agent.runTurn(null);
+    const result = try agent.runTurn(null, null);
 
     try std.testing.expectEqual(TurnFinish.interrupted, result.finish);
     try std.testing.expectEqual(@as(usize, 0), result.new_message_count);
@@ -649,7 +651,7 @@ test "agent: runTurn api_error" {
 
     try sess.append(.{ .role = .user, .content = "hi" });
 
-    const result = try agent.runTurn(null);
+    const result = try agent.runTurn(null, null);
 
     try std.testing.expectEqual(TurnFinish.api_error, result.finish);
     try std.testing.expectEqual(@as(usize, 0), result.new_message_count);
@@ -692,7 +694,7 @@ test "agent: runTurn appends to session" {
     const pre_len = sess.messages().len;
     try sess.append(.{ .role = .user, .content = "task" });
 
-    const result = try agent.runTurn(null);
+    const result = try agent.runTurn(null, null);
 
     const msgs = sess.messages();
     const new_msgs = msgs[pre_len + 1 ..];
@@ -771,7 +773,7 @@ test "agent: hooks before blocks execution" {
     agent.chat_ctx = &mock;
 
     try sess.append(.{ .role = .user, .content = "task" });
-    const result = try agent.runTurn(null);
+    const result = try agent.runTurn(null, null);
 
     try std.testing.expect(tc.before_called);
     try std.testing.expectEqual(TurnFinish.stop, result.finish);
@@ -807,7 +809,7 @@ test "agent: hooks before allows execution" {
     agent.chat_ctx = &mock;
 
     try sess.append(.{ .role = .user, .content = "task" });
-    const result = try agent.runTurn(null);
+    const result = try agent.runTurn(null, null);
 
     try std.testing.expect(tc.before_called);
     try std.testing.expectEqual(TurnFinish.stop, result.finish);
@@ -842,7 +844,7 @@ test "agent: hooks after fires on success" {
     agent.chat_ctx = &mock;
 
     try sess.append(.{ .role = .user, .content = "task" });
-    _ = try agent.runTurn(null);
+    _ = try agent.runTurn(null, null);
 
     try std.testing.expect(tc.after_called);
 }
@@ -873,7 +875,7 @@ test "agent: abort before runTurn returns interrupted" {
     try sess.append(.{ .role = .user, .content = "hi" });
 
     agent.abort();
-    const result = try agent.runTurn(null);
+    const result = try agent.runTurn(null, null);
 
     try std.testing.expectEqual(TurnFinish.interrupted, result.finish);
     try std.testing.expectEqual(@as(usize, 0), result.new_message_count);
@@ -905,11 +907,11 @@ test "agent: abort resets on next runTurn" {
 
     try sess.append(.{ .role = .user, .content = "hi" });
     agent.abort();
-    const r1 = try agent.runTurn(null);
+    const r1 = try agent.runTurn(null, null);
     try std.testing.expectEqual(TurnFinish.interrupted, r1.finish);
 
     try sess.append(.{ .role = .user, .content = "hi again" });
-    const r2 = try agent.runTurn(null);
+    const r2 = try agent.runTurn(null, null);
     try std.testing.expectEqual(TurnFinish.stop, r2.finish);
 }
 
@@ -940,7 +942,7 @@ test "agent: lifecycle on_turn_start fires" {
     agent.chat_ctx = &mock;
 
     try sess.append(.{ .role = .user, .content = "hi" });
-    _ = try agent.runTurn(null);
+    _ = try agent.runTurn(null, null);
 
     try std.testing.expect(tc.start_called);
 }
@@ -970,7 +972,7 @@ test "agent: lifecycle on_turn_end fires" {
     agent.chat_ctx = &mock;
 
     try sess.append(.{ .role = .user, .content = "hi" });
-    _ = try agent.runTurn(null);
+    _ = try agent.runTurn(null, null);
 
     try std.testing.expect(tc.end_called);
     try std.testing.expectEqual(TurnFinish.stop, tc.end_finish);

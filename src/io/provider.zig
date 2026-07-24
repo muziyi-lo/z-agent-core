@@ -17,7 +17,6 @@ pub const PhaseWriterCb = struct {
 /// OpenAI-compatible API provider. Owns api_key (allocated by init).
 pub const Provider = struct {
     config: Config,
-    phase_writer: ?PhaseWriterCb = null,
 
     pub const Config = struct {
         base_url: []const u8,
@@ -55,7 +54,6 @@ pub const Provider = struct {
         model: *const types.Model,
         vendor_override: ?Vendor,
         io: std.Io,
-        phase_writer: ?PhaseWriterCb,
     ) !Provider {
         _ = io;
         const vendor = if (vendor_override) |v| v else detectVendor(entry.base_url);
@@ -84,7 +82,6 @@ pub const Provider = struct {
                 .compat = resolved_compat,
                 .stream_options_declined = false,
             },
-            .phase_writer = phase_writer,
         };
     }
 
@@ -96,8 +93,9 @@ pub const Provider = struct {
         io: std.Io,
         messages: []const types.Message,
         tools: ?[]const types.Tool,
+        phase_writer: ?PhaseWriterCb,
     ) !types.ProviderResponse {
-        return callWithRetry(self, arena, io, messages, tools);
+        return callWithRetry(self, arena, io, messages, tools, phase_writer);
     }
 
     fn callWithRetry(
@@ -106,6 +104,7 @@ pub const Provider = struct {
         io: std.Io,
         messages: []const types.Message,
         tools: ?[]const types.Tool,
+        phase_writer: ?PhaseWriterCb,
     ) !types.ProviderResponse {
         const max_retries: u32 = 5;
         var attempt: u32 = 0;
@@ -119,7 +118,7 @@ pub const Provider = struct {
                     5 => 8000,
                     else => unreachable,
                 };
-                if (self.phase_writer) |pw| {
+                if (phase_writer) |pw| {
                     var status_buf: [64]u8 = undefined;
                     const status = std.fmt.bufPrint(&status_buf, "\n[Retry {d}/{d} — waiting {d}s...]\n", .{ attempt, max_retries, @divTrunc(delay_ms, 1000) }) catch "[Retry...]\n";
                     pw.write_rendered(pw.context, status);
@@ -137,7 +136,7 @@ pub const Provider = struct {
                     _ = std.c.nanosleep(&ts, null);
                 }
             }
-            return chatCompletionStreamingOnce(self, arena, io, messages, tools) catch |err| {
+            return chatCompletionStreamingOnce(self, arena, io, messages, tools, phase_writer) catch |err| {
                 if (attempt >= max_retries) return err;
                 switch (err) {
                     error.Interrupted, error.ApiError => return err,
@@ -154,9 +153,9 @@ pub const Provider = struct {
         io: std.Io,
         messages: []const types.Message,
         tools: ?[]const types.Tool,
+        pw: ?PhaseWriterCb,
     ) !types.ProviderResponse {
         const alloc = arena.allocator();
-        const pw = self.phase_writer;
 
         const url = if (std.mem.endsWith(u8, self.config.base_url, "/chat/completions"))
             self.config.base_url
@@ -1172,7 +1171,7 @@ test "init missing key returns ApiKeyNotSet" {
         .params_json = null,
         .input = &.{.text},
     };
-    try testing.expectError(error.ApiKeyNotSet, Provider.init(testing.allocator, entry, &model, null, testing.io, null));
+    try testing.expectError(error.ApiKeyNotSet, Provider.init(testing.allocator, entry, &model, null, testing.io));
 }
 
 test "SSE parse data:DONE" {

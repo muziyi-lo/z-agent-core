@@ -65,7 +65,7 @@ pub fn main(process: std.process.Init) !void {
         return;
     };
 
-    var provider = provider_mod.Provider.init(gpa, entry, model, null, io, sse.webPhaseWriterCb()) catch |err| {
+    var provider = provider_mod.Provider.init(gpa, entry, model, null, io) catch |err| {
         if (err == error.ApiKeyNotSet) {
             printStderrFmt(io, "z-agent-core: Error: {s} environment variable not set\n", .{entry.api_key_env});
         } else {

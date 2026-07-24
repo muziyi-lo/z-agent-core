@@ -98,10 +98,9 @@ fn generateSummary(
 
     var temp_provider = provider_mod.Provider{
         .config = provider.config,
-        .phase_writer = null,
     };
 
-    const resp = try temp_provider.chatCompletionStreaming(&arena, io, summary_msgs.items, null);
+    const resp = try temp_provider.chatCompletionStreaming(&arena, io, summary_msgs.items, null, null);
     if (resp.content) |c| {
         return allocator.dupe(u8, c);
     }
