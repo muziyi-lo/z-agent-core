@@ -78,7 +78,16 @@ CLI 和 Web 都调用同一函数，区别仅在 `phase_writer_cb` 不同（CLI 
 2. `.zagent/.env` 文件中的值 — 仅在系统环境不存在时注入
 3. 无任何来源 → `error.ApiKeyNotSet`
 
-**实现**：遍历 `loadDotEnv` 返回的 HashMap，对每个 key 检查系统环境是否已存在。若已存在则跳过（不覆盖），若不存在则注入。符合 Docker Compose、Node.js dotenv、Python-dotenv 等行业标准。
+**实现**：`init()` 在调用 `Provider.init` 之前完成密钥解析，按优先级逐层检查：
+
+```
+1. opts.api_key_override  →  注入 env（Provider.init 通过 Environ 可见）
+2. shell 环境变量已存在     →  跳过（不覆盖）
+3. .zagent/.env 有值        →  注入 env
+4. 全部为空                  →  返回 error.ApiKeyNotSet
+```
+
+关键：解析逻辑放在 `init()` 中（而非 Provider 内部），保证 CLI `--api-key` 和 `.env` 文件在 Provider 读取环境变量之前已被注入。Provider.init 签名不变（仍从 Environ 读取），`init()` 负责确保 Environ 中存在所需值。
 
 | 方案 | 优点 | 缺点 |
 |------|------|------|
@@ -169,14 +178,15 @@ Web `server.zig.main()` 同样精简，`main()` 总长从 ~115 行 → ~60 行�
 管线顺序（从 CLI App.zig:97-175 提取）：
 1. resolve project_root (参数 → ZAGENT_ROOT env → findZagentRoot → CWD)
 2. `Config.load`
-3. `loadDotEnv` → 注入 env（新增）
-4. `resolveModel`
-5. find provider entry
-6. `Provider.init`
-7. `buildRegistry`
-8. `Session.init`
-9. `session_dir = join(project_root, ".zagent", "sessions")`
-10. `session_mod.list` (失败返回空列表)
+3. `loadDotEnv` → 解析 .env 到 HashMap
+4. **密钥解析**（新增核心逻辑）：`api_key_override` → shell env → .env → `ApiKeyNotSet`
+5. `resolveModel`
+6. find provider entry
+7. `Provider.init`（此时 Environ 中已有 key，步骤 4 保证）
+8. `buildRegistry`
+9. `Session.init`
+10. `session_dir = join(project_root, ".zagent", "sessions")`
+11. `session_mod.list` (失败返回空列表)
 
 ### 步骤 2: 修改 `src/frontends/cli/App.zig`
 
@@ -209,20 +219,22 @@ zig test src/test.zig --cache-dir .zig-cache
 
 | 测试场景 | 预期结果 |
 |----------|----------|
-| `zig build run` (CLI, 无 API key) | `Error: DEEPSEEK_API_KEY environment variable not set`，无栈回溯 |
-| `zig build run -- --web` (无 API key) | 同上消息，无栈回溯 |
-| `zig build run` (CLI, API key 已设) | 正常启动 REPL |
-| `zig build run -- --web` (API key 已设) | 正常启动 HTTP 服务 |
-| `.zagent/.env` 含 `DEEPSEEK_API_KEY=sk-xxx` | Provider.init 能读到 key（无需 shell export） |
-| `init.zig test` | 4 个 test blocks 全部 pass |
+| `zig build run` (CLI, 无任何 key 来源) | `Error: DEEPSEEK_API_KEY environment variable not set`，无栈回溯 |
+| `zig build run -- --api-key sk-test` (shell 无 key) | **正常启动**（CLI 参数注入 env，Provider 能读到） |
+| `zig build run -- --web` (无 key) | `Error: DEEPSEEK_API_KEY environment variable not set`，服务不启动 |
+| `zig build run -- --web --api-key sk-test` (shell 无 key) | **正常启动** HTTP 服务 |
+| shell 有 `DEEPSEEK_API_KEY=sk-shell`，`--api-key sk-cli` | **CLI 参数值生效**（最高优先级） |
+| `.zagent/.env` 含 `DEEPSEEK_API_KEY=sk-dotenv`，shell 无 key | **.env 值生效**（注入 env 后 Provider 读取） |
+| shell 有 key + .env 也有 key | **shell 值生效**（已存在不覆盖） |
 
 ## 风险
 
 | 风险 | 概率 | 缓解 |
 |------|------|------|
-| 0.16 `std.process.Environ` 不支持写入 | 中 | 降级为方案 B：给 Provider.init 加可选 `env_values: ?std.StringArrayHashMapUnmanaged([]const u8)` 参数 |
-| `session_mod.list` 调用 allocator 与 `gpa` arena 冲突 | 低 | list 使用调用方传入的 allocator，验证一致 |
+| 0.16 `std.process.Environ` 不支持写入 | 中 | 降级：Provider.init 新增可选参数 `explicit_key: ?[]const u8`，`init()` 直接传入解析后的 key，绕过 Environ |
+| `session_mod.list` 调用 allocator 与 `gpa` arena 冲突 | 低 | list 使用调用方传入的 allocator |
 | CLI AGENTS.md 读取逻辑耦合进 init.zig | 无 | 保留在 App.zig，init.zig 不含前端特有逻辑 |
+| `--api-key` 传入了但 init() 在 Provider.init 前过早报错 | 已修复 | 密钥解析在步骤 4（Provider.init 之前），四个来源依次检查后注入 Environ |
 
 ## 波及
 
