@@ -81,8 +81,16 @@ let evtSrc = null;
 
 async function api(path, opts) {
   const r = await fetch(A + path, opts);
-  if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  if (!r.ok) {
+    const text = await r.text();
+    console.error('API error', path, r.status, text.substring(0, 200));
+    throw new Error(text);
+  }
+  const text = await r.text();
+  try { return JSON.parse(text); } catch(e) {
+    console.error('JSON parse error', path, text.substring(0, 200));
+    throw e;
+  }
 }
 
 async function loadSessions() {
@@ -125,7 +133,7 @@ function addMessage(role, content) {
 }
 
 function sendPrompt(prompt) {
-  if (!currentId) return;
+  if (!currentId) { console.error('No session selected'); return; }
   document.getElementById('send-btn').disabled = true;
   document.getElementById('prompt-input').disabled = true;
 
@@ -136,6 +144,7 @@ function sendPrompt(prompt) {
   asst.className = 'msg assistant';
   asst.innerHTML = '<span class="spinner"></span>';
   msgs.appendChild(asst);
+  msgs.scrollTop = msgs.scrollHeight;
 
   let contentDiv = null;
   let thinkingBlock = null;
@@ -143,7 +152,8 @@ function sendPrompt(prompt) {
   let currentTool = null;
 
   if (evtSrc) evtSrc.close();
-  evtSrc = new EventSource(A + '/session/' + currentId + '/prompt');
+  const url = A + '/session/' + currentId + '/prompt?prompt=' + encodeURIComponent(prompt);
+  evtSrc = new EventSource(url);
 
   evtSrc.addEventListener('thinking_start', () => {
     if (thinkingBlock) return;

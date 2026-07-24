@@ -55,6 +55,7 @@ pub fn main(process: std.process.Init) !void {
         .config = &state.config,
         .agent = &agent,
         .provider = &state.provider,
+        .default_session = &state.session,
     };
 
     const addr = try Io.net.IpAddress.resolve(io, "127.0.0.1", default_port);

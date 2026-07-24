@@ -15,6 +15,7 @@ pub const Context = struct {
     config: *config_mod.Config,
     agent: *anyopaque,
     provider: *anyopaque,
+    default_session: *anyopaque,
     sse_writer: ?*anyopaque = null,
 };
 
@@ -193,10 +194,15 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
         sse_state.writeFrame("error", payload) catch {};
         sse_state.writeFrame("done", "{}") catch {};
         session.flush() catch {};
+        const def_session2: *session_mod.Session = @ptrCast(@alignCast(ctx.default_session));
+        agent.setSession(def_session2);
         return;
     };
 
     session.flush() catch {};
+
+    const def_session: *session_mod.Session = @ptrCast(@alignCast(ctx.default_session));
+    agent.setSession(def_session);
 
     var done_buf: [64]u8 = undefined;
     const msg = try std.fmt.bufPrint(&done_buf, "{{\"new_messages\":{d}}}", .{result.new_message_count});
