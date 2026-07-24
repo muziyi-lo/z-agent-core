@@ -13,6 +13,7 @@
   --border-base:#2a2a2e;--border-muted:#1f1f23;--border-focus:#60a5fa;
   --radius-sm:4px;--radius-md:6px;--radius-lg:10px;
   --text-xs:11px;--text-sm:12px;--text-base-fs:13px;--text-lg:14px;
+  --syntax-keyword:#c792ea;--syntax-string:#c3e88d;--syntax-function:#82aaff;
 }
 body{font-family:system-ui,sans-serif;background:var(--bg-base);color:var(--text-base);font-size:var(--text-base-fs);display:flex;height:100vh}
 #sidebar{width:240px;background:var(--bg-deep);border-right:1px solid var(--border-base);display:flex;flex-direction:column;flex-shrink:0}
@@ -22,7 +23,7 @@ body{font-family:system-ui,sans-serif;background:var(--bg-base);color:var(--text
 #session-list{flex:1;overflow-y:auto;padding:4px}
 #session-list .session{padding:8px 12px;cursor:pointer;border-radius:var(--radius-sm);margin:2px 0;font-size:var(--text-sm)}
 #session-list .session:hover{background:var(--bg-layer-02)}
-#session-list .session.active{background:var(--bg-layer-01)}
+#session-list .session.active{background:var(--bg-layer-01);border-left:2px solid var(--accent-base)}
 #session-list .session .name{color:var(--text-base)}
 #session-list .session .meta{font-size:var(--text-xs);color:var(--text-muted)}
 #new-session-btn{margin:8px;padding:8px;background:var(--bg-layer-01);border:1px solid var(--border-base);border-radius:var(--radius-sm);color:var(--text-base);cursor:pointer;font-size:var(--text-sm)}
@@ -33,13 +34,14 @@ body{font-family:system-ui,sans-serif;background:var(--bg-base);color:var(--text
 .msg{padding:8px 16px;margin:8px 0;border-radius:var(--radius-md);background:var(--bg-layer-01);font-size:var(--text-base-fs);line-height:1.6}
 .msg.user{background:var(--bg-layer-02)}
 .msg.assistant{}
-.thinking-block{margin:8px 0;padding:8px 12px;background:var(--bg-deep);border-radius:var(--radius-sm);font-size:var(--text-sm);color:var(--text-muted);cursor:pointer}
-.thinking-block .header{display:flex;align-items:center;gap:6px}
-.thinking-block .content{display:none;margin-top:8px;white-space:pre-wrap;font-size:var(--text-xs)}
+.thinking-block{margin:4px 0;padding:6px 10px;background:var(--bg-deep);border-radius:var(--radius-sm);font-size:var(--text-xs);color:var(--text-muted);cursor:pointer;user-select:none}
+.thinking-block .header{display:flex;align-items:center;gap:4px}
+.thinking-block .content{display:none;margin-top:6px;white-space:pre-wrap;color:var(--text-faint);line-height:1.5;max-height:300px;overflow-y:auto}
 .thinking-block.open .content{display:block}
-.tool-card{margin:8px 0;padding:8px 12px;background:var(--bg-deep);border-left:2px solid var(--accent-base);border-radius:var(--radius-sm);font-size:var(--text-sm)}
+.tool-card{margin:4px 0;padding:6px 10px;background:var(--bg-deep);border-left:2px solid var(--accent-base);border-radius:var(--radius-sm);font-size:var(--text-xs);cursor:pointer}
+.tool-card .name-row{display:flex;align-items:center;gap:6px}
 .tool-card .name{color:var(--accent-base);font-weight:600}
-.tool-card .result{margin-top:4px;font-size:var(--text-xs);color:var(--text-muted);max-height:200px;overflow-y:auto;white-space:pre-wrap}
+.tool-card .output{margin-top:4px;color:var(--text-muted);white-space:pre-wrap;max-height:200px;overflow-y:auto;font-family:monospace}
 .tool-card.error{border-left-color:var(--accent-error)}
 .tool-card.error .name{color:var(--accent-error)}
 #input-bar{display:flex;padding:12px;border-top:1px solid var(--border-base);flex-shrink:0}
@@ -47,11 +49,11 @@ body{font-family:system-ui,sans-serif;background:var(--bg-base);color:var(--text
 #input-bar textarea:focus{outline:none;border-color:var(--border-focus)}
 #input-bar button{padding:8px 16px;margin-left:8px;background:var(--accent-base);color:var(--bg-deep);border:none;border-radius:var(--radius-md);cursor:pointer;font-size:var(--text-sm);font-weight:600}
 #input-bar button:disabled{opacity:0.5;cursor:default}
-.spinner{display:inline-block;width:12px;height:12px;border:2px solid var(--text-muted);border-top-color:var(--accent-base);border-radius:50%;animation:spin 0.8s linear infinite}
+.spinner{display:inline-block;width:10px;height:10px;border:2px solid var(--text-muted);border-top-color:var(--accent-base);border-radius:50%;animation:spin 0.8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-.status-msg{padding:8px 16px;font-size:var(--text-sm);color:var(--text-muted);font-style:italic}
+.status-msg{padding:4px 16px;font-size:var(--text-sm);color:var(--text-muted);font-style:italic}
 .status-msg.error{color:var(--accent-error)}
-@media(max-width:768px){#sidebar{display:none}#sidebar.open{display:flex;position:fixed;z-index:10;height:100vh}}
+@media(max-width:768px){#sidebar{display:none;position:fixed;z-index:10;height:100vh}#sidebar.open{display:flex}}
 </style>
 </head>
 <body>
@@ -64,7 +66,7 @@ body{font-family:system-ui,sans-serif;background:var(--bg-base);color:var(--text
   <div id="session-list"></div>
 </div>
 <div id="main">
-  <div id="topbar" id="session-name">z-agent-core</div>
+  <div id="topbar">Select a session to start</div>
   <div id="messages"></div>
   <div id="input-bar">
     <textarea id="prompt-input" rows="1" placeholder="Enter a prompt..." disabled></textarea>
@@ -72,11 +74,13 @@ body{font-family:system-ui,sans-serif;background:var(--bg-base);color:var(--text
   </div>
 </div>
 <script>
-const apiBase = '/api';
-const sse = { source: null, currentPhase: null, thinkingStart: null, thinkingBlock: null };
+const A = '/api';
+let currentId = null;
+let currentName = null;
+let evtSrc = null;
 
 async function api(path, opts) {
-  const r = await fetch(apiBase + path, opts);
+  const r = await fetch(A + path, opts);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
@@ -87,51 +91,161 @@ async function loadSessions() {
   el.innerHTML = '';
   list.forEach(s => {
     const div = document.createElement('div');
-    div.className = 'session';
-    div.innerHTML = `<div class="name">${esc(s.name)}</div><div class="meta">${s.model} &middot; ${s.message_count} msgs</div>`;
+    div.className = 'session' + (s.id === currentId ? ' active' : '');
+    div.innerHTML = `<div class="name">${esc(s.name)}</div><div class="meta">${esc(s.model)} &middot; ${s.msg_count} msgs</div>`;
     div.onclick = () => loadSession(s.id);
     el.appendChild(div);
   });
+  if (list.length > 0) {
+    document.getElementById('model-name').textContent = list[0].model;
+  }
 }
 
 async function loadSession(id) {
   const sess = await api('/session/' + id);
+  currentId = id;
+  currentName = sess.name;
+  document.getElementById('topbar').textContent = sess.name;
+  document.getElementById('prompt-input').disabled = false;
+  document.getElementById('send-btn').disabled = false;
   const msgs = document.getElementById('messages');
   msgs.innerHTML = '';
   sess.messages.forEach(m => addMessage(m.role, m.content));
-  document.getElementById('session-name').textContent = sess.name;
-  document.getElementById('prompt-input').disabled = false;
-  document.getElementById('send-btn').disabled = false;
+  await loadSessions();
 }
 
 function addMessage(role, content) {
   const msgs = document.getElementById('messages');
   const div = document.createElement('div');
   div.className = 'msg ' + role;
-  div.textContent = content;
+  div.textContent = content || '';
   msgs.appendChild(div);
   msgs.scrollTop = msgs.scrollHeight;
+  return div;
 }
 
-function startPrompt(prompt) {
+function sendPrompt(prompt) {
+  if (!currentId) return;
   document.getElementById('send-btn').disabled = true;
   document.getElementById('prompt-input').disabled = true;
-  addMessage('user', prompt);
-  addMessage('assistant', '');
-  const msgs = document.getElementById('messages');
-  const last = msgs.lastElementChild;
-  last.innerHTML = '<span class="spinner"></span>';
 
-  const url = window.location.origin + apiBase + '/session/current/prompt';
-  sse.source = new EventSource(url); // placeholder - SSE will be properly wired
-  sse.source.onmessage = (e) => {
-    if (last.querySelector('.spinner')) last.innerHTML = '';
-    last.textContent += e.data;
+  const msgs = document.getElementById('messages');
+  addMessage('user', prompt);
+
+  const asst = document.createElement('div');
+  asst.className = 'msg assistant';
+  asst.innerHTML = '<span class="spinner"></span>';
+  msgs.appendChild(asst);
+
+  let contentDiv = null;
+  let thinkingBlock = null;
+  let thinkingContent = null;
+  let currentTool = null;
+
+  if (evtSrc) evtSrc.close();
+  evtSrc = new EventSource(A + '/session/' + currentId + '/prompt');
+
+  evtSrc.addEventListener('thinking_start', () => {
+    if (thinkingBlock) return;
+    thinkingBlock = document.createElement('div');
+    thinkingBlock.className = 'thinking-block';
+    thinkingBlock.innerHTML = '<div class="header">&#9654; Thinking <span class="spinner"></span></div>';
+    thinkingContent = document.createElement('div');
+    thinkingContent.className = 'content';
+    thinkingBlock.appendChild(thinkingContent);
+    thinkingBlock.onclick = () => thinkingBlock.classList.toggle('open');
+    asst.appendChild(thinkingBlock);
     msgs.scrollTop = msgs.scrollHeight;
-  };
-  sse.source.onerror = () => {
+  });
+
+  evtSrc.addEventListener('thinking_delta', (e) => {
+    if (!thinkingContent) return;
+    const d = JSON.parse(e.data);
+    thinkingContent.textContent += d.text || '';
+    msgs.scrollTop = msgs.scrollHeight;
+  });
+
+  evtSrc.addEventListener('thinking_end', (e) => {
+    if (thinkingBlock) {
+      const d = JSON.parse(e.data);
+      const dur = d.duration_ms ? (d.duration_ms / 1000).toFixed(0) + 's' : '';
+      thinkingBlock.querySelector('.header').innerHTML = '&#9654; Thinking (' + dur + ')';
+    }
+  });
+
+  evtSrc.addEventListener('content_start', () => {
+    if (!contentDiv) {
+      contentDiv = document.createElement('div');
+      asst.appendChild(contentDiv);
+    }
+  });
+
+  evtSrc.addEventListener('content_delta', (e) => {
+    if (!contentDiv) {
+      contentDiv = document.createElement('div');
+      asst.appendChild(contentDiv);
+    }
+    const d = JSON.parse(e.data);
+    contentDiv.textContent += d.text || '';
+    msgs.scrollTop = msgs.scrollHeight;
+  });
+
+  function ensureContent() {
+    if (!contentDiv) { contentDiv = document.createElement('div'); asst.appendChild(contentDiv); }
+    return contentDiv;
+  }
+
+  evtSrc.addEventListener('tool_start', (e) => {
+    const d = JSON.parse(e.data);
+    currentTool = document.createElement('div');
+    currentTool.className = 'tool-card';
+    currentTool.innerHTML = '<div class="name-row"><span class="name">' + esc(d.name) + '</span><span class="spinner"></span></div>';
+    ensureContent().appendChild(currentTool);
+    msgs.scrollTop = msgs.scrollHeight;
+  });
+
+  evtSrc.addEventListener('tool_delta', (e) => {
+    if (!currentTool) return;
+    const d = JSON.parse(e.data);
+    let out = currentTool.querySelector('.output');
+    if (!out) { out = document.createElement('div'); out.className = 'output'; currentTool.appendChild(out); }
+    out.textContent += d.text || '';
+    msgs.scrollTop = msgs.scrollHeight;
+  });
+
+  evtSrc.addEventListener('tool_error', (e) => {
+    if (!currentTool) return;
+    const d = JSON.parse(e.data);
+    currentTool.classList.add('error');
+    currentTool.querySelector('.name-row').innerHTML = '<span class="name">' + esc(d.name || 'tool') + '</span> (err)';
+    msgs.scrollTop = msgs.scrollHeight;
+  });
+
+  evtSrc.addEventListener('error', (e) => {
+    const d = JSON.parse(e.data);
+    const err = document.createElement('div');
+    err.className = 'status-msg error';
+    err.textContent = 'Error: ' + (d.message || d.code || 'unknown');
+    ensureContent().appendChild(err);
+    msgs.scrollTop = msgs.scrollHeight;
+  });
+
+  evtSrc.addEventListener('done', () => {
+    if (evtSrc) { evtSrc.close(); evtSrc = null; }
     document.getElementById('send-btn').disabled = false;
     document.getElementById('prompt-input').disabled = false;
+    const spinners = asst.querySelectorAll('.spinner');
+    spinners.forEach(s => s.remove());
+    document.getElementById('prompt-input').focus();
+    loadSessions();
+  });
+
+  evtSrc.onerror = () => {
+    if (evtSrc) { evtSrc.close(); evtSrc = null; }
+    document.getElementById('send-btn').disabled = false;
+    document.getElementById('prompt-input').disabled = false;
+    const spinners = asst.querySelectorAll('.spinner');
+    spinners.forEach(s => s.remove());
   };
 }
 
@@ -140,21 +254,18 @@ document.getElementById('send-btn').onclick = () => {
   const text = inp.value.trim();
   if (!text) return;
   inp.value = '';
-  startPrompt(text);
+  sendPrompt(text);
 };
 
 document.getElementById('prompt-input').onkeydown = (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    document.getElementById('send-btn').click();
-  }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('send-btn').click(); }
 };
 
 document.getElementById('new-session-btn').onclick = async () => {
   try {
-    const sess = await fetch(apiBase + '/session', { method: 'POST' }).then(r => r.json());
-    await loadSession(sess.id);
-    await loadSessions();
+    const r = await fetch(A + '/session', { method: 'POST' });
+    const sess = await r.json();
+    if (sess.status === 'created') { await loadSessions(); }
   } catch(e) { console.error(e); }
 };
 

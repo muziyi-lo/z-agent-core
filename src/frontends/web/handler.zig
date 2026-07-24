@@ -36,20 +36,13 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
                 const id = rest[0..slash];
                 const sub = rest[slash + 1 ..];
                 if (std.mem.eql(u8, sub, "message")) return handleSessionMessages(ctx, request, id, a);
+                if (std.mem.eql(u8, sub, "prompt")) return handlePrompt(ctx, request, id);
             } else {
                 return handleSessionGet(ctx, request, rest, a);
             }
         }
     } else if (method == .POST) {
         if (std.mem.eql(u8, path, "/api/session")) return handleSessionCreate(ctx, request, a);
-        if (std.mem.startsWith(u8, path, "/api/session/")) {
-            const rest = path["/api/session/".len..];
-            if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
-                const id = rest[0..slash];
-                const sub = rest[slash + 1 ..];
-                if (std.mem.eql(u8, sub, "prompt")) return handlePrompt(ctx, request, id);
-            }
-        }
     }
 
     return err_mod.respondError(request, .not_found, "endpoint not found", a);
@@ -168,7 +161,16 @@ fn handleSessionCreate(ctx: *Context, request: *std.http.Server.Request, a: std.
 }
 
 fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8) !void {
-    _ = session_id;
+    var session = loadSession(ctx, session_id) catch |err| {
+        if (err == error.SessionNotFound) return err_mod.respondError(request, .session_not_found, "session not found", ctx.allocator);
+        return err;
+    };
+    defer session.deinit();
+
+    const target = request.head.target;
+    const prompt = extractPrompt(target) orelse return err_mod.respondError(request, .bad_request, "missing ?prompt= parameter", ctx.allocator);
+    try session.append(.{ .role = .user, .content = prompt });
+
     const sw: *sse.SseWriter = @ptrCast(@alignCast(ctx.sse_writer orelse return err_mod.respondError(request, .internal_error, "SSE writer not available", ctx.allocator)));
     try sw.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\nCache-Control: no-cache\r\n\r\n");
 
@@ -242,4 +244,17 @@ fn escapeJson(src: []const u8, buf: []u8) ![]const u8 {
         }
     }
     return buf[0..pos];
+}
+
+fn extractPrompt(target: []const u8) ?[]const u8 {
+    const qm = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    const query = target[qm + 1 ..];
+    const prefix = "prompt=";
+    if (!std.mem.startsWith(u8, query, prefix)) return null;
+    var value = query[prefix.len..];
+    if (std.mem.indexOfScalar(u8, value, '&')) |amp| {
+        value = value[0..amp];
+    }
+    if (value.len == 0) return null;
+    return value;
 }
