@@ -58,17 +58,24 @@ pub fn init(
 
 CLI 和 Web 都调用同一函数，区别仅在 `phase_writer_cb` 不同（CLI → ANSI 渲染，Web → SSE 映射）。
 
-### 3. .env 注入
+### 3. .env 注入与 API key 加载优先级
 
 `Provider.init` 从 `std.process.Environ` 读取 API key。当前 `loadDotEnv` 只返回 HashMap 不注入。修复方案：
 
+**加载优先级**（高到低）：
+1. Shell 环境变量（`$env:DEEPSEEK_API_KEY = "sk-..."` ）— **最高优先级**
+2. `.zagent/.env` 文件中的值 — 仅在系统环境不存在时注入
+3. 无任何来源 → `error.ApiKeyNotSet`
+
+**实现**：遍历 `loadDotEnv` 返回的 HashMap，对每个 key 检查系统环境是否已存在。若已存在则跳过（不覆盖），若不存在则注入。符合 Docker Compose、Node.js dotenv、Python-dotenv 等行业标准。
+
 | 方案 | 优点 | 缺点 |
 |------|------|------|
-| A: `init()` 内遍历 HashMap → `std.process.setEnv()` | 简单，不改 provider | Windows setEnv 不支持（0.16 无此 API） |
-| B: `init()` 内构建 `Environ.map` 传给 `Provider.init` 新参数 | 平台无关 | 需改 Provider 接口 |
-| C: `init()` 遍历 HashMap → 写入 `std.process.Environ.initFrom` | 符合 0.16 API | 需验证签名 |
+| A: `init()` 内遍历 HashMap → `std.process.setEnv()` | 简单 | Windows 0.16 无 setEnv |
+| B: `init()` 内构建合并 `Environ`，传给 `Provider.init` 新参数 | 平台无关 | 需改 Provider 接口 |
+| C: 遍历 HashMap，系统环境已存在则跳过，否则注入 | 不覆盖已有值 | 需验证 0.16 环境写入 API |
 
-**选择**：方案 C。在 `init()` 中创建一个包含系统环境和 .env 合并值的 `Environ`，`Provider.init` 不变（仍读 Environ）。若 0.16 不支持 environ 合并，降级为方案 B（给 Provider 加可选 `env: ?[]const u8` 参数）。
+**选择**：方案 C，降级路径为方案 B。
 
 ### 4. 错误处理统一
 
