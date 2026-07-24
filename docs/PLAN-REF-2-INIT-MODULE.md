@@ -360,3 +360,14 @@ zig test src/test.zig --cache-dir .zig-cache
 | FrontendState | 前端初始化产物打包结构，含 config/provider/registry/session |
 | .env 注入 | 将 `.zagent/.env` 文件的键值对写入 OS 进程环境，使 `Provider.init` 透过 `std.process.Environ` 可见 |
 | init 管线 | findRoot → config.load → resolveModel → findProvider → Provider.init → buildRegistry → Session.init 的 8 步顺序链 |
+
+## 设计前瞻（延后至 Web 会话管理重构）
+
+当前 `FrontendState` 包含 `session`，隐含"服务生命周期单默认会话"假定。Web 多会话场景下，更优拆分：
+
+```zig
+FrontendConfig { config, provider, registry }  // 全局只读，纤程安全
+FrontendState  { config: *FrontendConfig, session }  // 每请求创建，消息隔离
+```
+
+此拆分超出 REF-2"抽取初始化"范围（REF-2 不改 session 管理模型），但为后续 Web 会话重构预留了清晰的分界点。
