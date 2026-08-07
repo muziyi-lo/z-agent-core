@@ -756,13 +756,177 @@ document.getElementById('send-btn').onclick = function() {
 document.getElementById('stop-btn').onclick = function() { abortPrompt(); };
 
 document.getElementById('prompt-input').onkeydown = function(e) {
-  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) { e.preventDefault(); document.getElementById('send-btn').click(); }
+  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
+    e.preventDefault();
+    if (slashVisible && slashFiltered.length > 0) { slashSelect(slashFiltered[slashIndex]); return; }
+    var text = this.value.trim();
+    if (text.startsWith('/')) { executeSlashCommand(text); return; }
+    document.getElementById('send-btn').click();
+  } else if (e.key === 'ArrowDown') {
+    if (slashVisible) { e.preventDefault(); slashMove(1); }
+  } else if (e.key === 'ArrowUp') {
+    if (slashVisible) { e.preventDefault(); slashMove(-1); }
+  } else if (e.key === 'Escape') {
+    if (slashVisible) { e.preventDefault(); slashHide(); }
+  }
 };
 
 document.getElementById('prompt-input').addEventListener('input', function() {
   this.style.height = '';
   this.style.height = Math.min(this.scrollHeight, 200) + 'px';
+  slashUpdate();
 });
+
+// --- slash command popover ---
+// Core commands come from GET /api/command (server-driven, no inline copy);
+// Web-local commands are pure UI actions handled here.
+var slashCommands = [];
+var slashLocal = [
+  { name: 'theme', description: 'Toggle light/dark theme', args_hint: '', run: function() { document.getElementById('theme-btn').click(); } },
+  { name: 'clear', description: 'Clear current message view', args_hint: '', run: function() { document.getElementById('messages').innerHTML = ''; } },
+  { name: 'model', description: 'Switch model', args_hint: 'provider/model', run: function() { document.getElementById('model-select').focus(); } },
+];
+var slashFiltered = [];
+var slashIndex = -1;
+var slashPopover = null;
+var slashVisible = false;
+
+function loadSlashCommands() {
+  fetch(A + '/command').then(function(r) { return r.json(); }).then(function(list) {
+    slashCommands = list || [];
+  }).catch(function() { slashCommands = []; });
+}
+
+function slashAll() { return slashCommands.concat(slashLocal); }
+
+function slashShow() {
+  if (!slashPopover) {
+    slashPopover = document.createElement('div');
+    slashPopover.className = 'slash-popover';
+    document.getElementById('input-bar').appendChild(slashPopover);
+  }
+  slashVisible = true;
+  slashPopover.style.display = 'block';
+  slashPopover.onmouseenter = function() { slashSetActive(-1); };
+}
+
+function slashHide() {
+  slashVisible = false;
+  if (slashPopover) slashPopover.style.display = 'none';
+}
+
+function slashRender() {
+  slashPopover.innerHTML = '';
+  slashFiltered.forEach(function(c, i) {
+    var item = document.createElement('div');
+    item.className = 'slash-item';
+    var label = '/' + c.name + (c.args_hint ? ' <' + c.args_hint + '>' : '');
+    item.textContent = label;
+    var desc = document.createElement('span');
+    desc.className = 'slash-desc';
+    desc.textContent = '  ' + c.description;
+    item.appendChild(desc);
+    item.onclick = function() { slashSelect(c); };
+    slashPopover.appendChild(item);
+  });
+  slashSetActive(slashIndex);
+}
+
+// Toggle the .active highlight without rebuilding the list — hover/navigation
+// must not replace DOM nodes under the cursor (a rebuild between mousedown and
+// mouseup would drop the click).
+function slashSetActive(idx) {
+  var items = slashPopover.querySelectorAll('.slash-item');
+  for (var i = 0; i < items.length; i++) {
+    items[i].classList.toggle('active', i === idx);
+  }
+}
+
+function slashUpdate() {
+  var input = document.getElementById('prompt-input');
+  var value = input.value;
+  if (!value.startsWith('/') || value.indexOf(' ') !== -1) { slashHide(); return; }
+  var namePart = value.slice(1);
+  slashFiltered = slashAll().filter(function(c) { return c.name.indexOf(namePart) === 0; });
+  if (slashFiltered.length === 0) { slashHide(); return; }
+  if (slashIndex < 0 || slashIndex >= slashFiltered.length) slashIndex = 0;
+  slashShow();
+  slashRender();
+}
+
+function slashMove(delta) {
+  if (slashFiltered.length === 0) return;
+  slashIndex = (slashIndex + delta + slashFiltered.length) % slashFiltered.length;
+  slashSetActive(slashIndex);
+}
+
+function slashSelect(c) {
+  var input = document.getElementById('prompt-input');
+  slashHide();
+  if (c.args_hint) {
+    input.value = '/' + c.name + ' ';
+    input.focus();
+  } else {
+    executeSlashCommand('/' + c.name);
+  }
+}
+
+function executeSlashCommand(text) {
+  var rest = text.slice(1);
+  var argStart = rest.search(/\s/);
+  var name = argStart === -1 ? rest : rest.slice(0, argStart);
+  var args = argStart === -1 ? '' : rest.slice(argStart + 1).trim();
+  clearPromptInput();
+
+  var local = slashLocal.find(function(c) { return c.name === name; });
+  if (local) { local.run(args); return; }
+
+  if (!currentId && name !== 'new' && name !== 'list') {
+    showStatus('no active session', true);
+    return;
+  }
+  fetch(A + '/command', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, args: args, session_id: currentId || undefined }),
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(resp) {
+      if (resp.status === 'ok') {
+        if (resp.data && resp.data.session_id) {
+          switchToSession(resp.data.session_id, resp.data.name);
+        } else {
+          loadSessions();
+        }
+        showStatus('/' + name + ' ok', false);
+      } else {
+        showStatus(resp.message || 'command failed', true);
+      }
+    })
+    .catch(function() { showStatus('command failed', true); });
+}
+
+function clearPromptInput() {
+  var inp = document.getElementById('prompt-input');
+  inp.value = '';
+  inp.style.height = '';
+}
+
+function switchToSession(id, name) {
+  if (evtSrc) { evtSrc.close(); evtSrc = null; }
+  currentId = id;
+  currentName = name;
+  document.getElementById('topbar').textContent = name || 'z-agent-core';
+  loadSession(id);
+}
+
+function showStatus(text, isError) {
+  var msgs = document.getElementById('messages');
+  var tip = document.createElement('div');
+  tip.className = 'status-msg' + (isError ? ' error' : '');
+  tip.textContent = text;
+  msgs.appendChild(tip);
+  setTimeout(function() { if (tip.parentNode) tip.parentNode.removeChild(tip); }, 3000);
+}
 
 document.getElementById('new-session-btn').onclick = async function() {
   try {
@@ -989,3 +1153,4 @@ function applyToolType(toolDiv, toolName, toolData) {
 
 loadSessions();
 loadModels();
+loadSlashCommands();
