@@ -105,7 +105,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | N3 | 侧边栏 DOM diff / 会话列表分页 / Web CRUD 冒烟测试 | docs/PLAN-FUTURE-SESSION-IMPROVEMENTS.md P2 |
 | N4 | `@container` 响应式侧边栏 | docs/DESIGN-WEB-RENDER.md 待实现 高 |
 | N5 | 技能覆盖缺口 3 项 (SSE filter / @embedFile 预览适配 / Web 冒烟测试) | docs/PLAN-SKILL-COVERAGE.md GAP-1~3 |
-| N6 | DOM 结构契约 + 前端回归验证脚本 (contentDiv 只装 LLM 文本、工具卡片平级挂 asst；chrome-cdp 断言 done 后 tool-card 存在) | 待设计 — 2026-08-06 工具卡片消失技术债根因 |
+| N6 | DOM 结构契约 + 前端回归验证脚本 (contentDiv 只装 LLM 文本、工具卡片平级挂 asst；chrome-cdp 断言 done 后 tool-card 存在) | 根因已修复 (v0.2.5 parts 重构，PLAN-STREAM-ORDER-PARTS)；剩余：DOM 回归脚本浏览器级落库（Node 测试 37 断言已在 .tmp 提供逻辑级覆盖） |
 
 ## Deferred (explicitly skipped)
 
