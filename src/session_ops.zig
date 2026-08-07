@@ -49,3 +49,34 @@ pub fn fork(allocator: std.mem.Allocator, io: Io, source: *session_mod.Session, 
 pub fn rollbackTurn(session: *session_mod.Session, pre_count: usize) void {
     session.truncateTo(pre_count);
 }
+
+/// Clear the conversation, keeping the system prompt (if any) and the session
+/// id/name. Distinct from `new` (fresh session with a new id).
+pub fn reset(session: *session_mod.Session) void {
+    const msgs = session.messages();
+    const keep: usize = if (msgs.len > 0 and msgs[0].role == .system) 1 else 0;
+    session.truncateTo(keep);
+}
+
+test "session_ops: reset keeps system prompt" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var sess = try new(allocator, io, "deepseek/deepseek-v4-flash");
+    defer sess.deinit();
+    try sess.updateFirstSystem("system-text");
+    try sess.append(.{ .role = .user, .content = "hello" });
+    try sess.append(.{ .role = .assistant, .content = "hi" });
+    try std.testing.expectEqual(@as(usize, 3), sess.messages().len);
+    reset(&sess);
+    try std.testing.expectEqual(@as(usize, 1), sess.messages().len);
+    try std.testing.expectEqualStrings("system-text", sess.messages()[0].content);
+}
+
+test "session_ops: reset empty session stays empty" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var sess = try new(allocator, io, "deepseek/deepseek-v4-flash");
+    defer sess.deinit();
+    reset(&sess);
+    try std.testing.expectEqual(@as(usize, 0), sess.messages().len);
+}

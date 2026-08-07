@@ -7,6 +7,8 @@ const sse = @import("sse.zig");
 const err_mod = @import("error.zig");
 const uuid_mod = @import("../../util/uuid.zig");
 const log = @import("../../util/log.zig");
+const command_mod = @import("../../command.zig");
+const session_ops = @import("../../session_ops.zig");
 
 const AlignedU8 = std.ArrayListAligned(u8, null);
 const Io = std.Io;
@@ -56,6 +58,7 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
         if (std.mem.eql(u8, path, "/api/model")) return handleModelList(ctx, request, a);
         if (std.mem.eql(u8, path, "/api/provider")) return handleProviderList(ctx, request, a);
         if (std.mem.eql(u8, path, "/api/session")) return handleSessionList(ctx, request, a);
+        if (std.mem.eql(u8, path, "/api/command")) return handleCommandList(ctx, request, a);
         if (std.mem.startsWith(u8, path, "/api/session/")) {
             const rest = path["/api/session/".len..];
             if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
@@ -71,6 +74,7 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
         }
     } else if (method == .POST) {
         if (std.mem.eql(u8, path, "/api/session")) return handleSessionCreate(ctx, request, a);
+        if (std.mem.eql(u8, path, "/api/command")) return handleCommandExec(ctx, request, a);
         if (std.mem.startsWith(u8, path, "/api/session/")) {
             const rest = path["/api/session/".len..];
             if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
@@ -315,6 +319,97 @@ fn handleSessionCreate(ctx: *Context, request: *std.http.Server.Request, a: std.
     var buf: [256]u8 = undefined;
     const response = try std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"name\":\"New Session\",\"model\":\"{s}\"}}", .{ id, model });
     try respondJson(request, response);
+}
+
+/// GET /api/command — serialize the core command registry (drives the Web
+/// slash popover; no inline duplication).
+fn handleCommandList(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
+    _ = ctx;
+    var body: AlignedU8 = .empty;
+    try body.appendSlice(a, "[");
+    for (&command_mod.builtin, 0..) |c, i| {
+        if (i > 0) try body.appendSlice(a, ",");
+        const item = try std.fmt.allocPrint(a, "{{\"name\":\"{s}\",\"description\":\"{s}\",\"args_hint\":\"{s}\",\"kind\":\"{s}\"}}", .{ c.name, c.description, c.args_hint, @tagName(c.kind) });
+        try body.appendSlice(a, item);
+    }
+    try body.appendSlice(a, "]");
+    try respondJson(request, body.items);
+}
+
+/// POST /api/command — execute a core action command. Non-streaming JSON
+/// envelope {status:ok|error, data?}. Session-bound commands require session_id.
+fn handleCommandExec(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
+    var transfer_buf: [512]u8 = undefined;
+    var body_reader = request.readerExpectNone(&transfer_buf);
+    const body = try body_reader.allocRemaining(a, @enumFromInt(2048));
+    const parsed = std.json.parseFromSlice(std.json.Value, a, body, .{ .ignore_unknown_fields = true }) catch
+        return err_mod.respondError(request, .bad_request, "invalid JSON body", a);
+    const obj = parsed.value.object;
+    const name = if (obj.get("name")) |nv| nv.string else return err_mod.respondError(request, .bad_request, "missing name", a);
+    const cmd = command_mod.find(name) orelse return err_mod.respondError(request, .bad_request, "unknown command", a);
+    if (cmd.kind != .action) return err_mod.respondError(request, .bad_request, "prompt command not supported yet", a);
+    const args = if (obj.get("args")) |av| (if (av == .string) av.string else "") else "";
+    const session_id = if (obj.get("session_id")) |sv| (if (sv == .string) sv.string else null) else null;
+
+    if (std.mem.eql(u8, name, "new")) {
+        return handleCommandNew(ctx, request, a);
+    }
+    if (std.mem.eql(u8, name, "list")) {
+        return handleSessionList(ctx, request, a);
+    }
+    if (std.mem.eql(u8, name, "thinking") or std.mem.eql(u8, name, "load")) {
+        return respondJson(request, "{\"status\":\"error\",\"message\":\"command not available via API yet\"}");
+    }
+
+    const sid = session_id orelse return err_mod.respondError(request, .bad_request, "missing session_id", a);
+    var session = loadSession(ctx, sid) catch |err| return respondCmdLoadError(request, err, a);
+    defer session.deinit();
+
+    if (std.mem.eql(u8, name, "fork")) {
+        var fork_sess = session_ops.fork(ctx.allocator, ctx.io, &session, ctx.sessions_dir, args) catch
+            return err_mod.respondError(request, .bad_request, "fork failed", a);
+        defer fork_sess.deinit();
+        const fork_path = fork_sess.path orelse return err_mod.respondError(request, .internal_error, "fork session has no path", a);
+        const fork_id = try sessionIdFromPath(a, fork_path);
+        const response = try std.fmt.allocPrint(a, "{{\"status\":\"ok\",\"data\":{{\"session_id\":\"{s}\",\"name\":\"{s}\"}}}}", .{ fork_id, fork_sess.name });
+        return respondJson(request, response);
+    }
+    if (std.mem.eql(u8, name, "reset")) {
+        session_ops.reset(&session);
+        try session.flush();
+        return respondJson(request, "{\"status\":\"ok\"}");
+    }
+    if (std.mem.eql(u8, name, "name")) {
+        try session.rename(args);
+        try session.flush();
+        return respondJson(request, "{\"status\":\"ok\"}");
+    }
+    return respondJson(request, "{\"status\":\"error\",\"message\":\"unknown command\"}");
+}
+
+fn handleCommandNew(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
+    const id = try uuid_mod.v4(a);
+    var s = try session_mod.Session.init(ctx.allocator, ctx.io, ctx.config.default_model);
+    defer s.deinit();
+    try Io.Dir.cwd().createDirPath(ctx.io, ctx.sessions_dir);
+    const filename = try std.fmt.allocPrint(a, "{s}.jsonl", .{id});
+    const path = try std.fs.path.join(a, &.{ ctx.sessions_dir, filename });
+    s.path = path;
+    try s.flush();
+    const response = try std.fmt.allocPrint(a, "{{\"status\":\"ok\",\"data\":{{\"session_id\":\"{s}\",\"name\":\"{s}\"}}}}", .{ id, s.name });
+    try respondJson(request, response);
+}
+
+fn respondCmdLoadError(request: *std.http.Server.Request, err: anyerror, a: std.mem.Allocator) !void {
+    if (err == error.InvalidSessionId) return err_mod.respondError(request, .bad_request, "invalid session id", a);
+    if (err == error.FileNotFound) return err_mod.respondError(request, .session_not_found, "session not found", a);
+    return err_mod.respondError(request, .internal_error, "failed to load session", a);
+}
+
+fn sessionIdFromPath(a: std.mem.Allocator, path: []const u8) ![]const u8 {
+    const base = std.fs.path.basename(path);
+    const id = if (std.mem.endsWith(u8, base, ".jsonl")) base[0 .. base.len - ".jsonl".len] else base;
+    return a.dupe(u8, id);
 }
 
 fn handleAbort(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8, a: std.mem.Allocator) !void {

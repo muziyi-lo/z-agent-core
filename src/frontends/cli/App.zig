@@ -10,6 +10,7 @@ const agent_mod = @import("../../core/agent.zig");
 const render = @import("render.zig");
 const signal = @import("../../util/signal.zig");
 const session_ops = @import("../../session_ops.zig");
+const command_mod = @import("../../command.zig");
 
 const Io = std.Io;
 
@@ -363,44 +364,9 @@ pub const App = struct {
 
     fn processLine(self: *App, stdout: *Io.File.Writer, line: []const u8, wc: *WriterCtx) !void {
         if (line.len == 0) return;
-        if (std.mem.eql(u8, line, "/exit") or std.mem.eql(u8, line, "/quit")) return error.ExitRepl;
-        if (std.mem.eql(u8, line, "/new")) {
-            try self.resetSession(stdout);
+        if (line[0] == '/') {
+            try self.dispatchCommand(stdout, line);
             return;
-        }
-        if (std.mem.startsWith(u8, line, "/name ")) {
-            try self.renameSession(line["/name ".len..]);
-            return;
-        }
-        if (std.mem.eql(u8, line, "/list")) {
-            try self.listSessions(stdout);
-            return;
-        }
-        if (std.mem.eql(u8, line, "/help")) {
-            try self.showHelp(stdout);
-            return;
-        }
-        if (std.mem.startsWith(u8, line, "/load ")) {
-            try self.loadSession(stdout, line["/load ".len..]);
-            return;
-        }
-        if (std.mem.startsWith(u8, line, "/fork ")) {
-            try self.forkSession(stdout, line["/fork ".len..]);
-            return;
-        }
-        if (std.mem.startsWith(u8, line, "/thinking ")) {
-            const level_str = std.mem.trim(u8, line["/thinking ".len..], " \t");
-            if (types.ThinkingLevel.fromString(level_str)) |tl| {
-                self.provider.config.compat.thinking_level = tl;
-                const msg = try std.fmt.allocPrint(self.allocator, "thinking level: {s}", .{level_str});
-                defer self.allocator.free(msg);
-                try render.writeLabeled(&stdout.interface, .success, msg);
-                return;
-            } else {
-                try render.writeLabeled(&stdout.interface, .warning,
-                    "Usage: /thinking none|minimal|low|medium|high|xhigh|max");
-                return;
-            }
         }
 
         const pre_count = self.session.messages().len;
@@ -485,6 +451,49 @@ pub const App = struct {
         }
     }
 
+    /// Dispatch a "/command" line. CLI-local commands first (exit/quit/help),
+    /// then the shared core registry; unknown commands show a /help hint.
+    fn dispatchCommand(self: *App, stdout: *Io.File.Writer, line: []const u8) !void {
+        const rest = line[1..];
+        const arg_start = std.mem.indexOfAny(u8, rest, " \t") orelse rest.len;
+        const name = rest[0..arg_start];
+        const args = std.mem.trim(u8, rest[arg_start..], " \t");
+
+        // CLI-local commands
+        if (std.mem.eql(u8, name, "exit") or std.mem.eql(u8, name, "quit")) return error.ExitRepl;
+        if (std.mem.eql(u8, name, "help")) return self.showHelp(stdout);
+
+        // Shared core registry
+        _ = command_mod.find(name) orelse {
+            const msg = try std.fmt.allocPrint(self.allocator, "unknown command '/{s}' (try /help)", .{name});
+            defer self.allocator.free(msg);
+            try render.writeLabeled(&stdout.interface, .err, msg);
+            return;
+        };
+
+        if (std.mem.eql(u8, name, "new")) return self.resetSession(stdout);
+        if (std.mem.eql(u8, name, "reset")) return self.clearSession(stdout);
+        if (std.mem.eql(u8, name, "name")) return self.renameSession(args);
+        if (std.mem.eql(u8, name, "list")) return self.listSessions(stdout);
+        if (std.mem.eql(u8, name, "load")) return self.loadSession(stdout, args);
+        if (std.mem.eql(u8, name, "fork")) return self.forkSession(stdout, args);
+        if (std.mem.eql(u8, name, "thinking")) {
+            if (types.ThinkingLevel.fromString(args)) |tl| {
+                self.provider.config.compat.thinking_level = tl;
+                const msg = try std.fmt.allocPrint(self.allocator, "thinking level: {s}", .{args});
+                defer self.allocator.free(msg);
+                try render.writeLabeled(&stdout.interface, .success, msg);
+            } else {
+                const hint = command_mod.enumHint(types.ThinkingLevel);
+                const msg = try std.fmt.allocPrint(self.allocator, "Usage: /thinking {s}", .{hint});
+                defer self.allocator.free(msg);
+                try render.writeLabeled(&stdout.interface, .warning, msg);
+            }
+            return;
+        }
+        unreachable;
+    }
+
     fn winReadLine(
         con_in: ?*anyopaque,
         buf: *std.ArrayListAligned(u8, null),
@@ -530,6 +539,14 @@ pub const App = struct {
         try render.writeLabeled(&stdout.interface, .success, "New session started.");
     }
 
+    fn clearSession(self: *App, stdout: *Io.File.Writer) !void {
+        session_ops.reset(&self.session);
+        try self.session.flush();
+        self._env_changed = true;
+        self.initAgent();
+        try render.writeLabeled(&stdout.interface, .success, "Session cleared.");
+    }
+
     fn renameSession(self: *App, new_name: []const u8) !void {
         const trimmed = std.mem.trim(u8, new_name, " \t");
         if (trimmed.len == 0) {
@@ -567,17 +584,15 @@ pub const App = struct {
     fn showHelp(self: *App, stdout: *Io.File.Writer) !void {
         _ = self;
         try render.writeLabeled(&stdout.interface, .success, "z-agent-core commands:");
-        try stdout.interface.print(
-            \\  /exit, /quit    Exit the REPL
-            \\  /new            Start a new session
-            \\  /load <id>      Load session by ID (first column of /list)
-            \\  /name <name>    Rename current session
-            \\  /list           List saved sessions
-            \\  /fork <name>    Fork current session to new file
-            \\  /thinking <lvl> Set thinking: none|minimal|low|medium|high|xhigh|max
-            \\  /help           Show this help
-            \\
-        , .{});
+        try stdout.interface.print("  /exit, /quit    Exit the REPL\n", .{});
+        for (&command_mod.builtin) |c| {
+            if (c.args_hint.len > 0) {
+                try stdout.interface.print("  /{s} <{s}>    {s}\n", .{ c.name, c.args_hint, c.description });
+            } else {
+                try stdout.interface.print("  /{s}        {s}\n", .{ c.name, c.description });
+            }
+        }
+        try stdout.interface.print("  /help           Show this help\n", .{});
     }
 
     fn loadSession(self: *App, stdout: *Io.File.Writer, name: []const u8) !void {
