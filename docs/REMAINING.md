@@ -33,7 +33,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | WEB-UI-FIXES | `docs/0.2.5/PLAN-WEB-UI-FIXES.md` | ✅ 已完成 (v0.2.5) — F1-F16 前端修复 |
 | FIX-APIKEY-ENV | `docs/0.2.5/PLAN-FIX-APIKEY-ENV.md` | ✅ 已完成 — 空 key 误判 + .env 回退生效 |
 | STREAM-ORDER-PARTS | `docs/0.2.5/PLAN-STREAM-ORDER-PARTS.md` | ✅ 已完成 — parts 模型重构（拆分+流式/reload 双轨统一，Node 测试 37 断言） |
-| SLASH-COMMANDS | `docs/0.2.5/PLAN-SLASH-COMMANDS.md` | 计划中 — 斜杠命令体系（注册表 + Web 命令通道，承接 N1 fork/reset） |
+| SLASH-COMMANDS | `docs/0.2.5/PLAN-SLASH-COMMANDS.md` | 实施中 — 阶段 1-4 完成（注册表/CLI dispatch/Web 命令 API/popover），阶段 5 prompt 命令待实施 |
 
 ## Done (2026-08-06 — v0.2.5)
 

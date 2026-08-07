@@ -35,6 +35,7 @@
 
 ### Refactored
 - **Web 前端 parts 模型重构** (`docs/0.2.5/PLAN-STREAM-ORDER-PARTS.md`): `index.html` 拆分为结构 + `app.css`/`app.js`（`handler.zig` 双 marker 注入）；引入 segments 数据模型 + 统一 `renderAssistantMessage`，流式与 reload 双轨合一（根治内容顺序/工具卡片/双轨不一致 DOM bug 类）；`buildSegment`/`ensureTextSegment` 段级精确更新；Node 测试 37 断言
+- **斜杠命令体系** (`docs/0.2.5/PLAN-SLASH-COMMANDS.md`): 核心命令注册表 (`src/command.zig`，args_hint 枚举编译期生成) + CLI dispatch + Web `GET`/`POST /api/command`（fork/reset 获 Web 入口，非流式 JSON 信封）+ Web slash popover（`/` 列表/过滤/键盘导航/CSS hover）
 
 ### Fixed
 - **system prompt `<env>` 块 Web 显示无换行**: `marked` 直通 `<env>` + `DOMPurify` 剥标签后换行仍在 DOM，浏览器 `white-space: normal` 折叠 → `.msg.system` 加 `white-space: pre-line`

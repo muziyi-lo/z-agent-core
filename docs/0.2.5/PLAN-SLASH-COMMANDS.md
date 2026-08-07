@@ -1,6 +1,6 @@
 # Plan SLASH-COMMANDS: 斜杠命令体系（对齐 opencode command 模型）
 
-## 状态: 计划中
+## 状态: 实施中（阶段 1-4 完成：注册表 + CLI dispatch + Web /api/command + slash popover，均已提交；阶段 5 prompt 模板命令待实施）
 
 ## 前置依赖
 
