@@ -328,35 +328,13 @@ pub const Session = struct {
         try Io.Dir.rename(cwd, tmp_path, cwd, file_path, io);
     }
 
-    /// Rename session and corresponding JSONL file. Creates new file, keeps old.
+    /// Rename session. The display name lives in the JSONL header; the file name
+    /// (session id) is stable and never changes — renaming must not break id
+    /// references (LRN-20260806-002). Caller flushes to persist the new header.
     pub fn rename(self: *Session, new_name: []const u8) !void {
         const arena = self._arena.allocator();
-
-        const file_name = sanitizeFileName(arena, new_name) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-        };
-
-        if (self.path != null) {
-            const cwd = Io.Dir.cwd();
-            const dir_path = std.fs.path.dirname(self.path.?) orelse ".";
-            var candidate = try std.fmt.allocPrint(arena, "{s}.jsonl", .{file_name});
-            var target = try std.fs.path.join(arena, &.{ dir_path, candidate });
-
-            var counter: usize = 1;
-            while (true) {
-                const exists = Io.Dir.cwd().openFile(self.io, target, .{ .mode = .read_only }) catch null;
-                if (exists == null) break;
-                exists.?.close(self.io);
-                candidate = try std.fmt.allocPrint(arena, "{s}-{d}.jsonl", .{ file_name, counter });
-                target = try std.fs.path.join(arena, &.{ dir_path, candidate });
-                counter += 1;
-            }
-
-            try Io.Dir.rename(cwd, self.path.?, cwd, target, self.io);
-            self.path = target;
-        }
-
         self.name = try arena.dupe(u8, new_name);
+        self.modified = true;
     }
 
     /// Remove a message at the given index. Uses temp-then-rename for atomicity.
@@ -894,7 +872,7 @@ test "session: flush then load roundtrip" {
     try std.process.setCurrentPath(io, orig_cwd_buf[0..orig_len]);
 }
 
-test "session: rename file" {
+test "session: rename keeps file name (stable id)" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
@@ -921,13 +899,14 @@ test "session: rename file" {
 
     try sess.rename("My Session");
     try std.testing.expectEqualStrings("My Session", sess.name);
-    try std.testing.expect(!std.mem.eql(u8, file_path, sess.path orelse ""));
+    // id (file name) is stable — renaming must not move the file
+    try std.testing.expect(std.mem.eql(u8, file_path, sess.path orelse ""));
+    try sess.flush();
 
-    {
-        const f = Io.Dir.cwd().openFile(io, sess.path.?, .{ .mode = .read_only }) catch null;
-        try std.testing.expect(f != null);
-        if (f) |ff| ff.close(io);
-    }
+    // reload from the same path shows the renamed header
+    var reloaded = try Session.load(allocator, io, file_path);
+    defer reloaded.deinit();
+    try std.testing.expectEqualStrings("My Session", reloaded.name);
 }
 
 test "session: sanitize file name" {
