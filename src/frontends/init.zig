@@ -61,7 +61,13 @@ pub fn init(
     var cfg = config_mod.Config.load(allocator, project_root, io) catch return error.ConfigLoadFailed;
     errdefer cfg.deinit();
 
-    _ = config_mod.loadDotEnv(ta, project_root, io) catch {};
+    var dotenv_map = config_mod.loadDotEnv(ta, project_root, io) catch |err| blk: {
+        var dbuf: [256]u8 = undefined;
+        var dw: std.Io.File.Writer = .init(.stderr(), io, &dbuf);
+        dw.interface.print("z-agent-core: warning: failed to load .env ({s})\n", .{@errorName(err)}) catch {};
+        dw.interface.flush() catch {};
+        break :blk std.StringArrayHashMapUnmanaged([]const u8){};
+    };
 
     const model = config_mod.resolveModel(&cfg, cfg.default_model) catch return error.ModelResolveFailed;
 
@@ -69,9 +75,12 @@ pub fn init(
         if (std.mem.eql(u8, p.name, model.provider)) break p;
     } else return error.ProviderNotFound;
 
-    const provider = provider_mod.Provider.init(allocator, entry, model, null, io) catch |err| {
-        if (err == error.ApiKeyNotSet) return error.ApiKeyNotSet;
-        return err;
+    const provider = blk: {
+        const env = std.process.Environ{ .block = .{ .use_global = true } };
+        var env_map = try env.createMap(allocator);
+        defer env_map.deinit();
+        const api_key = try config_mod.resolveApiKey(&env_map, &dotenv_map, entry.api_key_env);
+        break :blk try provider_mod.Provider.init(allocator, entry, model, api_key, null, io);
     };
 
     const registry = registry_mod.buildRegistry();
@@ -119,4 +128,14 @@ pub fn formatInitError(
         return std.fmt.bufPrint(buf, "z-agent-core: Error: API key not set", .{});
     }
     return std.fmt.bufPrint(buf, "z-agent-core: fatal init error: {s}", .{name});
+}
+
+pub fn reportInitError(io: Io, err: anyerror, api_key_env: ?[]const u8, model_spec: ?[]const u8) void {
+    var buf: [init_error_max_len]u8 = undefined;
+    const msg = formatInitError(&buf, err, api_key_env, model_spec) catch "z-agent-core: fatal init error";
+    var sw_buf: [256]u8 = undefined;
+    var sw: Io.File.Writer = .init(.stderr(), io, &sw_buf);
+    sw.interface.writeAll(msg) catch {};
+    sw.interface.writeAll("\n") catch {};
+    sw.interface.flush() catch {};
 }

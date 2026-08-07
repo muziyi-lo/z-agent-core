@@ -19,10 +19,19 @@ Two-phase refactoring:
 **Why**: The `writer` leaks CLI implementation detail into core. A TUI/GUI/Web frontend doesn't write to an `Io.Writer` — it updates a widget or pushes to a queue. The writer belongs in the frontend's `?*anyopaque` context. `!void` makes render errors explicit instead of relying on the `stdout_dead` side channel.
 
 ```diff
-// Current (post-Phase 2): frontend derives display from tool_name + args JSON, not full ToolResult
+// Current: 7-param signature with begin_tool, err_msg, meta
 pub const ToolDisplayCb = struct {
     context: ?*anyopaque,
-    render: *const fn (ctx: ?*anyopaque, tool_name: []const u8, tool_args: []const u8, had_error: bool) anyerror!void,
+    begin_tool: ?*const fn (ctx: ?*anyopaque, tool_name: []const u8) void = null,
+    render: *const fn (
+        ctx: ?*anyopaque,
+        tool_name: []const u8,
+        tool_args: []const u8,
+        had_error: bool,
+        err_msg: ?[]const u8,
+        user_output: ?[]const u8,
+        meta: types.ToolMeta,
+    ) anyerror!void,
 };
 ```
 
@@ -827,7 +836,8 @@ Injected into `AgentLoop.runTurn()`. Called once per tool execution. Returns `!v
 ```
 ToolDisplayCb {
     context: ?*anyopaque,
-    render: *const fn (ctx: ?*anyopaque, tool_name: []const u8, tool_args: []const u8, had_error: bool, user_output: ?[]const u8) anyerror!void,
+    begin_tool: ?*const fn (ctx: ?*anyopaque, tool_name: []const u8) void = null,
+    render: *const fn (ctx: ?*anyopaque, tool_name: []const u8, tool_args: []const u8, had_error: bool, err_msg: ?[]const u8, user_output: ?[]const u8, meta: types.ToolMeta) anyerror!void,
 }
 ```
 
@@ -959,10 +969,13 @@ const tui_tool_cb = agent_mod.ToolDisplayCb{
     .render = tuiToolDisplay,       // no writer param — TUI draws to its own grid
 };
 
-fn tuiToolDisplay(ctx: ?*anyopaque, tool_name: []const u8, tool_args: []const u8, had_error: bool) !void {
+fn tuiToolDisplay(ctx: ?*anyopaque, tool_name: []const u8, tool_args: []const u8, had_error: bool, err_msg: ?[]const u8, user_output: ?[]const u8, meta: types.ToolMeta) !void {
     _ = tool_name;
     _ = tool_args;
     _ = had_error;
+    _ = err_msg;
+    _ = user_output;
+    _ = meta;
     const tui: *TuiState = @ptrCast(@alignCast(ctx orelse return error.NullContext));
     tui.redraw();
 }

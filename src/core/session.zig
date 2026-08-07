@@ -2,6 +2,9 @@ const std = @import("std");
 const types = @import("../types.zig");
 const Io = std.Io;
 
+pub const DEFAULT_SESSION_NAME = "New Session";
+pub const DEFAULT_SESSION_FILENAME = "New_Session";
+
 /// Linear session storing messages in a JSONL file. All data owned by internal arena.
 pub const Session = struct {
     _arena: std.heap.ArenaAllocator,
@@ -25,9 +28,24 @@ pub const Session = struct {
         };
         errdefer self._arena.deinit();
         const arena = self._arena.allocator();
-        self.name = try arena.dupe(u8, "New Session");
+        self.name = try arena.dupe(u8, DEFAULT_SESSION_NAME);
         self.model = try arena.dupe(u8, model);
         return self;
+    }
+
+    /// Delete a session JSONL file by path. Mirrors load() parameter convention.
+    pub fn deleteFile(io: Io, path: []const u8) !void {
+        try Io.Dir.cwd().deleteFile(io, path);
+    }
+
+    /// Reject session IDs containing path traversal characters.
+    /// Accepts alphanumeric, `-` (UUID v4), `_`.
+    pub fn isValidId(id: []const u8) bool {
+        if (id.len == 0) return false;
+        for (id) |c| {
+            if (c == '.' or c == '/' or c == '\\') return false;
+        }
+        return true;
     }
 
     /// Load a session from a JSONL file. Returns error.InvalidSession if no header found.
@@ -54,7 +72,7 @@ pub const Session = struct {
         const content = try arena.dupe(u8, content_src);
 
         self.path = try arena.dupe(u8, path);
-        self.name = try arena.dupe(u8, "New Session");
+        self.name = try arena.dupe(u8, DEFAULT_SESSION_NAME);
         self.model = try arena.dupe(u8, "unknown");
 
         var lines = std.mem.splitScalar(u8, content, '\n');
@@ -64,7 +82,13 @@ pub const Session = struct {
             const line = std.mem.trim(u8, raw_line, "\r");
             if (line.len == 0) continue;
 
-            var parsed = std.json.parseFromSlice(std.json.Value, arena, line, .{}) catch continue;
+            var parsed = std.json.parseFromSlice(std.json.Value, arena, line, .{}) catch {
+                var dbuf: [256]u8 = undefined;
+                var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
+                _ = dw.interface.writeAll("z-agent-core: warning: skipping unparseable line in session file\n") catch {};
+                _ = dw.interface.flush() catch {};
+                continue;
+            };
             defer parsed.deinit();
 
             const obj = parsed.value.object;
@@ -230,7 +254,7 @@ pub const Session = struct {
             const file_name = sanitizeFileName(arena, self.name) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
             };
-            const final_name = if (std.mem.eql(u8, file_name, "New_Session")) blk: {
+            const final_name = if (std.mem.eql(u8, file_name, DEFAULT_SESSION_FILENAME)) blk: {
                 const ts = Io.Clock.Timestamp.now(self.io, .real);
                 const now_ms = Io.Timestamp.toMilliseconds(ts.raw);
                 break :blk try std.fmt.allocPrint(arena, "{d}", .{now_ms});
@@ -265,7 +289,13 @@ pub const Session = struct {
 
         if (self._messages.items.len > 50) {
             var msg_buf: [128]u8 = undefined;
-            const msg = std.fmt.bufPrint(&msg_buf, "session: {d} messages, context may overflow\n", .{self._messages.items.len}) catch return;
+            const msg = std.fmt.bufPrint(&msg_buf, "session: {d} messages, context may overflow\n", .{self._messages.items.len}) catch {
+                var dbuf: [256]u8 = undefined;
+                var dw: Io.File.Writer = .init(.stderr(), self.io, &dbuf);
+                _ = dw.interface.writeAll("session: context overflow warning\n") catch {};
+                _ = dw.interface.flush() catch {};
+                return;
+            };
             var dbuf: [256]u8 = undefined;
             var dw: Io.File.Writer = .init(.stderr(), self.io, &dbuf);
             _ = dw.interface.writeAll(msg) catch {};
@@ -327,6 +357,42 @@ pub const Session = struct {
         }
 
         self.name = try arena.dupe(u8, new_name);
+    }
+
+    /// Remove a message at the given index. Uses temp-then-rename for atomicity.
+    /// Index 0 is typically the system message; callers should ensure they don't remove it
+    /// unless they know what they're doing.
+    pub fn removeMessage(self: *Session, index: usize) !void {
+        const arena = self._arena.allocator();
+        const cwd = Io.Dir.cwd();
+
+        if (index >= self._messages.items.len) return error.IndexOutOfBounds;
+        if (self.path == null) return error.NoPath;
+
+        _ = self._messages.orderedRemove(index);
+
+        const tmp_path = try std.fmt.allocPrint(arena, "{s}.tmp", .{self.path.?});
+        defer {
+            if (!std.mem.eql(u8, self.path.?, tmp_path)) {
+                cwd.deleteFile(self.io, tmp_path) catch {};
+            }
+        }
+
+        {
+            const file = try cwd.createFile(self.io, tmp_path, .{});
+            defer file.close(self.io);
+
+            try writeHeader(arena, self.io, file, self.name, self.model);
+            for (self._messages.items) |msg| {
+                var buf = std.array_list.Managed(u8).init(arena);
+                defer buf.deinit();
+                try serializeMessage(&buf, msg);
+                try file.writeStreamingAll(self.io, buf.items);
+            }
+        }
+
+        try Io.Dir.rename(cwd, tmp_path, cwd, self.path.?, self.io);
+        self.modified = false;
     }
 
     /// Free all session memory including arena.
@@ -422,7 +488,7 @@ fn epochToISO8601(allocator: std.mem.Allocator, epoch_s: i64) ![]const u8 {
     const h = @divFloor(tod, 3600);
     const min = @mod(@divFloor(tod, 60), 60);
     const sec = @mod(tod, 60);
-    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ year, m, d, h, min, sec });
+    return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ @as(u32, @intCast(year)), m, d, @as(u32, @intCast(h)), @as(u32, @intCast(min)), @as(u32, @intCast(sec)) });
 }
 
 fn writeHeader(allocator: std.mem.Allocator, io: Io, file: Io.File, name: []const u8, model: []const u8) !void {
@@ -432,7 +498,7 @@ fn writeHeader(allocator: std.mem.Allocator, io: Io, file: Io.File, name: []cons
     defer buf.deinit();
 
     try buf.appendSlice("{\"type\":\"header\",\"timestamp\":\"");
-    const ts_iso = epochToISO8601(allocator, now) catch unreachable;
+    const ts_iso = try epochToISO8601(allocator, now);
     defer allocator.free(ts_iso);
     try buf.appendSlice(ts_iso);
     try buf.appendSlice("\",\"model\":\"");
@@ -527,7 +593,15 @@ pub const SessionInfo = types.SessionInfo;
 
 /// List all sessions in session_dir. Caller owns returned slice; free with freeSessionInfoList.
 pub fn list(allocator: std.mem.Allocator, io: Io, session_dir: []const u8) ![]SessionInfo {
-    var dir = Io.Dir.cwd().openDir(io, session_dir, .{ .iterate = true }) catch return &.{};
+    var dir = Io.Dir.cwd().openDir(io, session_dir, .{ .iterate = true }) catch |err| {
+        if (err != error.FileNotFound and err != error.NotDir) {
+            var dbuf: [256]u8 = undefined;
+            var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
+            _ = dw.interface.writeAll("z-agent-core: warning: cannot open sessions directory\n") catch {};
+            _ = dw.interface.flush() catch {};
+        }
+        return &.{};
+    };
     defer dir.close(io);
 
     var results: std.ArrayListAligned(SessionInfo, null) = .empty;
@@ -590,7 +664,7 @@ pub fn list(allocator: std.mem.Allocator, io: Io, session_dir: []const u8) ![]Se
         else
             entry.name;
 
-        const msg_count_est = @max(size / 150, 1);
+        const msg_count_est = @max(size / 150, 0);
 
         try results.append(allocator, .{
             .id = try allocator.dupe(u8, stem),

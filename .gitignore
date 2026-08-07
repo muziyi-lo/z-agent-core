@@ -10,3 +10,4 @@ depgraph.html
 *.exe
 *.obj
 *.pdb
+.tmp/

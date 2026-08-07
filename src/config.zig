@@ -57,7 +57,13 @@ pub const Config = struct {
 /// Caller owns returned string, must free with allocator.
 pub fn findZagentRoot(allocator: std.mem.Allocator, io: std.Io) ?[]const u8 {
     var buf: [4096]u8 = undefined;
-    const len = Io.Dir.cwd().realPath(io, &buf) catch return null;
+    const len = Io.Dir.cwd().realPath(io, &buf) catch {
+        var dbuf: [256]u8 = undefined;
+        var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
+        _ = dw.interface.writeAll("z-agent-core: error: cannot resolve working directory\n") catch {};
+        _ = dw.interface.flush() catch {};
+        return null;
+    };
     const start_path = allocator.dupe(u8, buf[0..len]) catch return null;
     defer allocator.free(start_path);
     var current: []const u8 = start_path;
@@ -77,7 +83,18 @@ pub fn findZagentRoot(allocator: std.mem.Allocator, io: std.Io) ?[]const u8 {
     }
 }
 
+/// Write a best-effort .env warning to stderr. comptime fmt keeps the prefix
+/// string concatenated at compile time. config.zig runs before log.init, so
+/// util/log.zig's global io is unavailable here.
+fn warnEnv(io: Io, comptime fmt: []const u8, args: anytype) void {
+    var buf: [256]u8 = undefined;
+    var w: Io.File.Writer = .init(.stderr(), io, &buf);
+    w.interface.print("z-agent-core: warning: .env: " ++ fmt ++ "\n", args) catch {};
+    w.interface.flush() catch {};
+}
+
 /// Parse .zagent/.env into KEY=VALUE map.
+/// Malformed lines (no '=', empty key, unclosed quote) are warned and skipped.
 /// Caller owns all entries: free each key/value, then deinit map.
 pub fn loadDotEnv(allocator: std.mem.Allocator, project_root: []const u8, io: std.Io) !std.StringArrayHashMapUnmanaged([]const u8) {
     var map = std.StringArrayHashMapUnmanaged([]const u8){};
@@ -97,13 +114,21 @@ pub fn loadDotEnv(allocator: std.mem.Allocator, project_root: []const u8, io: st
     defer allocator.free(content);
 
     var lines = std.mem.splitScalar(u8, content, '\n');
+    var line_no: usize = 0;
     while (lines.next()) |raw| {
+        line_no += 1;
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
 
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
+            warnEnv(io, "line {d}: missing '=' ignored: '{s}'", .{ line_no, line });
+            continue;
+        };
         const key = std.mem.trim(u8, line[0..eq], " \t");
-        if (key.len == 0) continue;
+        if (key.len == 0) {
+            warnEnv(io, "line {d}: empty key ignored", .{line_no});
+            continue;
+        }
 
         var value_raw = line[eq + 1 ..];
 
@@ -116,6 +141,10 @@ pub fn loadDotEnv(allocator: std.mem.Allocator, project_root: []const u8, io: st
                 comment_pos = i;
                 break;
             }
+        }
+        if (in_quotes) {
+            warnEnv(io, "line {d}: unclosed quote for key '{s}'", .{ line_no, key });
+            continue;
         }
 
         const value_before_comment = if (comment_pos) |pos| value_raw[0..pos] else value_raw;
@@ -134,6 +163,23 @@ pub fn loadDotEnv(allocator: std.mem.Allocator, project_root: []const u8, io: st
     }
 
     return map;
+}
+
+/// Resolve API key: process env first, .env fallback. Empty = unset.
+/// Returns a borrowed slice (env_map's owned copy or dotenv arena value);
+/// caller must copy before env_map.deinit / arena teardown.
+/// error.ApiKeyNotSet if neither source has a value.
+pub fn resolveApiKey(
+    env_map: *const std.process.Environ.Map,
+    dotenv: ?*const std.StringArrayHashMapUnmanaged([]const u8),
+    env_name: []const u8,
+) ![]const u8 {
+    var raw = env_map.get(env_name);
+    if (raw == null or raw.?.len == 0) {
+        if (dotenv) |fb| raw = fb.get(env_name);
+    }
+    if (raw == null or raw.?.len == 0) return error.ApiKeyNotSet;
+    return raw.?;
 }
 
 /// Resolve "provider/model_id" to a Model pointer.
@@ -909,6 +955,105 @@ test "config: loadDotEnv basic and quoted" {
     try std.testing.expectEqualStrings("with#inside", env_map.get("KEY3").?);
     try std.testing.expectEqualStrings("value4", env_map.get("KEY4").?);
     try std.testing.expectEqualStrings("", env_map.get("KEY5").?);
+}
+
+test "config: loadDotEnv skips malformed lines" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-config-env-malformed";
+    const test_dir = try std.fs.path.join(allocator, &.{ test_root });
+    defer {
+        Io.Dir.cwd().deleteTree(io, test_dir) catch {};
+        allocator.free(test_dir);
+    }
+    try Io.Dir.cwd().createDirPath(io, test_dir);
+
+    const zagent_dir = try std.fs.path.join(allocator, &.{ test_dir, ".zagent" });
+    defer allocator.free(zagent_dir);
+    try Io.Dir.cwd().createDirPath(io, zagent_dir);
+
+    const env_path = try std.fs.path.join(allocator, &.{ zagent_dir, ".env" });
+    defer allocator.free(env_path);
+
+    const content =
+        \\NOKEY
+        \\=valueonly
+        \\KEY1="value1"
+        \\KEY2="unclosed
+        \\KEY3=value3
+    ;
+    const file = try Io.Dir.cwd().createFile(io, env_path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, content);
+
+    var env_map = try loadDotEnv(allocator, test_dir, io);
+    defer {
+        var it = env_map.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        env_map.deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), env_map.count());
+    try std.testing.expectEqualStrings("value1", env_map.get("KEY1").?);
+    try std.testing.expectEqualStrings("value3", env_map.get("KEY3").?);
+}
+
+test "resolveApiKey: empty env var treated as unset" {
+    const testing = std.testing;
+    var env_map = std.process.Environ.Map.init(testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("KEY", "");
+    try testing.expectError(error.ApiKeyNotSet, resolveApiKey(&env_map, null, "KEY"));
+}
+
+test "resolveApiKey: falls back to dotenv" {
+    const testing = std.testing;
+    var env_map = std.process.Environ.Map.init(testing.allocator);
+    defer env_map.deinit();
+    var dotenv = std.StringArrayHashMapUnmanaged([]const u8){};
+    defer dotenv.deinit(testing.allocator);
+    try dotenv.put(testing.allocator, "KEY", "sk-x");
+    const key = try resolveApiKey(&env_map, &dotenv, "KEY");
+    try testing.expectEqualStrings("sk-x", key);
+}
+
+test "resolveApiKey: env wins over dotenv" {
+    const testing = std.testing;
+    var env_map = std.process.Environ.Map.init(testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("KEY", "sk-env");
+    var dotenv = std.StringArrayHashMapUnmanaged([]const u8){};
+    defer dotenv.deinit(testing.allocator);
+    try dotenv.put(testing.allocator, "KEY", "sk-dotenv");
+    const key = try resolveApiKey(&env_map, &dotenv, "KEY");
+    try testing.expectEqualStrings("sk-env", key);
+}
+
+test "resolveApiKey: empty env falls back to dotenv" {
+    const testing = std.testing;
+    var env_map = std.process.Environ.Map.init(testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("KEY", "");
+    var dotenv = std.StringArrayHashMapUnmanaged([]const u8){};
+    defer dotenv.deinit(testing.allocator);
+    try dotenv.put(testing.allocator, "KEY", "sk-x");
+    const key = try resolveApiKey(&env_map, &dotenv, "KEY");
+    try testing.expectEqualStrings("sk-x", key);
+}
+
+test "resolveApiKey: both empty returns ApiKeyNotSet" {
+    const testing = std.testing;
+    var env_map = std.process.Environ.Map.init(testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("KEY", "");
+    var dotenv = std.StringArrayHashMapUnmanaged([]const u8){};
+    defer dotenv.deinit(testing.allocator);
+    try dotenv.put(testing.allocator, "KEY", "");
+    try testing.expectError(error.ApiKeyNotSet, resolveApiKey(&env_map, &dotenv, "KEY"));
 }
 
 test "config: findZagentRoot walks up to .zagent" {

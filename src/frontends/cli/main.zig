@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("../../types.zig");
+const init_mod = @import("../init.zig");
 const App = @import("App.zig").App;
 
 pub fn main(process: std.process.Init) !void {
@@ -66,7 +67,9 @@ pub fn main(process: std.process.Init) !void {
             \\  --model <spec>     指定模型，格式: provider/model_id
             \\  --thinking <level> 设置思考强度: none|minimal|low|medium|high|xhigh|max
             \\  --list-models       列出所有可用模型
-            \\  --web              启动 Web 前端 (http://localhost:8090)
+            \\  --web              启动 Web 前端 (默认 http://127.0.0.1:8090)
+            \\  --port <port>      指定 Web 端口 (配合 --web)
+            \\  --address <ip>     指定 Web 监听地址 (配合 --web)
             \\  --root <path>      指定项目根目录
             \\  --help, -h         显示此帮助
             \\  --version, -v      显示版本号
@@ -115,7 +118,10 @@ pub fn main(process: std.process.Init) !void {
         return;
     }
 
-    var app = App.init(allocator, io, single_prompt, model_override, thinking_level) catch return;
+    var app = App.init(allocator, io, single_prompt, model_override, thinking_level) catch |err| {
+        init_mod.reportInitError(io, err, null, model_override);
+        return;
+    };
     defer app.deinit();
     app.pipe_mode = !(std.Io.File.isTty(.stdout(), io) catch false);
     app.initAgent();

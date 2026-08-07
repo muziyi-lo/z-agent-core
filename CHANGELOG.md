@@ -1,6 +1,133 @@
 # Changelog
 
-## [0.2.3] — 未完成
+## [0.2.5] — 2026-08-06
+
+### Added
+- **Web 停止按钮**: 输入栏 `#stop-btn`，流式期间启用，点击调 `POST /api/session/:id/abort`，含 `abortInFlight` 防重入（F11）
+- **SSE 异常关闭通知服务端**: `evtSrc.onerror` 复用 `abortPrompt()`，连接断开时 abort 服务端请求避免空跑（F16）
+- **无会话直接输入**: 移除 `#prompt-input`/`#send-btn` 初始 disabled；无 `currentId` 时 `genUuidV4()` 生成会话 ID 走 SSE，服务端自动创建；`deleteSession` 后恢复可输入态（F10）
+- **session_ready SSE 事件**: 服务端 `handlePrompt` 在 `is_new` 时回传 `{id, name}`（prompt 命名），`done` 帧并入 `session_id` 兜底（F10）
+- **空会话落盘**: `handleSessionCreate` 立即写空 JSONL 文件（UUID 路径 + createDirPath），"New Session" 刷新不消失（F12）
+- **模型切换提示**: 已有消息会话切换模型显示 "applies to new sessions only"（F14）
+- **浅色主题 token 补全**: accent/state/diff/syntax/overlay/elevation 全量适配 + pre/thinking-block/code 深色适配（F3）
+
+### Fixed
+- **Web 模型下拉框初始为空 / 只显示一个模型** (`src/frontends/web/index.html`)
+  - 根因 A: `loadModels()` 仅在 SSE done 回调调用，页面初始化只调 `loadSessions()`，首次打开时模型下拉为空 → 初始化同步调用 `loadModels()`
+  - 根因 B: `loadSessions()` 在会话列表非空且模型下拉为空时，用 `list[0].model` 往 `#model-select` 插入单个 option → 删除该逻辑，模型列表统一由 `loadModels()` 管理（含 localStorage/Default 回退）
+- **剪贴板非安全上下文失效**: `navigator.clipboard` 仅安全上下文可用，局域网 HTTP 下抛 TypeError 且无 catch → `copyText()` 特性检测 + `execCommand` 回退，5 处调用点统一（F1）
+- **移动端侧边栏不可达**: `@media(max-width:768px)` 下无 `.open` 切换 + 残留 `sidebar-collapsed` 抵消 transform → 断点分派 + CSS `transform:none` 双保险（F2）
+- **`loadSession` 无异常处理**: 会话被删时未捕获 rejection → try-catch 兜底（F13）
+- **首运行会话目录缺失**: `handleSessionCreate`/`handlePrompt` 写文件前补 `createDirPath(.zagent/sessions)`
+- **工具卡片 done 后消失 + thinking/工具穿插布局**: 根因 A — `tool_start` 挂 `contentDiv`，done 的 `updateMarkdownBlocks` 在无 markdown-key 时 `contentDiv.innerHTML = newHtml` 清空含工具卡片 → 改挂 `asst`；根因 B — `thinking_start` 去重把多阶段思考合并进单块、工具卡片位置不符时间线 → 去除重支持多 thinking 块 + `appendToAsst` 按事件序插入，asst 子元素忠实反映"思考→工具→内容"穿插（实测 思考1→内容→思考2→工具→思考3→工具组）
+
+### Changed
+- **复制按钮重构**: `addCopyButton()` 公共函数替代两处重复代码块复制逻辑 + bash Copy cmd 统一走 `copyText`（F5）
+- **发送时用户消息索引**: `sendPrompt` 传计算 index（DOM 计数），流式期间禁删消息防 index 漂移（F9）
+- **grep 分组摘要**: `N matches` → `N calls`（语义为调用次数）（F6）
+- **topbar 初始文案**: "Select a session to start" → "z-agent-core"（F15）
+- **下拉框 a11y**: `aria-label="Model"` + `:focus-visible` 焦点环（F4/F8）
+- **`buildDonePayload`**: 新增 `session_id` 参数，done 帧携带会话 ID
+
+### Added (2026-08-07)
+- **API Key 空值视为未设 + `.env` 回退生效** (`docs/0.2.5/PLAN-FIX-APIKEY-ENV.md`): 新增 `config.resolveApiKey`（进程 env → .env 回退、空值/缺失返回 `ApiKeyNotSet`），`Provider.init` 改为接收已解析 key（不再读环境变量）；`loadDotEnv` 对格式错误行逐行 warning + 行号（无 `=`/空 key/未闭合引号）
+- **system prompt `<env>` 块补 Shell/Arch**: 两处 `buildPromptString`（`agent.zig` 核心 + `App.zig` CLI）新增 `Shell: pwsh (PowerShell 7)|sh` 与 `Arch:`，模型据此写对命令语法（实测 `echo %date%` 在 PowerShell 下不展开）
+
+### Refactored
+- **Web 前端 parts 模型重构** (`docs/0.2.5/PLAN-STREAM-ORDER-PARTS.md`): `index.html` 拆分为结构 + `app.css`/`app.js`（`handler.zig` 双 marker 注入）；引入 segments 数据模型 + 统一 `renderAssistantMessage`，流式与 reload 双轨合一（根治内容顺序/工具卡片/双轨不一致 DOM bug 类）；`buildSegment`/`ensureTextSegment` 段级精确更新；Node 测试 37 断言
+
+### Fixed
+- **system prompt `<env>` 块 Web 显示无换行**: `marked` 直通 `<env>` + `DOMPurify` 剥标签后换行仍在 DOM，浏览器 `white-space: normal` 折叠 → `.msg.system` 加 `white-space: pre-line`
+
+## [0.2.4] — 2026-08-06
+
+### Added
+- **Web 并发请求**: 线程模型实现多连接并行 (`docs/0.2.4/PLAN-WEB-CONCURRENT.md`)
+  - `server.zig`: 主线程 accept → `std.Thread.spawn` + detach，独立 arena/buffer/agent 每连接
+  - worker arena 复制 provider config 字符串 (base_url/model/api_key/model_params) + project_root，断开对 `FrontendState` 的依赖
+  - `active_threads` 原子计数器 + 主线程退出 30s 超时兜底
+- **POST /api/session/:id/abort**: 中断运行中的 LLM 请求
+  - `handleAbort`: 通过 `abort_map` (session_id → AgentLoop) 跨线程查找，mutex 锁内调用 `agent.abort()`
+  - `handleConnection` 注册最早 defer 作为兜底清理：即使 `handlePrompt` panic 也能从 `abort_map` 移除
+- **SSE 连接断开检测**: `SseState.agent` 字段注入 → 所有 SSE write 失败处调用 `agent.abort()` 终止推送
+- **Web 前端优化**: 14 项体验改进 (`docs/0.2.4/PLAN-WEB-OPT.md`)
+  - Vendor JS 内联注入: `marked.js` + `highlight.js` + `DOMPurify` 编译期嵌入 HTML，Markdown 渲染 + 代码语法高亮 + XSS 净化
+  - 字体注入: Inter + JetBrainsMono base64 内联 @font-face
+  - 用户消息气泡右对齐 (max-width 85%)
+  - 侧边栏拖拽 resize (180-480px)
+  - 多行输入: Shift+Enter / Ctrl+Enter 换行
+  - 代码块复制按钮 (hover 显 Copy, clipboard API)
+  - CSS Token 扩展 (14→30+ 变量: overlay/elevation/state/diff/transition)
+  - 工具卡片视觉升级 (边框 + 圆角 + hover 过渡)
+  - 消息删除按钮 (hover × → confirm modal → DELETE API)
+  - 会话删除自定义 confirm modal (替代浏览器 confirm)
+  - 用量页脚: done 事件携带 usage + model, 消息底部显示 token 统计
+  - 流式 Markdown: 流式阶段累积 rawContent, done 时 marked.parse + DOMPurify + highlightElement
+  - :focus-visible 可访问性 + prefers-reduced-motion
+- **Session.removeMessage()**: 原子重写 JSONL 删除指定索引消息
+- **DELETE /api/session/:id/message/:index**: 单条消息删除端点
+- **SSE 流式实时推送**: `SseWriter` 新增 `flushFn` + `flush()` 方法，每次 SSE 帧写入后立即 flush TCP 缓冲 (`docs/0.2.4/PLAN-WEB-FIX-STREAMING.md`)
+- **done 事件首条消息**: `buildDonePayload` 新增 `first_message` 字段，携带完整 session 首条消息 JSON，前端 `done` 事件直接渲染
+- **系统消息声明式渲染**: `#system-prompt` 独立容器 + `renderSystemPrompt()` 函数，`loadSession` 和 `done` 事件共用同一入口
+- **服务器日志模块**: `src/util/log.zig` — 结构化 `key=value` 输出，5 级，毫秒时间戳，线程/请求 ID (`docs/PLAN-LOGGING-MODULE.md`)
+
+### Changed
+- `handler.zig` `serveIndex`: 动态构造 HTML 响应, 注入 @embedFile 资源
+- `handler.zig` `handlePrompt` done 事件: 新增 `usage` + `model` 字段
+- `handler.zig` DELETE 路由: 支持 session 删除 + 消息删除子路由
+- `handler.zig` Context: 新增 `abort_map` + `abort_mutex` + `current_abort_session` 字段
+- `handler.zig` `handlePrompt`: runTurn 前在 mutex 内注册 `abort_map`，defer 清理 + 置 null `current_abort_session`
+- `sse.zig` `SseState`: 新增 `agent` 字段；8 处 SSE write 失败 `catch {}`/`try` 改为调用 `agent.abort()`
+- `core/agent.zig` `abort()`: `_aborted` 改为 `std.atomic.Value(bool)` (`.store(true, .release)`) + 新增 `signal.setInterrupted()` 桥接 provider 中断检测
+- `core/agent.zig` `finishTurn`: `.interrupted` 时 `.store(false, .release)` 重置原子标志 + `signal.reset()` 清除全局中断
+- `core/agent.zig`: 新增 `_aborted_bool` 字段供 ToolContext.abort_target 兼容（原子类型不能直接作为 `*bool`）
+- `io/provider.zig`: 删除两处 `child.kill(io)` 的 `builtin.os.tag != .windows` 守卫 — Windows 上中断/Ctrl+C 现在也强制终止 curl 子进程
+- `io/provider.zig`: `child.kill(io)` 移除 `catch {}` — Zig 0.16 中 kill 返回 void
+- `sse.zig` `SseWriter`: 新增 `flushFn` 字段 + `flush()` 方法；`sseWriterFrom` 生成 flush 闭包
+- `sse.zig` `writeFrame`/`writeTextDelta`: 每次写后调用 `self.w.flush()`
+- `sse.zig` `writeFrame`: 栈缓冲 512 → 4096 — 修复 done 帧含系统消息时 `NoSpaceLeft` 导致 500
+- `handler.zig` `buildDonePayload`: 新增 `allocator` 参数 + `first_message` 字段
+- `handler.zig` `handlePrompt`: SSE 头后显式 `sw.flush()` + done 帧降级兜底（payload 过大时仅发 `new_messages`）
+- `handler.zig` Context: 新增 `thread_id` + `request_id` 字段
+- `server.zig`: 新增 `next_thread_id`/`next_request_id` 原子计数器 + `log.init()` 初始化
+- `server.zig`: 移除 `printStderr`/`printStderrFmt`，替换为 `log.*` 调用
+- `server.zig`: 新增 `--port <port>` / `--address <ip>` 参数，支持自定义 Web 监听地址和端口
+- `server.zig`: 绑定 `0.0.0.0` 时自动解析本机主机名，日志额外显示局域网访问 URL (`lan=http://...`)
+- `cli/main.zig`: 帮助文本新增 `--port` / `--address` 说明
+- `util/log.zig`: 日志时间戳从 UTC 改为本地时间 (Windows: `kernel32.GetLocalTime`, POSIX: 保留 UTC 回退)
+- `index.html`: 侧边栏折叠 (`transform:translateX(-100%)`) + localStorage 持久化 (`☰` 按钮在 topbar 始终可见)
+- `index.html`: h1 居中 + 副标题行, 模型选择器移至 sidebar 底部 (`#model-selector`)
+- `index.html`: 模型下拉切换 (调 `GET /api/model`) + localStorage 持久化, API 失败时降级到缓存
+- `index.html`: 会话名超长截断 (`text-overflow:ellipsis`), 用户消息自适应宽度气泡 (`fit-content`)
+- `index.html`: 系统消息 markdown 渲染 (`marked.parse`) + thin 滚动条 (Firefox + WebKit)
+- `index.html`: 工具卡片默认折叠 + done 后 markdown 渲染 + ≥3 工具时显示全部展开/折叠按钮
+- `handler.zig`: `handleSessionCreate` 支持 POST body `model` 参数 (可选, 默认 `config.default_model`)
+- `handler.zig`: `handlePrompt` 新建 session 用 prompt 首 30 字符命名 + 修复侧边栏 UUID 显示
+- `handler.zig`: 新增 `GET /favicon.ico` 路由 (返回 `@embedFile("../../Logo.ico")`)
+- `uuid.zig`: 新增 `isUuid()` 精确 v4 检测 (长度36, 短横位置, 版本位4, 变体位8/9/a/b)
+
+### Added (P0+P2 — 渲染数据增强)
+- `handler.zig` `formatMessageJson`: 补全 `reasoning_content`/`tool_calls`/`tool_call_id`/`usage`/`model` 字段 — 消灭 reload 后 thinking+tool 数据丢失 (G3)
+- `index.html` `addMessage`: 重建 thinking 块 (markdown) + tool_call_id 匹配工具名 (G1/G2/P2-1)
+- `index.html` ToolRegistry: bash 专属 Copy cmd 按钮 + 类型化扩展点 (P2-2)
+- `sse.zig` `renderTool` + `serializeMeta`: `tool_meta` SSE 事件发送 ToolMeta (exit_code/byte_count/match_count 等) (P2-3)
+- `index.html`: `hljs.highlightAll()` 激活语法高亮 (done 事件 + addMessage) — 消灭死代码 (G5)
+- `sse.zig` `renderTool`: 工具参数 `tool_args` 前置为 ```input 代码块 (P0)
+
+### Added (G8/G9/G11 — 工具视图 + 消息操作)
+- `index.html` ToolRegistry: read/write/edit/grep/glob/skill 群类型化视图 (图标 + meta) (G8)
+- `index.html` `wrapContextToolGroups`: 连续 read/grep/glob ≥2 自动合并为折叠组 (G9)
+- `index.html` MessageAction: user 消息 hover 显 revert/copy/× 操作栏 (G11)
+- `sse.zig` `serializeMeta`: 补全 write.existed/grep.truncated/glob.truncated/bash.truncated 字段
+- `index.html`: 新增 `#system-prompt` 容器 + `renderSystemPrompt()` + CSS；`done` 事件渲染系统消息
+
+### Known Gaps（下版候选）
+- Web 端 `PATCH /api/session/:id/fork`、`/reset` 端点待实现（承自 v0.2.3）
+- CLI `/delete <id>` 命令待实现
+- `.zagent/sessions` 路径 4+ 处硬编码待常量化
+- 会话列表分页、侧边栏 DOM diff、Web CRUD 冒烟测试（见 `docs/PLAN-FUTURE-SESSION-IMPROVEMENTS.md`）
+
+## [0.2.3] — 2026-07-30
 
 ### Added
 - **Web 前端 MVP**: `src/frontends/web/` — 基于 `std.http.Server` + `@embedFile` 的单二进制 Web UI
@@ -12,13 +139,37 @@
   - `index.html`: 侧边栏 + 对话流单页 Web UI
   - `vendor/`: Inter/JetBrainsMono 字体 + marked.js + highlight.js + DOMPurify (~819KB, @embedFile 内联)
 - **CLI**: `--web` 启动 Web 前端, `--root <path>` 指定项目根目录, `--help` 更新
+- **Web 会话管理 CRUD 补齐**:
+  - `Context.sessions_dir` 字段 — 消除多 handler 重复路径构造
+  - `Session.deleteFile(io, path)` — 核心层文件删除（与 `load` 参数模式对齐）
+  - `PATCH /api/session/:id` — 重命名端点，读取 JSON body，调用 `session.rename()` + `flush()`
+  - `DELETE /api/session/:id` — 删除端点，含路径穿越防护
+  - `isValidSessionId()` — 拒绝含 `.` `/` `\` 的 session ID（路径穿越防护，GET/PATCH/DELETE 全覆盖）
+  - **前端双击重命名** — 双击会话名 → input 编辑 → PATCH 提交 → 错误恢复（DOM 不卡死）
+  - **前端删除按钮** — × 按钮，确认后 DELETE + 清空对话区
+  - **新建会话去重** — 已有空会话（name="New Session", msg_count=0）时复用
+  - **前端时间分组** — Today / Yesterday / This Week / Older 四组 CSS 时间窗口（DST 安全）
+  - **空会话列表提示** — 无会话时显示 "No sessions yet"
+  - **新建按钮修复** — `sess.status === 'created'` → `sess.id` 判断
+  - **系统提示词归位核心层** — `AgentLoop.runTurn()` 自动注入完整 system prompt（身份 + AGENTS.md + skills），Web/CLI 双前端统一。`SystemPromptCb` 简化为仅追加交互模式提示
+  - **UUID v4 会话 ID** — `src/util/uuid.zig`，`handleSessionCreate` 改用随机 ID 替代时间戳
+  - **核心层安全校验** — `Session.isValidId()` 路径穿越防护，拒绝 `.` `/` `\`；`DEFAULT_SESSION_NAME/FILENAME` 常量化
 - **测试**: +9 SSE 测试 + 3 error 测试 (via test.zig)
 - **合计**: 197 test blocks (196 pass, 1 pre-existing fail)
 
+### Fixed
+- **CLI 静默退出**: `main.zig` 初始化错误 `catch return` 无任何输出，改为调用 `reportInitError` 输出原因到 stderr
+- **错误处理 DRY**: 新增 `init.zig` `reportInitError()` 统一出口，CLI 和 Web 双前端共用，消除手写复制
+- **3 处 `catch unreachable` 潜在 crash**: `session.zig` 时间戳格式化 OOM、`App.zig` 模型解析失败两次调用，改为 `try` 或 `return error`
+- **8 处静默吞错**: `.env` 加载失败、`session.flush` 失败（Web ×2）、JSONL 行损坏、SSE 解析错误、`bufPrint` 溢出、`flush` 警告截断、`openDir` 权限错误 — 均新增 stderr 诊断
+- **会话加载 500 错误**: `formatMessageJson` 固定 1024 字节缓冲区溢出（系统消息 2000+ 字符）→ `escapeJsonDynamic` arena 动态分配
+- **幽灵错误名 `error.SessionNotFound`**: 3 处 handler 检查的错误从未被任何模块返回 → `error.FileNotFound` + `error.InvalidSessionId`
+- **`{d}` 对有符号整数加 `+` 前缀**: `epochToISO8601` 中 `i64` 强转 `u32` 后格式化，修复时间戳往返解析失败
+- **合计**: 11 处错误处理加固，0 处静默吞错回归
+
 ### Known Gaps
-- SSE 流式端点 (`POST /api/session/:id/prompt`) 返回 "not yet implemented" — `Io.net.Stream.Writer` 类型桥接待解决
 - 并发连接 (Group.concurrent) 降级为顺序 accept，MVP 单用户无需求
-- PATCH/fork/reset session 端点均返回 501
+- `PATCH /api/session/:id/fork`, `/reset` 待实现
 
 ## [0.2.2] — 2026-07-23
 

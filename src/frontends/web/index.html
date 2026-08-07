@@ -3,306 +3,44 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="/favicon.ico">
 <title>z-agent-core</title>
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-:root{
-  --bg-deep:#0c0c0f;--bg-base:#18181b;--bg-layer-01:#1f1f23;--bg-layer-02:#27272a;--bg-layer-03:#2f2f33;
-  --text-strong:#fafafa;--text-base:#d4d4d8;--text-muted:#a1a1aa;--text-faint:#71717a;
-  --accent-base:#60a5fa;--accent-success:#22c55e;--accent-warning:#eab308;--accent-error:#ef4444;
-  --border-base:#2a2a2e;--border-muted:#1f1f23;--border-focus:#60a5fa;
-  --radius-sm:4px;--radius-md:6px;--radius-lg:10px;
-  --text-xs:11px;--text-sm:12px;--text-base-fs:13px;--text-lg:14px;
-  --syntax-keyword:#c792ea;--syntax-string:#c3e88d;--syntax-function:#82aaff;
-}
-body{font-family:system-ui,sans-serif;background:var(--bg-base);color:var(--text-base);font-size:var(--text-base-fs);display:flex;height:100vh}
-#sidebar{width:240px;background:var(--bg-deep);border-right:1px solid var(--border-base);display:flex;flex-direction:column;flex-shrink:0}
-#sidebar-header{padding:12px;border-bottom:1px solid var(--border-base)}
-#sidebar-header h1{font-size:var(--text-lg);color:var(--text-strong)}
-#sidebar-header .model{font-size:var(--text-xs);color:var(--text-muted);margin-top:2px}
-#session-list{flex:1;overflow-y:auto;padding:4px}
-#session-list .session{padding:8px 12px;cursor:pointer;border-radius:var(--radius-sm);margin:2px 0;font-size:var(--text-sm)}
-#session-list .session:hover{background:var(--bg-layer-02)}
-#session-list .session.active{background:var(--bg-layer-01);border-left:2px solid var(--accent-base)}
-#session-list .session .name{color:var(--text-base)}
-#session-list .session .meta{font-size:var(--text-xs);color:var(--text-muted)}
-.section-header{padding:8px 12px 4px;font-size:var(--text-xs);color:var(--text-faint);text-transform:uppercase;letter-spacing:0.5px}
-#new-session-btn{margin:8px;padding:8px;background:var(--bg-layer-01);border:1px solid var(--border-base);border-radius:var(--radius-sm);color:var(--text-base);cursor:pointer;font-size:var(--text-sm)}
-#new-session-btn:hover{background:var(--bg-layer-02)}
-#main{flex:1;display:flex;flex-direction:column;min-width:0}
-#topbar{padding:8px 16px;border-bottom:1px solid var(--border-base);font-size:var(--text-sm);color:var(--text-muted);flex-shrink:0}
-#messages{flex:1;overflow-y:auto;padding:16px}
-.msg{padding:8px 16px;margin:8px 0;border-radius:var(--radius-md);background:var(--bg-layer-01);font-size:var(--text-base-fs);line-height:1.6}
-.msg.user{background:var(--bg-layer-02)}
-.msg.assistant{}
-.thinking-block{margin:4px 0;padding:6px 10px;background:var(--bg-deep);border-radius:var(--radius-sm);font-size:var(--text-xs);color:var(--text-muted);cursor:pointer;user-select:none}
-.thinking-block .header{display:flex;align-items:center;gap:4px}
-.thinking-block .content{display:none;margin-top:6px;white-space:pre-wrap;color:var(--text-faint);line-height:1.5;max-height:300px;overflow-y:auto}
-.thinking-block.open .content{display:block}
-.tool-card{margin:4px 0;padding:6px 10px;background:var(--bg-deep);border-left:2px solid var(--accent-base);border-radius:var(--radius-sm);font-size:var(--text-xs);cursor:pointer}
-.tool-card .name-row{display:flex;align-items:center;gap:6px}
-.tool-card .name{color:var(--accent-base);font-weight:600}
-.tool-card .output{margin-top:4px;color:var(--text-muted);white-space:pre-wrap;max-height:200px;overflow-y:auto;font-family:monospace}
-.tool-card.error{border-left-color:var(--accent-error)}
-.tool-card.error .name{color:var(--accent-error)}
-#input-bar{display:flex;padding:12px;border-top:1px solid var(--border-base);flex-shrink:0}
-#input-bar textarea{flex:1;background:var(--bg-layer-03);border:1px solid var(--border-base);border-radius:var(--radius-md);color:var(--text-base);padding:8px 12px;font-size:var(--text-base-fs);resize:none;min-height:40px;max-height:120px;font-family:inherit}
-#input-bar textarea:focus{outline:none;border-color:var(--border-focus)}
-#input-bar button{padding:8px 16px;margin-left:8px;background:var(--accent-base);color:var(--bg-deep);border:none;border-radius:var(--radius-md);cursor:pointer;font-size:var(--text-sm);font-weight:600}
-#input-bar button:disabled{opacity:0.5;cursor:default}
-.spinner{display:inline-block;width:10px;height:10px;border:2px solid var(--text-muted);border-top-color:var(--accent-base);border-radius:50%;animation:spin 0.8s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.status-msg{padding:4px 16px;font-size:var(--text-sm);color:var(--text-muted);font-style:italic}
-.status-msg.error{color:var(--accent-error)}
-@media(max-width:768px){#sidebar{display:none;position:fixed;z-index:10;height:100vh}#sidebar.open{display:flex}}
-</style>
+<!-- STYLES -->
 </head>
 <body>
 <div id="sidebar">
   <div id="sidebar-header">
     <h1>z-agent-core</h1>
-    <div class="model" id="model-name">Loading...</div>
+    <div class="subtitle">AI-powered agent</div>
   </div>
+  <button id="theme-btn" title="Toggle theme">&#9728;</button>
   <button id="new-session-btn">+ New Session</button>
   <div id="session-list"></div>
+  <div id="model-selector">
+    <select id="model-select" aria-label="Model"></select>
+  </div>
+  <div id="resize-handle"></div>
 </div>
 <div id="main">
-  <div id="topbar">Select a session to start</div>
-  <div id="messages"></div>
+  <div id="topbar"><span id="sidebar-toggle">&#9776;</span> z-agent-core</div>
+  <div id="messages">
+    <div id="system-prompt" style="display:none"></div>
+  </div>
   <div id="input-bar">
-    <textarea id="prompt-input" rows="1" placeholder="Enter a prompt..." disabled></textarea>
-    <button id="send-btn" disabled>Send</button>
+    <textarea id="prompt-input" rows="1" placeholder="Enter a prompt... (Shift+Enter for new line)"></textarea>
+    <button id="stop-btn" class="stop-btn" disabled>Stop</button>
+    <button id="send-btn">Send</button>
   </div>
 </div>
-<script>
-const A = '/api';
-let currentId = null;
-let currentName = null;
-let evtSrc = null;
-
-async function api(path, opts) {
-  const r = await fetch(A + path, opts);
-  if (!r.ok) {
-    const text = await r.text();
-    console.error('API error', path, r.status, text.substring(0, 200));
-    throw new Error(text);
-  }
-  const text = await r.text();
-  try { return JSON.parse(text); } catch(e) {
-    console.error('JSON parse error', path, text.substring(0, 200));
-    throw e;
-  }
-}
-
-async function loadSessions() {
-  const list = await api('/session');
-  const el = document.getElementById('session-list');
-  el.innerHTML = '';
-  if (list.length === 0) return;
-
-  list.sort((a, b) => b.timestamp - a.timestamp);
-  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
-  const todaySec = Math.floor(todayStart.getTime() / 1000);
-
-  const groups = { today: [], earlier: [] };
-  list.forEach(s => {
-    if (s.timestamp >= todaySec) groups.today.push(s);
-    else groups.earlier.push(s);
-  });
-
-  function renderGroup(label, items) {
-    if (items.length === 0) return;
-    const hdr = document.createElement('div');
-    hdr.className = 'section-header';
-    hdr.textContent = label;
-    el.appendChild(hdr);
-    items.forEach(s => {
-      const div = document.createElement('div');
-      div.className = 'session' + (s.id === currentId ? ' active' : '');
-      div.innerHTML = `<div class="name">${esc(s.name)}</div><div class="meta">${esc(s.model)} &middot; ${s.msg_count} msgs</div>`;
-      div.onclick = () => loadSession(s.id);
-      el.appendChild(div);
-    });
-  }
-
-  renderGroup('Today', groups.today);
-  renderGroup('Earlier', groups.earlier);
-  document.getElementById('model-name').textContent = list[0].model;
-}
-
-async function loadSession(id) {
-  const sess = await api('/session/' + id);
-  currentId = id;
-  currentName = sess.name;
-  document.getElementById('topbar').textContent = sess.name;
-  document.getElementById('prompt-input').disabled = false;
-  document.getElementById('send-btn').disabled = false;
-  const msgs = document.getElementById('messages');
-  msgs.innerHTML = '';
-  sess.messages.forEach(m => addMessage(m.role, m.content));
-  await loadSessions();
-}
-
-function addMessage(role, content) {
-  const msgs = document.getElementById('messages');
-  const div = document.createElement('div');
-  div.className = 'msg ' + role;
-  div.textContent = content || '';
-  msgs.appendChild(div);
-  msgs.scrollTop = msgs.scrollHeight;
-  return div;
-}
-
-function sendPrompt(prompt) {
-  if (!currentId) { console.error('No session selected'); return; }
-  document.getElementById('send-btn').disabled = true;
-  document.getElementById('prompt-input').disabled = true;
-
-  const msgs = document.getElementById('messages');
-  addMessage('user', prompt);
-
-  const asst = document.createElement('div');
-  asst.className = 'msg assistant';
-  asst.innerHTML = '<span class="spinner"></span>';
-  msgs.appendChild(asst);
-  msgs.scrollTop = msgs.scrollHeight;
-
-  let contentDiv = null;
-  let thinkingBlock = null;
-  let thinkingContent = null;
-  let currentTool = null;
-
-  if (evtSrc) evtSrc.close();
-  const url = A + '/session/' + currentId + '/prompt?prompt=' + encodeURIComponent(prompt);
-  evtSrc = new EventSource(url);
-
-  evtSrc.addEventListener('thinking_start', () => {
-    if (thinkingBlock) return;
-    thinkingBlock = document.createElement('div');
-    thinkingBlock.className = 'thinking-block';
-    thinkingBlock.innerHTML = '<div class="header">&#9654; Thinking <span class="spinner"></span></div>';
-    thinkingContent = document.createElement('div');
-    thinkingContent.className = 'content';
-    thinkingBlock.appendChild(thinkingContent);
-    thinkingBlock.onclick = () => thinkingBlock.classList.toggle('open');
-    asst.appendChild(thinkingBlock);
-    msgs.scrollTop = msgs.scrollHeight;
-  });
-
-  evtSrc.addEventListener('thinking_delta', (e) => {
-    if (!thinkingContent) return;
-    const d = JSON.parse(e.data);
-    thinkingContent.textContent += d.text || '';
-    msgs.scrollTop = msgs.scrollHeight;
-  });
-
-  evtSrc.addEventListener('thinking_end', (e) => {
-    if (thinkingBlock) {
-      const d = JSON.parse(e.data);
-      const dur = d.duration_ms ? (d.duration_ms / 1000).toFixed(0) + 's' : '';
-      thinkingBlock.querySelector('.header').innerHTML = '&#9654; Thinking (' + dur + ')';
-    }
-  });
-
-  evtSrc.addEventListener('content_start', () => {
-    if (!contentDiv) {
-      contentDiv = document.createElement('div');
-      asst.appendChild(contentDiv);
-    }
-  });
-
-  evtSrc.addEventListener('content_delta', (e) => {
-    if (!contentDiv) {
-      contentDiv = document.createElement('div');
-      asst.appendChild(contentDiv);
-    }
-    const d = JSON.parse(e.data);
-    contentDiv.textContent += d.text || '';
-    msgs.scrollTop = msgs.scrollHeight;
-  });
-
-  function ensureContent() {
-    if (!contentDiv) { contentDiv = document.createElement('div'); asst.appendChild(contentDiv); }
-    return contentDiv;
-  }
-
-  evtSrc.addEventListener('tool_start', (e) => {
-    const d = JSON.parse(e.data);
-    currentTool = document.createElement('div');
-    currentTool.className = 'tool-card';
-    currentTool.innerHTML = '<div class="name-row"><span class="name">' + esc(d.name) + '</span><span class="spinner"></span></div>';
-    ensureContent().appendChild(currentTool);
-    msgs.scrollTop = msgs.scrollHeight;
-  });
-
-  evtSrc.addEventListener('tool_delta', (e) => {
-    if (!currentTool) return;
-    const d = JSON.parse(e.data);
-    let out = currentTool.querySelector('.output');
-    if (!out) { out = document.createElement('div'); out.className = 'output'; currentTool.appendChild(out); }
-    out.textContent += d.text || '';
-    msgs.scrollTop = msgs.scrollHeight;
-  });
-
-  evtSrc.addEventListener('tool_error', (e) => {
-    if (!currentTool) return;
-    const d = JSON.parse(e.data);
-    currentTool.classList.add('error');
-    currentTool.querySelector('.name-row').innerHTML = '<span class="name">' + esc(d.name || 'tool') + '</span> (err)';
-    msgs.scrollTop = msgs.scrollHeight;
-  });
-
-  evtSrc.addEventListener('error', (e) => {
-    const d = JSON.parse(e.data);
-    const err = document.createElement('div');
-    err.className = 'status-msg error';
-    err.textContent = 'Error: ' + (d.message || d.code || 'unknown');
-    ensureContent().appendChild(err);
-    msgs.scrollTop = msgs.scrollHeight;
-  });
-
-  evtSrc.addEventListener('done', () => {
-    if (evtSrc) { evtSrc.close(); evtSrc = null; }
-    document.getElementById('send-btn').disabled = false;
-    document.getElementById('prompt-input').disabled = false;
-    const spinners = asst.querySelectorAll('.spinner');
-    spinners.forEach(s => s.remove());
-    document.getElementById('prompt-input').focus();
-    loadSessions();
-  });
-
-  evtSrc.onerror = () => {
-    if (evtSrc) { evtSrc.close(); evtSrc = null; }
-    document.getElementById('send-btn').disabled = false;
-    document.getElementById('prompt-input').disabled = false;
-    const spinners = asst.querySelectorAll('.spinner');
-    spinners.forEach(s => s.remove());
-  };
-}
-
-document.getElementById('send-btn').onclick = () => {
-  const inp = document.getElementById('prompt-input');
-  const text = inp.value.trim();
-  if (!text) return;
-  inp.value = '';
-  sendPrompt(text);
-};
-
-document.getElementById('prompt-input').onkeydown = (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('send-btn').click(); }
-};
-
-document.getElementById('new-session-btn').onclick = async () => {
-  try {
-    const r = await fetch(A + '/session', { method: 'POST' });
-    const sess = await r.json();
-    if (sess.status === 'created') { await loadSessions(); }
-  } catch(e) { console.error(e); }
-};
-
-function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-loadSessions();
-</script>
+<div id="confirm-modal" class="modal-overlay">
+  <div class="modal-box">
+    <div class="modal-msg" id="confirm-msg"></div>
+    <div class="modal-actions">
+      <button class="modal-cancel">Cancel</button>
+      <button class="modal-danger" id="confirm-ok">Delete</button>
+    </div>
+  </div>
+</div>
+<!-- SCRIPTS -->
 </body>
 </html>

@@ -1,6 +1,6 @@
 # Plan PHASE-7: Web 前端 (HTTP Server + Browser)
 
-## 状态: 实施中 (SSE 流式端点已实现，Web UI 交互待完善)
+## 状态: ✅ 已完成 (v0.2.3) — SSE 流式端点 + Web CRUD + 交互体验增强 (v0.2.4 收尾)
 
 ## 前置依赖
 

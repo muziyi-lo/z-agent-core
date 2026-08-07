@@ -110,7 +110,7 @@ pub const App = struct {
             var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
             var md: [128]u8 = undefined;
             var pd: [64]u8 = undefined;
-            const model = config_mod.resolveModel(&state.config, state.config.default_model) catch unreachable;
+            const model = try config_mod.resolveModel(&state.config, state.config.default_model);
             sw.interface.print("z-agent-core v{s} | {s} | {s}\n", .{
                 types.VERSION,
                 config_mod.formatModelDisplay(model.name, &md),
@@ -143,7 +143,7 @@ pub const App = struct {
             project_context = content[0..n];
         }
 
-        const model_ctx = config_mod.resolveModel(&state.config, state.config.default_model) catch unreachable;
+        const model_ctx = try config_mod.resolveModel(&state.config, state.config.default_model);
         return App{
             .allocator = allocator,
             .io = io,
@@ -706,11 +706,20 @@ pub const App = struct {
 
 fn spRebuild(ctx: ?*anyopaque) anyerror!void {
     const self: *App = @ptrCast(@alignCast(ctx.?));
-    if (!self._env_changed) return;
-    self._env_changed = false;
-    const prompt = try buildPromptString(self.allocator, self.io, self.project_root, self.project_context, self.base_prompt, self.single_prompt != null);
-    defer self.allocator.free(prompt);
-    try self.session.updateFirstSystem(prompt);
+    if (self.single_prompt == null) return;
+    try self.session.append(.{
+        .role = .system,
+        .content = "Interaction mode: single-shot, no user interaction possible. Produce complete final output.",
+    });
+}
+
+fn shellName() []const u8 {
+    // The bash tool executes commands via this shell; the model needs to know
+    // its syntax (e.g. %date% is cmd, not PowerShell).
+    return switch (builtin.os.tag) {
+        .windows => "pwsh (PowerShell 7)",
+        else => "sh",
+    };
 }
 
 fn buildPromptString(
@@ -737,9 +746,11 @@ fn buildPromptString(
         \\<env>
         \\  Workspace root: {s}
         \\  Platform: {s}
+        \\  Shell: {s}
+        \\  Arch: {s}
         \\{s}\\</env>
         \\
-    , .{ effective_prompt, project_root, os_tag, interactive_hint });
+    , .{ effective_prompt, project_root, os_tag, shellName(), @tagName(builtin.cpu.arch), interactive_hint });
     defer allocator.free(prompt);
 
     const skills = skill_tool.listAvailableSkills(allocator, io, project_root) catch &.{};
@@ -816,6 +827,7 @@ test "buildPromptString: single_shot adds interaction mode" {
     defer allocator.free(result);
     try std.testing.expect(std.mem.indexOf(u8, result, "Interaction mode: single-shot") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "no user interaction possible") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "Shell: ") != null);
 }
 
 test "buildPromptString: REPL mode omits interaction hint" {
@@ -824,4 +836,5 @@ test "buildPromptString: REPL mode omits interaction hint" {
     defer allocator.free(result);
     try std.testing.expect(std.mem.indexOf(u8, result, "Interaction mode") == null);
     try std.testing.expect(std.mem.indexOf(u8, result, "single-shot") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "Shell: ") != null);
 }

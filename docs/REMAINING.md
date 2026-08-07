@@ -3,9 +3,7 @@
 ## 实施顺序
 
 ```
-PHASE-7 (Web 前端)  ← 当前（计划文档已创建）
-    ↓
-PHASE-5 (webfetch) — 独立于架构，可随时实施（计划文档已完善）
+PHASE-5 (webfetch)  ← 当前（计划文档已完善，可随时实施）
     ↓
 PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 ```
@@ -16,10 +14,52 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 |------|------|------|
 | PHASE-3 | `docs/0.2.2/PLAN-PHASE-3-COMPAT.md` | ✅ 已完成 (v0.2.2) |
 | PHASE-4 | `docs/0.2.2/PLAN-PHASE-4-CACHE.md` | ✅ 已完成 (v0.2.2) |
-| PHASE-7 | `docs/PLAN-PHASE-7-WEB-FRONTEND.md` | 实施中 (MVP — `zig build -- --web` 可用，SSE 流式待实现) |
+| PHASE-7 | `docs/0.2.3/PLAN-PHASE-7-WEB-FRONTEND.md` | ✅ 已完成 (v0.2.3) — SSE 流式端点 + Web CRUD |
 | PHASE-5 | `docs/PLAN-PHASE-5-WEBFETCH.md` | 计划中 |
 | PHASE-6 | `docs/PLAN-PHASE-6-TUI.md` | 架构设计 |
-| MCP | 无文档 | 未计划 |
+| FIX-2 | `docs/0.2.2/PLAN-FIX-2-DECOUPLE-BUILD.md` | ✅ 已完成 (v0.2.2) |
+| FIX-DOCS | `docs/0.2.2/PLAN-FIX-DOCS-AND-INFRA.md` | ✅ 已完成 (v0.2.2) |
+| FIX-SYSTEM-PROMPT | `docs/0.2.3/PLAN-FIX-SYSTEM-PROMPT-DEFAULT.md` | ✅ 已完成 (v0.2.3) |
+| FIX-WEB-SESSION | `docs/0.2.3/PLAN-FIX-WEB-SESSION-ISSUES.md` | ✅ 已完成 (v0.2.3) |
+| REF-1 | `docs/0.2.3/PLAN-REF-1-PHASEWRITER-PER-CALL.md` | ✅ 已完成 (v0.2.3) |
+| REF-2 | `docs/0.2.3/PLAN-REF-2-INIT-MODULE.md` | ✅ 已完成 (v0.2.3) |
+| WEB-CONCURRENT | `docs/0.2.4/PLAN-WEB-CONCURRENT.md` | ✅ 已完成 (v0.2.4) |
+| WEB-OPT | `docs/0.2.4/PLAN-WEB-OPT.md` | ✅ 已完成 (v0.2.4) |
+| WEB-UI-OPT | `docs/0.2.4/PLAN-WEB-UI-OPT.md` | ✅ 已完成 (v0.2.4) |
+| WEB-FIX-STREAMING | `docs/0.2.4/PLAN-WEB-FIX-STREAMING.md` | ✅ 已完成 (v0.2.4) |
+| WEB-FIX-SESSION-LIST | `docs/0.2.4/PLAN-WEB-FIX-SESSION-LIST.md` | ✅ 已完成 (v0.2.4) |
+| LOGGING-MODULE | `docs/0.2.4/PLAN-LOGGING-MODULE.md` | ✅ 已完成 (v0.2.4) |
+| WEB-REMAINING | `docs/0.2.4/PLAN-WEB-REMAINING.md` | ✅ 已完成 (v0.2.4) — G8 全工具视图 / G9 上下文分组 / G11 消息操作 |
+| WEB-UI-FIXES | `docs/0.2.5/PLAN-WEB-UI-FIXES.md` | ✅ 已完成 (v0.2.5) — F1-F16 前端修复 |
+| FIX-APIKEY-ENV | `docs/0.2.5/PLAN-FIX-APIKEY-ENV.md` | ✅ 已完成 — 空 key 误判 + .env 回退生效 |
+| STREAM-ORDER-PARTS | `docs/0.2.5/PLAN-STREAM-ORDER-PARTS.md` | ✅ 已完成 — parts 模型重构（拆分+流式/reload 双轨统一，Node 测试 37 断言） |
+
+## Done (2026-08-06 — v0.2.5)
+
+| # | Item | Plan doc | Effort |
+|---|------|----------|--------|
+| D26 | Web 前端 16 项修复 (剪贴板/移动端/停止按钮/空会话落盘/无会话输入/索引/主题/a11y 等) | docs/0.2.5/PLAN-WEB-UI-FIXES.md | High |
+
+## Done (2026-08-06 — v0.2.4)
+
+| # | Item | Plan doc | Effort |
+|---|------|----------|--------|
+| D21 | Web 并发请求 (线程模型) + POST abort + SSE 断开检测 | docs/0.2.4/PLAN-WEB-CONCURRENT.md | High |
+| D22 | Web 前端优化 14 项 (vendor JS 内联/拖拽 resize/消息删除/流式 Markdown/工具卡片等) | docs/0.2.4/PLAN-WEB-OPT.md + WEB-UI-OPT.md | High |
+| D23 | 消息删除 + removeMessage + SSE 实时 flush + done 首条消息 + 系统消息声明式渲染 | docs/0.2.4/PLAN-WEB-FIX-STREAMING.md | Medium |
+| D24 | 服务器日志模块 util/log.zig (结构化 5 级) | docs/0.2.4/PLAN-LOGGING-MODULE.md | Medium |
+| D25 | 渲染数据增强 (G3 thinking/tool 数据恢复 + G8 工具视图 + G9 上下文分组 + G11 消息操作) | docs/0.2.4/PLAN-WEB-REMAINING.md | Medium |
+
+## Done (2026-07-30 — v0.2.3)
+
+| # | Item | Plan doc | Effort |
+|---|------|----------|--------|
+| D15 | Web 前端 MVP (HTTP Server + SSE + index.html + 9 tests) | docs/0.2.3/PLAN-PHASE-7-WEB-FRONTEND.md | Very High |
+| D16 | Web 会话 CRUD 补齐 (PATCH/DELETE端点 + 核心层 deleteFile + 前端重命名/删除/时间分组/去重) | docs/0.2.3/PLAN-FIX-WEB-SESSION-ISSUES.md | High |
+| D17 | 错误处理全量加固 (reportInitError统一出口 + 3处unreachable + 8处静默吞错 + 幽灵错误名 + 500修复) | docs/0.2.3/PLAN-FIX-SYSTEM-PROMPT-DEFAULT.md | High |
+| D18 | 系统提示词归位核心层 (AgentLoop自动注入 + SystemPromptCb简化 + UUID v4 + 安全校验) | docs/0.2.3/PLAN-FIX-SYSTEM-PROMPT-DEFAULT.md | High |
+| D19 | REF-1 PhaseWriterCb per-call 化 | docs/0.2.3/PLAN-REF-1-PHASEWRITER-PER-CALL.md | Medium |
+| D20 | REF-2 抽取共享初始化模块 init.zig | docs/0.2.3/PLAN-REF-2-INIT-MODULE.md | Medium |
 
 ## Done (2026-07-16)
 
@@ -56,11 +96,21 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 |---|------|----------|--------|
 | D0 | PHASE-2 全 9 步 (ToolHooks + abort + LifecycleCb + Ctrl+C + ApiEndpoint + compact + TokenUsage + /fork + tests) | docs/PLAN-PHASE2.md | Very High |
 
+## Next (下版候选)
+
+| # | Item | Notes |
+|---|------|-------|
+| N1 | Web 端 `PATCH /api/session/:id/fork` + `/reset` 端点 | 承自 v0.2.3 Known Gaps |
+| N2 | CLI `/delete <id>` 命令 + sessions 路径常量化 + 删除运行中会话保护 | docs/PLAN-FUTURE-SESSION-IMPROVEMENTS.md P1 |
+| N3 | 侧边栏 DOM diff / 会话列表分页 / Web CRUD 冒烟测试 | docs/PLAN-FUTURE-SESSION-IMPROVEMENTS.md P2 |
+| N4 | `@container` 响应式侧边栏 | docs/DESIGN-WEB-RENDER.md 待实现 高 |
+| N5 | 技能覆盖缺口 3 项 (SSE filter / @embedFile 预览适配 / Web 冒烟测试) | docs/PLAN-SKILL-COVERAGE.md GAP-1~3 |
+| N6 | DOM 结构契约 + 前端回归验证脚本 (contentDiv 只装 LLM 文本、工具卡片平级挂 asst；chrome-cdp 断言 done 后 tool-card 存在) | 待设计 — 2026-08-06 工具卡片消失技术债根因 |
+
 ## Deferred (explicitly skipped)
 
 | # | Item | Reason |
 |---|------|--------|
-| R1 | compact.zig (Phase 2F) | → OPT-5 P0-1 — compact 工具 + session 压缩 |
 | R2 | DisplayHint (v2 tool metadata) | OPT-3 已覆盖 — ToolMeta 替代 |
 | R3 | Tool event streaming (start/update/end) | Requires significant protocol change |
 | R4 | Edit 模糊匹配 | 待 opencode 实现后跟进 |
@@ -70,7 +120,6 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | R8 | write 竞争防护 (writeIfUnchanged) | 需文件 hash 基础设施，单进程无并发 |
 | R9 | grep ripgrep 外部二进制 | `std.regex` 满足需求 |
 | R10 | bash 外部目录警告 | 权限系统范式不同 |
-| R11 | 死循环检测（StormBreaker） | → OPT-5 P1-3 — 连续 3 次相同 (name, args_hash) → 追加系统消息提示 |
 | R12 | 证据回执系统（Evidence Ledger） | 工具间交叉验证，需独立设计 |
 | R13 | 并行调度分区 | 后期性能优化 |
 

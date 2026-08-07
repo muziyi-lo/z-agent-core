@@ -101,7 +101,7 @@ Set `provider = ""` in the `[[models]]` block to share it across providers.
 ## Architecture
 
 ```
-src/main.zig                  -- 4-line shim: delegates to src/frontends/cli/
+src/main.zig                  -- 4-line shim: delegates to src/frontends/cli/ or src/frontends/web/
 src/frontends/cli/
   main.zig                    -- CLI entry, arg parsing (--prompt, --model, --thinking)
   App.zig                     -- orchestrator: config → provider → tools → session → agent
@@ -112,6 +112,21 @@ src/toml.zig                  -- lightweight TOML parser (self-contained, no dep
 src/session_ops.zig           -- session lifecycle: new, load, fork, rollback
 src/types.zig                 -- types: Message, Tool, ToolResult, TokenUsage, ToolMeta,
                               --   Model, ProviderEntry, ModelCompat, detectCompat()
+src/frontends/
+  init.zig                    -- unified init error exit (reportInitError), shared by CLI + Web
+  cli/
+    main.zig                  -- CLI entry, arg parsing (--prompt, --model, --thinking)
+    App.zig                   -- orchestrator: config → provider → tools → session → agent
+                              --   REPL: /exit, /new, /load, /name, /list, /fork, /thinking, /help
+    render.zig                -- ANSI output, Markdown→ANSI, streaming LineBuffer, tool display
+  web/
+    server.zig                -- TCP entry, --web/--root, project root resolution
+    handler.zig               -- route dispatch, 10 RESTful endpoints, per-request arena
+    sse.zig                   -- SSE frame construction, PhaseWriterCb/ToolDisplayCb mapping
+    error.zig                 -- unified JSON error responses
+    api_types.zig             -- request/response structs
+    index.html                -- sidebar + conversation flow SPA
+    vendor/                   -- fonts + marked.js + highlight.js + DOMPurify (embedded)
 src/core/
   agent.zig                   -- agent loop: ToolHooks, abort(), LifecycleCb, SystemPromptCb,
                               --   StormBreaker (doom loop detection), context window monitoring
@@ -133,6 +148,7 @@ src/util/
   path.zig                    -- path resolution with traversal guard, Windows drive letter normalize
   signal.zig                  -- Ctrl+C handler (Windows SetConsoleCtrlHandler)
   text.zig                    -- string trimming
+  uuid.zig                    -- UUID v4 generation for session IDs
 ```
 
 Core = all of `src/` except `src/frontends/`. The CLI frontend implements three callback contracts injected at runtime:
@@ -175,11 +191,13 @@ Add a tool: `tool/xxx.zig` + 1 line in `registry.zig` `buildRegistry()`.
 | File | Content |
 |------|---------|
 | `docs/CORE-FRONTEND.md` | Core definition, frontend integration, Phase 0/1/2 plan, architecture comparison |
-| `docs/PLAN-PHASE-7-WEB-FRONTEND.md` | Phase 7: Web frontend — HTTP server + browser UI (planned) |
 | `docs/PLAN-PHASE-5-WEBFETCH.md` | Phase 5: webfetch tool — HTTP GET with HTML→Markdown conversion (planned) |
 | `docs/PLAN-PHASE-6-TUI.md` | Phase 6: TUI frontend architecture + framework evaluation (design stage) |
 | `docs/设计原则整理.md` | 15 design principles accumulated from development |
 | `docs/REMAINING.md` | Remaining work tracker: done/planned/deferred/future/wishlist |
+| `docs/0.2.4/` | v0.2.4 plan docs: WEB-CONCURRENT, WEB-OPT, WEB-UI-OPT, WEB-FIX-STREAMING, WEB-FIX-SESSION-LIST, WEB-REMAINING, LOGGING-MODULE (7 files, all done) |
+| `docs/0.2.5/` | v0.2.5 plan docs: WEB-UI-FIXES, FIX-APIKEY-ENV, STREAM-ORDER-PARTS (all done) |
+| `docs/0.2.3/` | v0.2.3 plan docs: PHASE-7, FIX-SYSTEM-PROMPT, FIX-WEB-SESSION, REF-1, REF-2 (5 files, all done) |
 | `docs/0.2.2/` | v0.2.2 plan docs: PHASE-3, PHASE-4, FIX-1, FIX-2 (4 files, all done) |
 | `docs/0.2.0/` | v0.2.0 plan docs: OPT-1 through OPT-6 + FIX-1 (9 files, all done) |
 | `docs/0.0.1-alpha/` | v0.0.1-alpha step-by-step design docs (8 files) |

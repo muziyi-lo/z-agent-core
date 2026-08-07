@@ -47,26 +47,20 @@ pub const Provider = struct {
         return .standard;
     }
 
-    /// Create provider from config entry. Reads api_key from environment. error.ApiKeyNotSet if missing.
+    /// Create provider from config entry. api_key is resolved by the config
+    /// layer (process env → .env fallback); Provider owns its own copy.
     pub fn init(
         allocator: std.mem.Allocator,
         entry: types.ProviderEntry,
         model: *const types.Model,
+        api_key: []const u8,
         vendor_override: ?Vendor,
         io: std.Io,
     ) !Provider {
         _ = io;
         const vendor = if (vendor_override) |v| v else detectVendor(entry.base_url);
 
-        var env = std.process.Environ{ .block = .{ .use_global = true } };
-        var map = try env.createMap(allocator);
-        defer map.deinit();
-
-        const key_raw = map.get(entry.api_key_env) orelse {
-            return error.ApiKeyNotSet;
-        };
-
-        const key_owned = try allocator.dupe(u8, key_raw);
+        const key_owned = try allocator.dupe(u8, api_key);
 
         const resolved_compat = config_mod.resolveCompat(entry.base_url, model);
 
@@ -199,9 +193,7 @@ pub const Provider = struct {
         var child_finished = false;
         defer {
             if (!child_finished) {
-                if (builtin.os.tag != .windows) {
-                    child.kill(io) catch {};
-                }
+                child.kill(io);
                 _ = child.wait(io) catch {};
             }
         }
@@ -232,9 +224,7 @@ pub const Provider = struct {
 
         while (true) {
             if (signal.isInterrupted()) {
-                if (builtin.os.tag != .windows) {
-                    child.kill(io) catch {};
-                }
+                child.kill(io);
                 _ = child.wait(io) catch {};
                 child_finished = true;
                 return error.Interrupted;
@@ -261,7 +251,13 @@ pub const Provider = struct {
             const payload = line["data: ".len..];
             if (std.mem.eql(u8, payload, "[DONE]")) break;
 
-            const parsed = std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{ .ignore_unknown_fields = true }) catch continue;
+            const parsed = std.json.parseFromSliceLeaky(std.json.Value, alloc, payload, .{ .ignore_unknown_fields = true }) catch {
+                var dbuf: [256]u8 = undefined;
+                var dw: std.Io.File.Writer = .init(.stderr(), io, &dbuf);
+                _ = dw.interface.writeAll("z-agent-core: warning: SSE parse error, skipping event\n") catch {};
+                _ = dw.interface.flush() catch {};
+                continue;
+            };
 
             if (parsed.object.get("error")) |err_val| {
                 if (isRetryableError(err_val)) return error.ApiRateLimited;
@@ -1154,14 +1150,14 @@ test "parseFinishReason unknown" {
     try std.testing.expectEqual(types.FinishReason.unknown, parseFinishReason("something_else"));
 }
 
-test "init missing key returns ApiKeyNotSet" {
+test "Provider.init stores resolved key" {
     const testing = std.testing;
     const entry = types.ProviderEntry{
         .name = "test",
         .api = .openai_compat,
         .base_url = "https://api.test.com",
         .models = &.{},
-        .api_key_env = "NONEXISTENT_ENV_VAR_FOR_TEST_12345",
+        .api_key_env = "TEST_KEY",
     };
     const model = types.Model{
         .id = "test-model",
@@ -1171,7 +1167,9 @@ test "init missing key returns ApiKeyNotSet" {
         .params_json = null,
         .input = &.{.text},
     };
-    try testing.expectError(error.ApiKeyNotSet, Provider.init(testing.allocator, entry, &model, null, testing.io));
+    const provider = try Provider.init(testing.allocator, entry, &model, "sk-test", null, testing.io);
+    defer testing.allocator.free(provider.config.api_key);
+    try testing.expectEqualStrings("sk-test", provider.config.api_key);
 }
 
 test "SSE parse data:DONE" {

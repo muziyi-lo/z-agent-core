@@ -1,8 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const types = @import("../types.zig");
 const provider = @import("../io/provider.zig");
 const registry_mod = @import("../tool/registry.zig");
 const session_mod = @import("session.zig");
+const signal = @import("../util/signal.zig");
 
 /// Turn-level termination reason. Distinct from types.FinishReason (per-request LLM status).
 pub const TurnFinish = enum {
@@ -88,7 +90,8 @@ pub const AgentLoop = struct {
     tool_hooks: ?ToolHooks = null,
     lifecycle: ?LifecycleCb = null,
     system_prompt: ?SystemPromptCb = null,
-    _aborted: bool = false,
+    _aborted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    _aborted_bool: bool = false,
     _tool_call_history: [5]ToolCallRecord = undefined,
     _tool_call_history_len: usize = 0,
     _tool_call_history_pos: usize = 0,
@@ -96,8 +99,12 @@ pub const AgentLoop = struct {
     _context_warning_injected: bool = false,
 
     /// Signal the next runTurn to abort at the earliest safe point.
+    /// Sets the per-agent abort flag and the global interrupt flag so the provider's
+    /// SSE loop will detect the abort and kill the curl subprocess.
     pub fn abort(self: *AgentLoop) void {
-        self._aborted = true;
+        self._aborted.store(true, .release);
+        self._aborted_bool = true;
+        signal.setInterrupted();
     }
 
     /// Swap the session reference — used by web frontend for per-request session isolation.
@@ -138,7 +145,8 @@ pub const AgentLoop = struct {
     /// Fire on_turn_end callback then construct RoundResult. Called at every exit point.
     fn finishTurn(self: *AgentLoop, new_msgs: usize, finish: TurnFinish, error_msg: ?[]const u8) RoundResult {
         if (finish == .interrupted) {
-            self._aborted = false;
+            self._aborted.store(false, .release);
+            self._aborted_bool = false;
         }
         if (self.lifecycle) |lc| {
             if (lc.on_turn_end) |cb| cb(lc.context, finish);
@@ -163,6 +171,15 @@ pub const AgentLoop = struct {
             }
         }
 
+        {
+            const msgs = self.session_ref.messages();
+            if (msgs.len == 0 or msgs[0].role != .system) {
+                const sp = try buildPromptString(self);
+                defer self.allocator.free(sp);
+                try self.session_ref.updateFirstSystem(sp);
+            }
+        }
+
         if (self.system_prompt) |sp| {
             try sp.rebuild(sp.context);
         }
@@ -182,7 +199,8 @@ pub const AgentLoop = struct {
         var new_msgs: usize = 0;
 
         while (true) {
-            if (self._aborted) {
+            if (self._aborted.load(.acquire)) {
+                self._aborted_bool = true;
                 return finishTurn(self, new_msgs, .interrupted, null);
             }
             if (tool_rounds >= self.max_tool_rounds) {
@@ -237,7 +255,10 @@ pub const AgentLoop = struct {
             const resp = raw_resp catch |err| {
                 const err_name = @errorName(err);
                 return switch (err) {
-                    error.Interrupted => finishTurn(self, new_msgs, .interrupted, err_name),
+                    error.Interrupted => {
+                        signal.reset();
+                        return finishTurn(self, new_msgs, .interrupted, err_name);
+                    },
                     else => finishTurn(self, new_msgs, .api_error, err_name),
                 };
             };
@@ -258,7 +279,7 @@ pub const AgentLoop = struct {
             if (resp.finish_reason == .tool_calls) {
                 if (resp.tool_calls) |tcs| {
                     for (tcs) |tc| {
-                        if (self._aborted) {
+                        if (self._aborted.load(.acquire)) {
                             return finishTurn(self, new_msgs, .interrupted, null);
                         }
 
@@ -285,7 +306,7 @@ pub const AgentLoop = struct {
                                 .api_key = self.provider_ref.config.api_key,
                                 .model = self.provider_ref.config.model,
                             },
-                            .abort_target = &self._aborted,
+                            .abort_target = &self._aborted_bool,
                             .messages = self.session_ref.messages(),
                             .session_ref = self.session_ref,
                             .provider_ref = self.provider_ref,
@@ -361,6 +382,112 @@ pub const AgentLoop = struct {
         }
     }
 };
+
+fn buildPromptString(self: *const AgentLoop) ![]const u8 {
+    var buf: std.ArrayListAligned(u8, null) = .empty;
+    const a = self.allocator;
+
+    try buf.appendSlice(a, "You are z-agent-core, an interactive CLI agent that helps users with software engineering tasks.\n\n<env>\n  Workspace root: ");
+    try buf.appendSlice(a, self.project_root);
+    try buf.appendSlice(a, "\n  Platform: ");
+    try buf.appendSlice(a, @tagName(builtin.os.tag));
+    try buf.appendSlice(a, "\n  Shell: ");
+    try buf.appendSlice(a, shellName());
+    try buf.appendSlice(a, "\n  Arch: ");
+    try buf.appendSlice(a, @tagName(builtin.cpu.arch));
+    try buf.appendSlice(a, "\n</env>");
+
+    if (readAgentsMd(self)) |content| {
+        defer a.free(content);
+        try buf.appendSlice(a, "\n\n<project_context>\n");
+        try buf.appendSlice(a, content);
+        try buf.appendSlice(a, "\n</project_context>");
+    }
+
+    try appendSkillsList(self, &buf);
+
+    return buf.toOwnedSlice(a);
+}
+
+fn shellName() []const u8 {
+    // The bash tool executes commands via this shell; the model needs to know
+    // its syntax (e.g. %date% is cmd, not PowerShell).
+    return switch (builtin.os.tag) {
+        .windows => "pwsh (PowerShell 7)",
+        else => "sh",
+    };
+}
+
+fn readAgentsMd(self: *const AgentLoop) ?[]const u8 {
+    const ap = std.fs.path.join(self.allocator, &.{ self.project_root, "AGENTS.md" }) catch return null;
+    defer self.allocator.free(ap);
+    const f = Io.Dir.cwd().openFile(self.io, ap, .{ .mode = .read_only }) catch return null;
+    defer f.close(self.io);
+    const s = f.stat(self.io) catch return null;
+    if (s.size <= 0 or s.size > 65536) return null;
+    const sz = @as(usize, @intCast(s.size));
+    const content = self.allocator.alloc(u8, sz) catch return null;
+    const n = f.readPositionalAll(self.io, content, 0) catch {
+        self.allocator.free(content);
+        return null;
+    };
+    return content[0..n];
+}
+
+fn appendSkillsList(self: *const AgentLoop, buf: *std.ArrayListAligned(u8, null)) !void {
+    const skills_dir = std.fs.path.join(self.allocator, &.{ self.project_root, ".zagent", "skills" }) catch return;
+    defer self.allocator.free(skills_dir);
+    var dir = Io.Dir.cwd().openDir(self.io, skills_dir, .{ .iterate = true }) catch return;
+    defer dir.close(self.io);
+
+    var first = true;
+    var iter = dir.iterate();
+    while (iter.next(self.io) catch null) |entry| {
+        if (entry.kind != .directory) continue;
+        const skill_path = std.fs.path.join(self.allocator, &.{ skills_dir, entry.name }) catch continue;
+        defer self.allocator.free(skill_path);
+        const sk = Io.Dir.cwd().openFile(self.io, skill_path, .{ .mode = .read_only }) catch continue;
+        defer sk.close(self.io);
+        const ss = sk.stat(self.io) catch continue;
+        if (ss.size <= 0 or ss.size > 65536) continue;
+        const sz = @as(usize, @intCast(ss.size));
+        const skill_content = self.allocator.alloc(u8, sz) catch continue;
+        const nn = sk.readPositionalAll(self.io, skill_content, 0) catch {
+            self.allocator.free(skill_content);
+            continue;
+        };
+        const skill_text = skill_content[0..nn];
+
+        const desc = extractSkillDescription(skill_text) orelse continue;
+        self.allocator.free(skill_content);
+
+        if (first) {
+            try buf.appendSlice(self.allocator, "\n\n<available_skills>\n");
+            first = false;
+        }
+        try buf.appendSlice(self.allocator, "  ");
+        try buf.appendSlice(self.allocator, entry.name);
+        try buf.appendSlice(self.allocator, ": ");
+        try buf.appendSlice(self.allocator, desc);
+        try buf.appendSlice(self.allocator, "\n");
+    }
+    if (!first) {
+        try buf.appendSlice(self.allocator, "</available_skills>");
+    }
+}
+
+fn extractSkillDescription(skill_text: []const u8) ?[]const u8 {
+    const marker = "description:";
+    const start = std.mem.indexOf(u8, skill_text, marker) orelse return null;
+    const after_marker = skill_text[start + marker.len ..];
+    var pos: usize = 0;
+    while (pos < after_marker.len and (after_marker[pos] == ' ' or after_marker[pos] == '\t')) : (pos += 1) {}
+    const trimmed = after_marker[pos..];
+    const end = std.mem.indexOfScalar(u8, trimmed, '\n') orelse trimmed.len;
+    return trimmed[0..end];
+}
+
+const Io = std.Io;
 
 const MockChatter = struct {
     responses: []const types.ProviderResponse,
@@ -478,10 +605,11 @@ test "agent: runTurn stop" {
     try std.testing.expectEqual(@as(usize, 1), result.new_message_count);
 
     const msgs = sess.messages();
-    try std.testing.expectEqual(@as(usize, 2), msgs.len);
-    try std.testing.expectEqual(types.Role.user, msgs[0].role);
-    try std.testing.expectEqual(types.Role.assistant, msgs[1].role);
-    try std.testing.expectEqualStrings("Hello!", msgs[1].content);
+    try std.testing.expectEqual(@as(usize, 3), msgs.len);
+    try std.testing.expectEqual(types.Role.system, msgs[0].role);
+    try std.testing.expectEqual(types.Role.user, msgs[1].role);
+    try std.testing.expectEqual(types.Role.assistant, msgs[2].role);
+    try std.testing.expectEqualStrings("Hello!", msgs[2].content);
 }
 
 test "agent: runTurn tool_calls" {
@@ -526,14 +654,15 @@ test "agent: runTurn tool_calls" {
     try std.testing.expectEqual(@as(usize, 3), result.new_message_count);
 
     const msgs = sess.messages();
-    try std.testing.expectEqual(@as(usize, 4), msgs.len);
-    try std.testing.expectEqual(types.Role.user, msgs[0].role);
-    try std.testing.expectEqual(types.Role.assistant, msgs[1].role);
-    try std.testing.expect(msgs[1].tool_calls != null);
-    try std.testing.expectEqual(types.Role.tool, msgs[2].role);
-    try std.testing.expectEqualStrings("call_1", msgs[2].tool_call_id orelse "");
-    try std.testing.expectEqual(types.Role.assistant, msgs[3].role);
-    try std.testing.expectEqualStrings("Found 1 file.", msgs[3].content);
+    try std.testing.expectEqual(@as(usize, 5), msgs.len);
+    try std.testing.expectEqual(types.Role.system, msgs[0].role);
+    try std.testing.expectEqual(types.Role.user, msgs[1].role);
+    try std.testing.expectEqual(types.Role.assistant, msgs[2].role);
+    try std.testing.expect(msgs[2].tool_calls != null);
+    try std.testing.expectEqual(types.Role.tool, msgs[3].role);
+    try std.testing.expectEqualStrings("call_1", msgs[3].tool_call_id orelse "");
+    try std.testing.expectEqual(types.Role.assistant, msgs[4].role);
+    try std.testing.expectEqualStrings("Found 1 file.", msgs[4].content);
 }
 
 test "agent: runTurn max_rounds" {
@@ -578,11 +707,12 @@ test "agent: runTurn max_rounds" {
     try std.testing.expectEqual(@as(usize, 3), result.new_message_count);
 
     const msgs = sess.messages();
-    try std.testing.expectEqual(@as(usize, 4), msgs.len);
-    try std.testing.expectEqual(types.Role.user, msgs[0].role);
-    try std.testing.expectEqual(types.Role.assistant, msgs[1].role);
-    try std.testing.expectEqual(types.Role.tool, msgs[2].role);
-    try std.testing.expectEqual(types.Role.system, msgs[3].role);
+    try std.testing.expectEqual(@as(usize, 5), msgs.len);
+    try std.testing.expectEqual(types.Role.system, msgs[0].role);
+    try std.testing.expectEqual(types.Role.user, msgs[1].role);
+    try std.testing.expectEqual(types.Role.assistant, msgs[2].role);
+    try std.testing.expectEqual(types.Role.tool, msgs[3].role);
+    try std.testing.expectEqual(types.Role.system, msgs[4].role);
 }
 
 test "agent: runTurn interrupted" {
@@ -699,15 +829,15 @@ test "agent: runTurn appends to session" {
     const pre_len = sess.messages().len;
     try sess.append(.{ .role = .user, .content = "task" });
 
-    const result = try agent.runTurn(null, null);
+    _ = try agent.runTurn(null, null);
 
     const msgs = sess.messages();
     const new_msgs = msgs[pre_len + 1 ..];
-    try std.testing.expectEqual(result.new_message_count, new_msgs.len);
-    try std.testing.expectEqual(@as(usize, 3), new_msgs.len);
-    try std.testing.expectEqual(types.Role.assistant, new_msgs[0].role);
-    try std.testing.expectEqual(types.Role.tool, new_msgs[1].role);
-    try std.testing.expectEqual(types.Role.assistant, new_msgs[2].role);
+    try std.testing.expectEqual(@as(usize, 4), new_msgs.len);
+    try std.testing.expectEqual(types.Role.user, new_msgs[0].role);
+    try std.testing.expectEqual(types.Role.assistant, new_msgs[1].role);
+    try std.testing.expectEqual(types.Role.tool, new_msgs[2].role);
+    try std.testing.expectEqual(types.Role.assistant, new_msgs[3].role);
 }
 
 // ── Test helpers for hooks/lifecycle/abort tests ──
