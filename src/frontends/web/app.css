@@ -69,6 +69,9 @@ body{font-family:var(--font-ui);background:var(--bg-base);color:var(--text-base)
 .msg.system::-webkit-scrollbar{width:6px}
 .msg.system::-webkit-scrollbar-thumb{background:var(--text-faint);border-radius:3px}
 .msg.system::before{content:'System prompt';display:block;font-weight:600;margin-bottom:4px;color:var(--text-faint)}
+.msg.system .sys-block{white-space:pre-wrap;font-family:var(--font-code);margin:6px 0;padding:6px 8px;background:var(--bg-deep);border-left:2px solid var(--border-focus);border-radius:var(--radius-sm);color:var(--text-muted)}
+.msg.system p,.msg.system h1,.msg.system h2,.msg.system h3{margin:6px 0}
+.msg.system pre{margin:4px 0}
 .thinking-block{margin:4px 0;padding:6px 10px;background:var(--bg-deep);border-radius:var(--radius-sm);font-size:var(--text-xs);color:var(--text-muted);cursor:pointer;user-select:none}
 .content-block{margin:4px 0}
 .thinking-block .header{display:flex;align-items:center;gap:4px}

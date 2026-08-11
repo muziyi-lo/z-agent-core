@@ -259,8 +259,62 @@ function renderSystemPrompt(content) {
   }
   if (!content) { el.style.display = 'none'; return; }
   el.className = 'msg system';
-  el.innerHTML = renderMd(content);
+  el.innerHTML = renderSystemBlocks(content);
   el.style.display = '';
+}
+
+// Render the system prompt block-wise. The prompt is not pure markdown:
+// <env>, <project_context> and <available_skills> are structured blocks that
+// marked would strip or mangle (unknown HTML tags, newline collapsing). Each
+// block is rendered as a <pre class="sys-block"> to preserve the original
+// whitespace and keep the module boundaries visually distinct. Text outside
+// the blocks (the identity line) is rendered as markdown.
+// Blocks are split by their semantic tags; text before each tag is rendered
+// as markdown separately so tag lines and their content stay together.
+function renderSystemBlocks(content) {
+  var out = [];
+  var i = 0;
+  var n = content.length;
+  while (i < n) {
+    var lt = content.indexOf('<', i);
+    if (lt < 0) {
+      var tail = content.slice(i).trim();
+      if (tail) out.push(renderMd(tail));
+      break;
+    }
+    // text before the tag, if any
+    var before = content.slice(i, lt).trim();
+    if (before) out.push(renderMd(before));
+    var gt = content.indexOf('>', lt);
+    if (gt < 0) { break; }
+    var tag = content.slice(lt, gt + 1);
+    if (tag === '<env>') {
+      var end = content.indexOf('</env>', gt);
+      if (end < 0) { out.push(renderMd(content.slice(lt))); break; }
+      var block = content.slice(lt, end + '</env>'.length);
+      out.push('<pre class="sys-block">' + esc(block) + '</pre>');
+      i = end + '</env>'.length;
+    } else if (tag === '<available_skills>') {
+      var end2 = content.indexOf('</available_skills>', gt);
+      if (end2 < 0) { out.push(renderMd(content.slice(lt))); break; }
+      var block2 = content.slice(lt, end2 + '</available_skills>'.length);
+      out.push('<pre class="sys-block">' + esc(block2) + '</pre>');
+      i = end2 + '</available_skills>'.length;
+    } else if (tag === '<project_context>') {
+      var end3 = content.indexOf('</project_context>', gt);
+      if (end3 < 0) { out.push(renderMd(content.slice(lt))); break; }
+      var block3 = content.slice(lt, end3 + '</project_context>'.length);
+      out.push('<pre class="sys-block">' + esc(block3) + '</pre>');
+      i = end3 + '</project_context>'.length;
+    } else {
+      // not a recognized wrapper tag — emit up to the next '<' as markdown
+      var nextLt = content.indexOf('<', gt + 1);
+      var seg = (nextLt < 0 ? content.slice(lt) : content.slice(lt, nextLt)).trim();
+      if (seg) out.push(renderMd(seg));
+      i = (nextLt < 0 ? n : nextLt);
+    }
+  }
+  return out.join('\n');
 }
 
 function renderMd(content) {

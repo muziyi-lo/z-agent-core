@@ -3,6 +3,7 @@
 ## [0.2.5] — 2026-08-06
 
 ### Added
+- **system prompt 分块渲染**: `renderSystemBlocks` 按语义标签（`<env>`/`<project_context>`/`<available_skills>`）分块，统一 `<pre class="sys-block">` 保留原始缩进换行 + 左侧色条视觉分割（AGENTS.md 原样展示）；修复 env/skills 块被 marked 剥离导致换行折叠、模块无分割的问题
 - **上下文拼装修复（CONTEXT-ASSEMBLY）**: system prompt `<available_skills>` 索引修复（读 SKILL.md 而非目录，修 IsDir bug）+ 按名排序 + 空态输出；env 块补 Model/Date/Git repo 三行（模型自我认知/当前日期/git 状态）；skill 目录配置化 `skills_dir`（默认 `.zagent/skills`，可指向任意工具技能目录）
 - **frontmatter 解析统一**: 新增 `util/frontmatter.zig` 的 `parseField`（comptime 拼接零分配），统一 agent/skill 两处实现
 - **bash 工具描述禁令**: `DO NOT use for file operations` + 专用工具映射表（glob/grep/read/edit/write）+ `workdir` 替代 `cd`
