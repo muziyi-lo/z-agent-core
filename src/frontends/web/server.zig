@@ -228,6 +228,8 @@ fn handleConnection(
         .agent = &agent,
         .provider = &provider,
         .default_session = &state.session,
+        .env_snapshot = &state.env_snapshot,
+        .dotenv = &state.dotenv,
         .sse_writer = &sse_w,
         .abort_map = &abort_map,
         .abort_mutex = &abort_mutex,

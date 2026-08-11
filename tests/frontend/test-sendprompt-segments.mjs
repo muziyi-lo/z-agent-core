@@ -64,6 +64,7 @@ globalThis.EventSource = FakeEventSource
 globalThis.A = "/api"
 globalThis.currentId = null
 globalThis.currentName = null
+globalThis.currentModel = null
 globalThis.evtSrc = null
 globalThis.isStreaming = false
 globalThis.abortInFlight = false

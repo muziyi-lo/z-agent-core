@@ -34,6 +34,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | FIX-APIKEY-ENV | `docs/0.2.5/PLAN-FIX-APIKEY-ENV.md` | ✅ 已完成 — 空 key 误判 + .env 回退生效 |
 | STREAM-ORDER-PARTS | `docs/0.2.5/PLAN-STREAM-ORDER-PARTS.md` | ✅ 已完成 — parts 模型重构（拆分+流式/reload 双轨统一，Node 测试 37 断言） |
 | SLASH-COMMANDS | `docs/0.2.5/PLAN-SLASH-COMMANDS.md` | 实施中 — 阶段 1-4 完成（注册表/CLI dispatch/Web 命令 API/popover），阶段 5 prompt 命令待实施 |
+| MODEL-RESOLVE | `docs/0.2.5/PLAN-MODEL-RESOLVE.md` | ✅ 已完成 — 模型解析单一化（createSession 工厂 + env 快照 + resolveSessionModel 决策点），LRN-20260811-001 遗留债收尾 |
 
 ## Done (2026-08-06 — v0.2.5)
 

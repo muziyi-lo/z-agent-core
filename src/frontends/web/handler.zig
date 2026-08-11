@@ -36,6 +36,8 @@ pub const Context = struct {
     agent: *anyopaque,
     provider: *anyopaque,
     default_session: *anyopaque,
+    env_snapshot: *const std.process.Environ.Map,
+    dotenv: *const std.StringArrayHashMapUnmanaged([]const u8),
     sse_writer: ?*anyopaque = null,
     abort_map: *std.StringHashMap(*agent_mod.AgentLoop),
     abort_mutex: *std.Io.Mutex,
@@ -293,9 +295,77 @@ fn handleSessionMessages(ctx: *Context, request: *std.http.Server.Request, id: [
     try respondJson(request, buf.items);
 }
 
+fn resolveModelSpec(config: *const config_mod.Config, opt: ?[]const u8) []const u8 {
+    if (opt) |s| {
+        if (s.len > 0) return s;
+    }
+    return config.default_model;
+}
+
+const ResolvedModel = struct {
+    model: *const types.Model,
+    entry: *const types.ProviderEntry,
+};
+
+fn resolveSessionModel(config: *const config_mod.Config, spec: []const u8) !ResolvedModel {
+    const model = try config_mod.resolveModel(config, spec);
+    for (config.providers) |*entry| {
+        if (std.mem.eql(u8, entry.name, model.provider)) return .{ .model = model, .entry = entry };
+    }
+    return error.ProviderNotFound;
+}
+
+const CreatedSession = struct {
+    id: []const u8,
+    session: session_mod.Session,
+};
+
+/// Create an empty session and flush it to disk. `id_override` lets the caller
+/// pin the file name (handlePrompt uses the frontend-generated session id);
+/// null generates a fresh uuid (handleSessionCreate / handleCommandNew).
+fn createSession(ctx: *Context, a: std.mem.Allocator, opt_model: ?[]const u8, id_override: ?[]const u8) !CreatedSession {
+    const spec = resolveModelSpec(ctx.config, opt_model);
+    const id = if (id_override) |oid| oid else try uuid_mod.v4(a);
+    var s = try session_mod.Session.init(ctx.allocator, ctx.io, spec);
+    try Io.Dir.cwd().createDirPath(ctx.io, ctx.sessions_dir);
+    const filename = try std.fmt.allocPrint(a, "{s}.jsonl", .{id});
+    const path = try std.fs.path.join(a, &.{ ctx.sessions_dir, filename });
+    s.path = path;
+    try s.flush(); // 空会话落盘，刷新不消失
+    return .{ .id = id, .session = s };
+}
+
+/// Append `"provider/model_id"` comma-separated entries to buf. Shared by
+/// handleModelList (full object array) and respondModelUnavailable (id list),
+/// so the `provider/model_id` id scheme never drifts across the two.
+fn writeModelIds(a: std.mem.Allocator, config: *const config_mod.Config, buf: *AlignedU8) !void {
+    var first = true;
+    for (config.providers) |p| {
+        for (p.models) |m| {
+            if (!first) try buf.appendSlice(a, ",");
+            first = false;
+            const item = try std.fmt.allocPrint(a, "\"{s}/{s}\"", .{ p.name, m.id });
+            try buf.appendSlice(a, item);
+        }
+    }
+}
+
+/// 400 error whose body includes `available_models` so the user/frontend can
+/// see which provider/model specs are actually selectable.
+fn respondModelUnavailable(request: *std.http.Server.Request, ctx: *Context, spec: []const u8, a: std.mem.Allocator) !void {
+    const esc_spec = try escapeJsonDynamic(a, spec);
+    defer a.free(esc_spec);
+    var body: AlignedU8 = .empty;
+    try body.appendSlice(a, "{\"error\":{\"code\":\"bad_request\",\"message\":\"cannot resolve model \\\"");
+    try body.appendSlice(a, esc_spec);
+    try body.appendSlice(a, "\\\"\",\"available_models\":[");
+    try writeModelIds(a, ctx.config, &body);
+    try body.appendSlice(a, "]}}");
+    try request.respond(body.items, .{ .status = .bad_request });
+}
+
 fn handleSessionCreate(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
-    const id = try uuid_mod.v4(a);
-    var model: []const u8 = ctx.config.default_model;
+    var body_model: ?[]const u8 = null;
     if (request.head.method == .POST) {
         var transfer_buf: [512]u8 = undefined;
         var body_reader = request.readerExpectNone(&transfer_buf);
@@ -304,20 +374,15 @@ fn handleSessionCreate(ctx: *Context, request: *std.http.Server.Request, a: std.
             const parsed = std.json.parseFromSlice(std.json.Value, a, b, .{ .ignore_unknown_fields = true }) catch null;
             if (parsed) |p| {
                 if (p.value.object.get("model")) |mv| {
-                    if (mv == .string) model = mv.string;
+                    if (mv == .string and mv.string.len > 0) body_model = mv.string;
                 }
             }
         }
     }
-    var s = try session_mod.Session.init(ctx.allocator, ctx.io, model);
-    defer s.deinit();
-    try Io.Dir.cwd().createDirPath(ctx.io, ctx.sessions_dir);
-    const filename = try std.fmt.allocPrint(a, "{s}.jsonl", .{id});
-    const path = try std.fs.path.join(a, &.{ ctx.sessions_dir, filename });
-    s.path = path;
-    try s.flush(); // 空会话落盘，刷新不消失
+    var created = try createSession(ctx, a, body_model, null);
+    defer created.session.deinit();
     var buf: [256]u8 = undefined;
-    const response = try std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"name\":\"New Session\",\"model\":\"{s}\"}}", .{ id, model });
+    const response = try std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\",\"name\":\"New Session\",\"model\":\"{s}\"}}", .{ created.id, created.session.model });
     try respondJson(request, response);
 }
 
@@ -388,15 +453,9 @@ fn handleCommandExec(ctx: *Context, request: *std.http.Server.Request, a: std.me
 }
 
 fn handleCommandNew(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
-    const id = try uuid_mod.v4(a);
-    var s = try session_mod.Session.init(ctx.allocator, ctx.io, ctx.config.default_model);
-    defer s.deinit();
-    try Io.Dir.cwd().createDirPath(ctx.io, ctx.sessions_dir);
-    const filename = try std.fmt.allocPrint(a, "{s}.jsonl", .{id});
-    const path = try std.fs.path.join(a, &.{ ctx.sessions_dir, filename });
-    s.path = path;
-    try s.flush();
-    const response = try std.fmt.allocPrint(a, "{{\"status\":\"ok\",\"data\":{{\"session_id\":\"{s}\",\"name\":\"{s}\"}}}}", .{ id, s.name });
+    var created = try createSession(ctx, a, null, null);
+    defer created.session.deinit();
+    const response = try std.fmt.allocPrint(a, "{{\"status\":\"ok\",\"data\":{{\"session_id\":\"{s}\",\"name\":\"{s}\"}}}}", .{ created.id, created.session.name });
     try respondJson(request, response);
 }
 
@@ -479,29 +538,43 @@ fn handleMessageDelete(ctx: *Context, request: *std.http.Server.Request, session
     try respondJson(request, "{\"status\":\"deleted\"}");
 }
 
+fn applySessionModel(ctx: *Context, agent: *agent_mod.AgentLoop, spec: []const u8, a: std.mem.Allocator) !void {
+    const resolved = try resolveSessionModel(ctx.config, spec);
+    const api_key = try config_mod.resolveApiKey(ctx.env_snapshot, ctx.dotenv, resolved.entry.api_key_env);
+    try agent.provider_ref.setModel(a, resolved.entry.*, resolved.model, api_key);
+    agent.context_window = resolved.model.context_window;
+}
+
 fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8) !void {
     const target = request.head.target;
     const prompt = extractPrompt(target, ctx.allocator) orelse return err_mod.respondError(request, .bad_request, "missing ?prompt= parameter", ctx.allocator);
+    const url_model = extractModel(target, ctx.allocator);
 
     var is_new: bool = false;
     var session = loadSession(ctx, session_id) catch |err| blk: {
         if (err == error.InvalidSessionId) return err_mod.respondError(request, .bad_request, "invalid session id", ctx.allocator);
         if (err != error.FileNotFound) return err_mod.respondError(request, .internal_error, "failed to load session", ctx.allocator);
 
-        var s = try session_mod.Session.init(ctx.allocator, ctx.io, ctx.config.default_model);
+        const spec = resolveModelSpec(ctx.config, url_model);
+        if (url_model != null) {
+            _ = resolveSessionModel(ctx.config, spec) catch {
+                return respondModelUnavailable(request, ctx, spec, ctx.allocator);
+            };
+        }
+
+        const created = try createSession(ctx, ctx.allocator, url_model, session_id);
+        var s = created.session;
         defer s.deinit();
         try s.append(.{ .role = .user, .content = prompt });
         const title_len = @min(prompt.len, 30);
         s.name = try ctx.allocator.dupe(u8, prompt[0..title_len]);
-        const filename = try std.fmt.allocPrint(ctx.allocator, "{s}.jsonl", .{session_id});
-        const path2 = try std.fs.path.join(ctx.allocator, &.{ ctx.sessions_dir, filename });
-        s.path = path2;
-        try Io.Dir.cwd().createDirPath(ctx.io, ctx.sessions_dir);
         try s.flush();
         is_new = true;
 
-        log.biz_info(ctx.thread_id, ctx.request_id, "session_new", "path={s}", .{path2});
+        log.biz_info(ctx.thread_id, ctx.request_id, "session_new", "path={s}", .{s.path orelse "?"});
 
+        const filename = try std.fmt.allocPrint(ctx.allocator, "{s}.jsonl", .{session_id});
+        const path2 = try std.fs.path.join(ctx.allocator, &.{ ctx.sessions_dir, filename });
         break :blk try session_mod.Session.load(ctx.allocator, ctx.io, path2);
     };
     defer session.deinit();
@@ -513,6 +586,12 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
 
     const agent: *agent_mod.AgentLoop = @ptrCast(@alignCast(ctx.agent));
     agent.setSession(&session);
+
+    if (session.model.len > 0) {
+        applySessionModel(ctx, agent, session.model, ctx.allocator) catch {
+            log.biz_error(ctx.thread_id, ctx.request_id, "model_apply_failed", "model={s}", .{session.model});
+        };
+    }
 
     const sw: *sse.SseWriter = @ptrCast(@alignCast(ctx.sse_writer orelse return err_mod.respondError(request, .internal_error, "SSE writer not available", ctx.allocator)));
     try sw.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\nCache-Control: no-cache\r\n\r\n");
@@ -735,16 +814,26 @@ fn escapeJsonDynamic(allocator: std.mem.Allocator, src: []const u8) ![]const u8 
 }
 
 fn extractPrompt(target: []const u8, a: std.mem.Allocator) ?[]const u8 {
+    return extractQueryValue(target, "prompt", a);
+}
+
+fn extractModel(target: []const u8, a: std.mem.Allocator) ?[]const u8 {
+    return extractQueryValue(target, "model", a);
+}
+
+fn extractQueryValue(target: []const u8, comptime key: []const u8, a: std.mem.Allocator) ?[]const u8 {
     const qm = std.mem.indexOfScalar(u8, target, '?') orelse return null;
     const query = target[qm + 1 ..];
-    const prefix = "prompt=";
-    if (!std.mem.startsWith(u8, query, prefix)) return null;
-    var value = query[prefix.len..];
-    if (std.mem.indexOfScalar(u8, value, '&')) |amp| {
-        value = value[0..amp];
+    var it = std.mem.splitScalar(u8, query, '&');
+    const prefix = key ++ "=";
+    while (it.next()) |pair| {
+        if (std.mem.startsWith(u8, pair, prefix)) {
+            const value = pair[prefix.len..];
+            if (value.len == 0) return null;
+            return percentDecode(a, value) catch null;
+        }
     }
-    if (value.len == 0) return null;
-    return percentDecode(a, value) catch null;
+    return null;
 }
 
 fn percentDecode(allocator: std.mem.Allocator, src: []const u8) ![]const u8 {
@@ -766,4 +855,80 @@ fn percentDecode(allocator: std.mem.Allocator, src: []const u8) ![]const u8 {
         }
     }
     return buf.toOwnedSlice(allocator);
+}
+
+test "handler: resolveModelSpec falls back to default" {
+    const cfg = config_mod.Config{
+        .default_model = "deepseek/deepseek-v4-pro",
+        .max_tokens = 1000,
+        .max_tool_rounds = 8,
+        .providers = &.{},
+        ._arena = undefined,
+    };
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-pro", resolveModelSpec(&cfg, null));
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-pro", resolveModelSpec(&cfg, ""));
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-flash", resolveModelSpec(&cfg, "deepseek/deepseek-v4-flash"));
+}
+
+test "handler: resolveSessionModel finds entry and errors" {
+    const provider = types.ProviderEntry{
+        .name = "deepseek",
+        .api = .openai_compat,
+        .base_url = "https://api.deepseek.com",
+        .api_key_env = "DEEPSEEK_API_KEY",
+        .models = &.{
+            .{ .id = "deepseek-v4-pro", .name = "V4 Pro", .provider = "deepseek", .context_window = 128000, .max_tokens = 4000, .input = &.{} },
+        },
+    };
+    const cfg = config_mod.Config{
+        .default_model = "deepseek/deepseek-v4-pro",
+        .max_tokens = 1000,
+        .max_tool_rounds = 8,
+        .providers = &.{provider},
+        ._arena = undefined,
+    };
+
+    const resolved = try resolveSessionModel(&cfg, "deepseek/deepseek-v4-pro");
+    try std.testing.expectEqualStrings("deepseek", resolved.entry.name);
+    try std.testing.expectEqualStrings("deepseek-v4-pro", resolved.model.id);
+
+    try std.testing.expectError(error.InvalidModelSpec, resolveSessionModel(&cfg, "no-slash"));
+    try std.testing.expectError(error.ProviderNotFound, resolveSessionModel(&cfg, "nobody/ghost"));
+    try std.testing.expectError(error.ModelNotFound, resolveSessionModel(&cfg, "deepseek/nonexistent"));
+}
+
+test "handler: writeModelIds emits provider/model_id list" {
+    const p1 = types.ProviderEntry{
+        .name = "deepseek",
+        .api = .openai_compat,
+        .base_url = "https://api.deepseek.com",
+        .api_key_env = "DEEPSEEK_API_KEY",
+        .models = &.{
+            .{ .id = "deepseek-v4-pro", .name = "V4 Pro", .provider = "deepseek", .context_window = 128000, .max_tokens = 4000, .input = &.{} },
+            .{ .id = "deepseek-v4-flash", .name = "V4 Flash", .provider = "deepseek", .context_window = 64000, .max_tokens = 2000, .input = &.{} },
+        },
+    };
+    const p2 = types.ProviderEntry{
+        .name = "openai",
+        .api = .openai_compat,
+        .base_url = "https://api.openai.com",
+        .api_key_env = "OPENAI_API_KEY",
+        .models = &.{
+            .{ .id = "gpt-4o", .name = "GPT-4o", .provider = "openai", .context_window = 128000, .max_tokens = 4096, .input = &.{} },
+        },
+    };
+    const cfg = config_mod.Config{
+        .default_model = "deepseek/deepseek-v4-pro",
+        .max_tokens = 1000,
+        .max_tool_rounds = 8,
+        .providers = &.{ p1, p2 },
+        ._arena = undefined,
+    };
+
+    var buf: AlignedU8 = .empty;
+    var tmp = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer tmp.deinit();
+    const a = tmp.allocator();
+    try writeModelIds(a, &cfg, &buf);
+    try std.testing.expectEqualStrings("\"deepseek/deepseek-v4-pro\",\"deepseek/deepseek-v4-flash\",\"openai/gpt-4o\"", buf.items);
 }

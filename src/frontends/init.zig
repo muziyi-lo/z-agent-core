@@ -27,10 +27,21 @@ pub const FrontendState = struct {
     registry: registry_mod.Registry,
     session: session_mod.Session,
     session_dir: []const u8,
+    /// 进程级 env 快照：启动时 createMap 一次，请求期只读（Web 前端模型切换复用）。
+    env_snapshot: std.process.Environ.Map,
+    /// 进程级 .env 快照：启动时 loadDotEnv 一次，请求期只读。
+    dotenv: std.StringArrayHashMapUnmanaged([]const u8),
 
     pub fn deinit(self: *FrontendState) void {
         self.config.deinit();
         self.session.deinit();
+        self.env_snapshot.deinit();
+        var it = self.dotenv.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.dotenv.deinit(self.allocator);
         self.allocator.free(self.session_dir);
         self.allocator.free(self.project_root);
     }
@@ -44,10 +55,6 @@ pub fn init(
         api_key_override: ?[]const u8 = null,
     },
 ) !FrontendState {
-    var tmp = std.heap.ArenaAllocator.init(allocator);
-    defer tmp.deinit();
-    const ta = tmp.allocator();
-
     const project_root = if (opts.project_root) |r|
         try allocator.dupe(u8, r)
     else if (config_mod.findZagentRoot(allocator, io)) |r|
@@ -61,13 +68,18 @@ pub fn init(
     var cfg = config_mod.Config.load(allocator, project_root, io) catch return error.ConfigLoadFailed;
     errdefer cfg.deinit();
 
-    var dotenv_map = config_mod.loadDotEnv(ta, project_root, io) catch |err| blk: {
+    var dotenv = config_mod.loadDotEnv(allocator, project_root, io) catch |err| blk: {
         var dbuf: [256]u8 = undefined;
         var dw: std.Io.File.Writer = .init(.stderr(), io, &dbuf);
         dw.interface.print("z-agent-core: warning: failed to load .env ({s})\n", .{@errorName(err)}) catch {};
         dw.interface.flush() catch {};
         break :blk std.StringArrayHashMapUnmanaged([]const u8){};
     };
+    errdefer dotenv.deinit(allocator);
+
+    const env = std.process.Environ{ .block = .{ .use_global = true } };
+    var env_snapshot = try env.createMap(allocator);
+    errdefer env_snapshot.deinit();
 
     const model = config_mod.resolveModel(&cfg, cfg.default_model) catch return error.ModelResolveFailed;
 
@@ -76,10 +88,7 @@ pub fn init(
     } else return error.ProviderNotFound;
 
     const provider = blk: {
-        const env = std.process.Environ{ .block = .{ .use_global = true } };
-        var env_map = try env.createMap(allocator);
-        defer env_map.deinit();
-        const api_key = try config_mod.resolveApiKey(&env_map, &dotenv_map, entry.api_key_env);
+        const api_key = try config_mod.resolveApiKey(&env_snapshot, &dotenv, entry.api_key_env);
         break :blk try provider_mod.Provider.init(allocator, entry, model, api_key, null, io);
     };
 
@@ -99,6 +108,8 @@ pub fn init(
         .registry = registry,
         .session = session,
         .session_dir = session_dir,
+        .env_snapshot = env_snapshot,
+        .dotenv = dotenv,
     };
 }
 

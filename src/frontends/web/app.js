@@ -528,7 +528,7 @@ function sendPrompt(prompt) {
   }
 
   if (evtSrc) evtSrc.close();
-  var url = A + '/session/' + currentId + '/prompt?prompt=' + encodeURIComponent(prompt);
+  var url = A + '/session/' + currentId + '/prompt?prompt=' + encodeURIComponent(prompt) + (currentModel ? '&model=' + encodeURIComponent(currentModel) : '');
   evtSrc = new EventSource(url);
 
   evtSrc.addEventListener('thinking_start', function() {

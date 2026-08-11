@@ -4,6 +4,9 @@
 
 ### Added
 - **Web 停止按钮**: 输入栏 `#stop-btn`，流式期间启用，点击调 `POST /api/session/:id/abort`，含 `abortInFlight` 防重入（F11）
+- **Web 模型切换生效**: 前端 `sendPrompt` 的 SSE URL 附带 `&model=`，后端 `handlePrompt` 读取并应用；新增 `Provider.setModel()` 在 runTurn 前把会话模型写入 provider config（base_url/api_key/model/vendor/compat/context_window 一并切换）
+- **非法模型显式 400 + available_models**: 新会话模型解析失败返回 `{code, message, available_models}`，列出全部 `provider/model_id` 可选模型（LRN-20260811-001 修复的配套契约）
+- **模型解析单一化（MODEL-RESOLVE）**: `createSession` 工厂统一 3 处建会话（`id_override` 复用前端 session id）；`resolveModelSpec`/`resolveSessionModel` 收敛模型决策点；`FrontendState` 进程级持有 `env_snapshot` + `dotenv`，请求期零 env/.env IO
 - **SSE 异常关闭通知服务端**: `evtSrc.onerror` 复用 `abortPrompt()`，连接断开时 abort 服务端请求避免空跑（F16）
 - **无会话直接输入**: 移除 `#prompt-input`/`#send-btn` 初始 disabled；无 `currentId` 时 `genUuidV4()` 生成会话 ID 走 SSE，服务端自动创建；`deleteSession` 后恢复可输入态（F10）
 - **session_ready SSE 事件**: 服务端 `handlePrompt` 在 `is_new` 时回传 `{id, name}`（prompt 命名），`done` 帧并入 `session_id` 兜底（F10）

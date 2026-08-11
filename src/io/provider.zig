@@ -79,6 +79,27 @@ pub const Provider = struct {
         };
     }
 
+    /// Reconfigure in place for a different model (web frontend model switch).
+    /// Mirrors init(): base_url/model_params borrow from config; api_key is dup'd.
+    pub fn setModel(
+        self: *Provider,
+        allocator: std.mem.Allocator,
+        entry: types.ProviderEntry,
+        model: *const types.Model,
+        api_key: []const u8,
+    ) !void {
+        const key_owned = try allocator.dupe(u8, api_key);
+        self.config.base_url = entry.base_url;
+        self.config.api_key = key_owned;
+        self.config.model = model.id;
+        self.config.max_tokens = model.max_tokens;
+        self.config.vendor = detectVendor(entry.base_url);
+        self.config.vendor_override = null;
+        self.config.model_params = model.params_json;
+        self.config.compat = config_mod.resolveCompat(entry.base_url, model);
+        self.config.stream_options_declined = false;
+    }
+
     /// Call LLM API with streaming SSE. Retries up to 3 times on transient errors.
     /// arena: temporary allocator for response data; caller owns arena lifetime.
     pub fn chatCompletionStreaming(
