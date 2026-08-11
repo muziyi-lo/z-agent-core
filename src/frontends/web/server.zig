@@ -210,7 +210,7 @@ fn handleConnection(
     provider.config.model_params = model_params;
 
     const model_info = config_mod.resolveModel(&state.config, state.config.default_model) catch return;
-    var agent = agent_mod.AgentLoop.init(a, io, &provider, state.registry, &state.session, state.config.max_tool_rounds, project_root, model_info.context_window, .{});
+    var agent = agent_mod.AgentLoop.init(a, io, &provider, state.registry, &state.session, state.config.max_tool_rounds, project_root, model_info.context_window, .{ .skills_dir = state.config.skills_dir });
 
     var request = server.receiveHead() catch return;
     const method = request.head.method;

@@ -176,6 +176,7 @@ pub const App = struct {
             self.cfg.max_tool_rounds, self.project_root, self.model_context,
             .{
                 .system_prompt = .{ .context = self, .rebuild = spRebuild },
+                .skills_dir = self.cfg.skills_dir,
             },
         );
     }
@@ -768,7 +769,7 @@ fn buildPromptString(
     , .{ effective_prompt, project_root, os_tag, shellName(), @tagName(builtin.cpu.arch), interactive_hint });
     defer allocator.free(prompt);
 
-    const skills = skill_tool.listAvailableSkills(allocator, io, project_root) catch &.{};
+    const skills = skill_tool.listAvailableSkills(allocator, io, project_root, ".zagent/skills") catch &.{};
     var result: []const u8 = prompt;
     if (skills.len > 0) {
         var skills_buf = std.ArrayListAligned(u8, null).empty;

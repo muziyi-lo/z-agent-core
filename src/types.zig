@@ -49,6 +49,8 @@ pub const ToolContext = struct {
     messages: ?[]const Message = null,
     session_ref: ?*anyopaque = null,
     provider_ref: ?*anyopaque = null,
+    /// Skill root directory relative to project_root (from Config.skills_dir).
+    skills_dir: []const u8 = ".zagent/skills",
 };
 
 /// Per-tool structured metadata for frontend display.

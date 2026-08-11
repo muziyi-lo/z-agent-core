@@ -13,6 +13,9 @@ pub const Config = struct {
     max_tool_rounds: u32,
     providers: []const types.ProviderEntry,
     base_prompt: ?[]const u8 = null,
+    /// Skill root directory relative to project_root. Configurable so users can
+    /// point at another tool's skills dir (e.g. .opencode/skills).
+    skills_dir: []const u8 = ".zagent/skills",
 
     _arena: std.heap.ArenaAllocator,
 
@@ -251,6 +254,7 @@ fn parseConfigContent(a: std.mem.Allocator, source: []const u8) !Config {
 
     const all_models = try parseAllModels(a, parsed);
     const bp_raw = getString(parsed, "base_prompt");
+    const skills_dir_raw = getString(parsed, "skills_dir") orelse ".zagent/skills";
 
     return .{
         .default_model = try a.dupe(u8, dm_raw),
@@ -258,6 +262,7 @@ fn parseConfigContent(a: std.mem.Allocator, source: []const u8) !Config {
         .max_tool_rounds = @intCast(@max(max_tool_rounds_val, 0)),
         .providers = try parseProviders(a, parsed, all_models),
         .base_prompt = if (bp_raw) |bp| try a.dupe(u8, bp) else null,
+        .skills_dir = try a.dupe(u8, skills_dir_raw),
         ._arena = undefined,
     };
 }
@@ -529,6 +534,9 @@ const DEFAULT_TEMPLATE =
     \\max_tokens = 384000
     \\# Maximum tool execution rounds per turn. Prevents infinite loops.
     \\max_tool_rounds = 10
+    \\# Skill root directory relative to project_root. Default .zagent/skills.
+    \\# Point at another tool's skills dir (e.g. .opencode/skills) to reuse its skills.
+    \\# skills_dir = ".zagent/skills"
     \\
     \\# Provider: defines an API endpoint with auth and available models.
     \\# Add multiple [[providers]] blocks for different services (openai, ollama, etc).
@@ -604,6 +612,25 @@ test "config: parse default template" {
     try std.testing.expect(deepseek.models[0].params_json == null);
     try std.testing.expectEqual(@as(usize, 1), deepseek.models[0].input.len);
     try std.testing.expect(deepseek.models[0].input[0] == .text);
+}
+
+test "config: skills_dir defaults to .zagent/skills" {
+    const allocator = std.testing.allocator;
+    var config = try testParseConfig(allocator, DEFAULT_TEMPLATE);
+    defer config.deinit();
+    try std.testing.expectEqualStrings(".zagent/skills", config.skills_dir);
+}
+
+test "config: skills_dir override parsed" {
+    const allocator = std.testing.allocator;
+    var config = try testParseConfig(allocator,
+        \\skills_dir = ".opencode/skills"
+        \\default_model = "deepseek/deepseek-v4-pro"
+        \\max_tokens = 1000
+        \\max_tool_rounds = 8
+    );
+    defer config.deinit();
+    try std.testing.expectEqualStrings(".opencode/skills", config.skills_dir);
 }
 
 test "config: model params_json present" {

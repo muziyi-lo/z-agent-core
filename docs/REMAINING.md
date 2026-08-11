@@ -35,6 +35,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | STREAM-ORDER-PARTS | `docs/0.2.5/PLAN-STREAM-ORDER-PARTS.md` | ✅ 已完成 — parts 模型重构（拆分+流式/reload 双轨统一，Node 测试 37 断言） |
 | SLASH-COMMANDS | `docs/0.2.5/PLAN-SLASH-COMMANDS.md` | 实施中 — 阶段 1-4 完成（注册表/CLI dispatch/Web 命令 API/popover），阶段 5 prompt 命令待实施 |
 | MODEL-RESOLVE | `docs/0.2.5/PLAN-MODEL-RESOLVE.md` | ✅ 已完成 — 模型解析单一化（createSession 工厂 + env 快照 + resolveSessionModel 决策点），LRN-20260811-001 遗留债收尾 |
+| CONTEXT-ASSEMBLY | `docs/0.2.5/PLAN-CONTEXT-ASSEMBLY.md` | ✅ 已完成 — 上下文拼装修复（skill 索引 IsDir bug + skills_dir 配置化）+ env 补 Model/Date/Git + frontmatter 统一 + bash 禁令 |
 
 ## Done (2026-08-06 — v0.2.5)
 
@@ -108,6 +109,10 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | N4 | `@container` 响应式侧边栏 | docs/DESIGN-WEB-RENDER.md 待实现 高 |
 | N5 | 技能覆盖缺口 3 项 (SSE filter / @embedFile 预览适配 / Web 冒烟测试) | docs/PLAN-SKILL-COVERAGE.md GAP-1~3 |
 | N6 | DOM 结构契约 + 前端回归验证脚本 (contentDiv 只装 LLM 文本、工具卡片平级挂 asst；chrome-cdp 断言 done 后 tool-card 存在) | 根因已修复 (v0.2.5 parts 重构，PLAN-STREAM-ORDER-PARTS)；剩余：DOM 回归脚本浏览器级落库（Node 测试 37 断言已在 .tmp 提供逻辑级覆盖） |
+| N7 | CLI `App.zig buildPromptString` 死代码删除（含 2 条测试） | 生产零调用（CONTEXT-ASSEMBLY F1） |
+| N8 | 增量上下文更新（chronogical system 消息 + baseline 持久化） | 对齐 opencode D1，需 DB/会话格式扩展（CONTEXT-ASSEMBLY F3） |
+| N9 | 系统 prompt 缓存 breakpoint | 依赖 provider 缓存 hint 协议（CONTEXT-ASSEMBLY F4） |
+| N10 | 多 skill 目录数组（`skills_dir = ["...", "..."]`） | 索引与 tool 按顺序查找同名 skill，前者优先（CONTEXT-ASSEMBLY F5） |
 
 ## Deferred (explicitly skipped)
 

@@ -4,7 +4,13 @@ const types = @import("../types.zig");
 const signal = @import("../util/signal.zig");
 
 pub const tool_name = "bash";
-pub const tool_description = "Execute a shell command in the specified working directory. Returns stdout, stderr, and exit code. Use for running CLI tools, scripts, and system commands.";
+pub const tool_description =
+    "Execute a shell command in the specified working directory. Returns stdout, stderr, and exit code. " ++
+    "Use for CLI tools, scripts, and system commands. " ++
+    "DO NOT use for file operations (reading, writing, editing, searching, finding files) " ++
+    "- use the dedicated tools instead: glob for file search, grep for content search, " ++
+    "read for reading files, edit for editing, write for writing. " ++
+    "Use the workdir parameter instead of 'cd'.";
 pub const tool_params =
     \\{"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"workdir":{"type":"string","description":"Working directory (default: current)"},"timeout":{"type":"integer","description":"Timeout in seconds (informational only — process execution is blocking)"}},"required":["command"]}
 ;

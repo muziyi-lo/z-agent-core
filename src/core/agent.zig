@@ -5,6 +5,8 @@ const provider = @import("../io/provider.zig");
 const registry_mod = @import("../tool/registry.zig");
 const session_mod = @import("session.zig");
 const signal = @import("../util/signal.zig");
+const frontmatter = @import("../util/frontmatter.zig");
+const skill_tool = @import("../tool/skill.zig");
 
 /// Turn-level termination reason. Distinct from types.FinishReason (per-request LLM status).
 pub const TurnFinish = enum {
@@ -90,6 +92,7 @@ pub const AgentLoop = struct {
     tool_hooks: ?ToolHooks = null,
     lifecycle: ?LifecycleCb = null,
     system_prompt: ?SystemPromptCb = null,
+    skills_dir: []const u8 = ".zagent/skills",
     _aborted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     _aborted_bool: bool = false,
     _tool_call_history: [5]ToolCallRecord = undefined,
@@ -125,6 +128,7 @@ pub const AgentLoop = struct {
             tool_hooks: ?ToolHooks = null,
             lifecycle: ?LifecycleCb = null,
             system_prompt: ?SystemPromptCb = null,
+            skills_dir: []const u8 = ".zagent/skills",
         },
     ) AgentLoop {
         return .{
@@ -139,6 +143,7 @@ pub const AgentLoop = struct {
             .tool_hooks = opts.tool_hooks,
             .lifecycle = opts.lifecycle,
             .system_prompt = opts.system_prompt,
+            .skills_dir = opts.skills_dir,
         };
     }
 
@@ -310,6 +315,7 @@ pub const AgentLoop = struct {
                             .messages = self.session_ref.messages(),
                             .session_ref = self.session_ref,
                             .provider_ref = self.provider_ref,
+                            .skills_dir = self.skills_dir,
                         };
                         if (tool_display) |cb| {
                             if (cb.begin_tool) |bt| bt(cb.context, tc.name);
@@ -395,6 +401,15 @@ fn buildPromptString(self: *const AgentLoop) ![]const u8 {
     try buf.appendSlice(a, shellName());
     try buf.appendSlice(a, "\n  Arch: ");
     try buf.appendSlice(a, @tagName(builtin.cpu.arch));
+    try buf.appendSlice(a, "\n  Model: ");
+    try buf.appendSlice(a, self.provider_ref.config.model);
+    try buf.appendSlice(a, "\n  Date: ");
+    {
+        var date_buf: [16]u8 = undefined;
+        try buf.appendSlice(a, try formatUtcDate(self.io, &date_buf));
+    }
+    try buf.appendSlice(a, "\n  Git repo: ");
+    try buf.appendSlice(a, if (isGitRepo(self.io, self.project_root)) "yes" else "no");
     try buf.appendSlice(a, "\n</env>");
 
     if (readAgentsMd(self)) |content| {
@@ -407,6 +422,33 @@ fn buildPromptString(self: *const AgentLoop) ![]const u8 {
     try appendSkillsList(self, &buf);
 
     return buf.toOwnedSlice(a);
+}
+
+/// Format current UTC date as YYYY-MM-DD. Zig 0.16 has no std date formatting
+/// public API; convert manually via the epoch chain:
+/// Timestamp(ns) → EpochSeconds → EpochDay → YearAndDay → MonthAndDay.
+fn formatUtcDate(io: std.Io, buf: []u8) ![]const u8 {
+    const ts = Io.Clock.real.now(io);
+    const secs: u64 = @intCast(@divTrunc(ts.nanoseconds, 1_000_000_000));
+    const epoch = std.time.epoch.EpochSeconds{ .secs = secs };
+    const year_day = epoch.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}", .{
+        year_day.year,
+        @as(u8, @intFromEnum(month_day.month)) + 1,
+        @as(u8, month_day.day_index) + 1,
+    });
+}
+
+/// Detect a git repo by checking project_root/.git directory existence.
+fn isGitRepo(io: std.Io, project_root: []const u8) bool {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const git_dir = std.fs.path.join(a, &.{ project_root, ".git" }) catch return false;
+    var dir = Io.Dir.cwd().openDir(io, git_dir, .{ .iterate = false }) catch return false;
+    dir.close(io);
+    return true;
 }
 
 fn shellName() []const u8 {
@@ -435,18 +477,18 @@ fn readAgentsMd(self: *const AgentLoop) ?[]const u8 {
 }
 
 fn appendSkillsList(self: *const AgentLoop, buf: *std.ArrayListAligned(u8, null)) !void {
-    const skills_dir = std.fs.path.join(self.allocator, &.{ self.project_root, ".zagent", "skills" }) catch return;
-    defer self.allocator.free(skills_dir);
-    var dir = Io.Dir.cwd().openDir(self.io, skills_dir, .{ .iterate = true }) catch return;
+    const skills_path = std.fs.path.join(self.allocator, &.{ self.project_root, self.skills_dir }) catch return;
+    defer self.allocator.free(skills_path);
+    var dir = Io.Dir.cwd().openDir(self.io, skills_path, .{ .iterate = true }) catch return;
     defer dir.close(self.io);
 
-    var first = true;
+    var list = std.ArrayListAligned(skill_tool.SkillInfo, null).empty;
     var iter = dir.iterate();
     while (iter.next(self.io) catch null) |entry| {
         if (entry.kind != .directory) continue;
-        const skill_path = std.fs.path.join(self.allocator, &.{ skills_dir, entry.name }) catch continue;
-        defer self.allocator.free(skill_path);
-        const sk = Io.Dir.cwd().openFile(self.io, skill_path, .{ .mode = .read_only }) catch continue;
+        const skill_md = std.fs.path.join(self.allocator, &.{ skills_path, entry.name, "SKILL.md" }) catch continue;
+        defer self.allocator.free(skill_md);
+        const sk = Io.Dir.cwd().openFile(self.io, skill_md, .{ .mode = .read_only }) catch continue;
         defer sk.close(self.io);
         const ss = sk.stat(self.io) catch continue;
         if (ss.size <= 0 or ss.size > 65536) continue;
@@ -458,33 +500,52 @@ fn appendSkillsList(self: *const AgentLoop, buf: *std.ArrayListAligned(u8, null)
         };
         const skill_text = skill_content[0..nn];
 
-        const desc = extractSkillDescription(skill_text) orelse continue;
+        const desc = frontmatter.parseField(skill_text, "description") orelse {
+            self.allocator.free(skill_content);
+            continue;
+        };
+
+        const duped_name = self.allocator.dupe(u8, entry.name) catch {
+            self.allocator.free(skill_content);
+            continue;
+        };
+        const duped_desc = self.allocator.dupe(u8, desc) catch {
+            self.allocator.free(skill_content);
+            continue;
+        };
+        // desc 借用 skill_content，dupe 完成后再释放
         self.allocator.free(skill_content);
 
-        if (first) {
-            try buf.appendSlice(self.allocator, "\n\n<available_skills>\n");
-            first = false;
+        list.append(self.allocator, .{ .name = duped_name, .description = duped_desc }) catch continue;
+    }
+
+    if (list.items.len == 0) {
+        try buf.appendSlice(self.allocator, "\n\nNo skills are currently available.\n");
+        return;
+    }
+
+    std.mem.sort(skill_tool.SkillInfo, list.items, {}, struct {
+        fn lt(_: void, a: skill_tool.SkillInfo, b: skill_tool.SkillInfo) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
         }
+    }.lt);
+
+    try buf.appendSlice(self.allocator, "\n\n<available_skills>\n");
+    for (list.items) |s| {
         try buf.appendSlice(self.allocator, "  ");
-        try buf.appendSlice(self.allocator, entry.name);
+        try buf.appendSlice(self.allocator, s.name);
         try buf.appendSlice(self.allocator, ": ");
-        try buf.appendSlice(self.allocator, desc);
+        try buf.appendSlice(self.allocator, s.description);
         try buf.appendSlice(self.allocator, "\n");
     }
-    if (!first) {
-        try buf.appendSlice(self.allocator, "</available_skills>");
+    try buf.appendSlice(self.allocator, "</available_skills>");
+    // buf.appendSlice copies the bytes, so the duped strings are no longer
+    // referenced; free each, then release the items array.
+    for (list.items) |s| {
+        self.allocator.free(s.name);
+        self.allocator.free(s.description);
     }
-}
-
-fn extractSkillDescription(skill_text: []const u8) ?[]const u8 {
-    const marker = "description:";
-    const start = std.mem.indexOf(u8, skill_text, marker) orelse return null;
-    const after_marker = skill_text[start + marker.len ..];
-    var pos: usize = 0;
-    while (pos < after_marker.len and (after_marker[pos] == ' ' or after_marker[pos] == '\t')) : (pos += 1) {}
-    const trimmed = after_marker[pos..];
-    const end = std.mem.indexOfScalar(u8, trimmed, '\n') orelse trimmed.len;
-    return trimmed[0..end];
+    list.deinit(self.allocator);
 }
 
 const Io = std.Io;
@@ -1111,4 +1172,126 @@ test "agent: lifecycle on_turn_end fires" {
 
     try std.testing.expect(tc.end_called);
     try std.testing.expectEqual(TurnFinish.stop, tc.end_finish);
+}
+
+test "agent: buildPromptString includes model/date/git" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    const test_root = ".zig-test-prompt-env";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+
+    var p = provider.Provider{
+        .config = .{
+            .base_url = "https://api.test.com",
+            .api_key = "",
+            .model = "test-model",
+            .max_tokens = 1000,
+            .vendor = .standard,
+            .compat = .{},
+        },
+    };
+    const reg = registry_mod.buildRegistry();
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, test_root, 0, .{});
+
+    const sp = try buildPromptString(&agent);
+    defer allocator.free(sp);
+
+    try std.testing.expect(std.mem.indexOf(u8, sp, "Model: test-model") != null);
+    // Date format YYYY-MM-DD (regex-free positional check)
+    const date_marker = "Date: ";
+    const date_pos = std.mem.indexOf(u8, sp, date_marker) orelse return error.TestUnexpectedNull;
+    const date_val = sp[date_pos + date_marker.len .. date_pos + date_marker.len + 10];
+    try std.testing.expect(date_val.len == 10);
+    try std.testing.expect(date_val[4] == '-');
+    try std.testing.expect(date_val[7] == '-');
+    try std.testing.expect(date_val[0] >= '1' and date_val[0] <= '9');
+    // test_root has no .git -> Git repo: no
+    try std.testing.expect(std.mem.indexOf(u8, sp, "Git repo: no") != null);
+}
+
+test "agent: appendSkillsList reads and sorts SKILL.md" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    const test_root = ".zig-test-skills-list";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+
+    const skills_dir = std.fs.path.join(allocator, &.{ test_root, ".zagent", "skills" }) catch return error.Oom;
+    defer allocator.free(skills_dir);
+    try Io.Dir.cwd().createDirPath(io, skills_dir);
+
+    // Create z-skill first, a-skill second to prove sorting (reverse creation order)
+    const z_skill_dir = try std.fs.path.join(allocator, &.{ skills_dir, "z-skill" });
+    defer allocator.free(z_skill_dir);
+    try Io.Dir.cwd().createDirPath(io, z_skill_dir);
+    const z_md = try std.fs.path.join(allocator, &.{ z_skill_dir, "SKILL.md" });
+    defer allocator.free(z_md);
+    {
+        const f = try Io.Dir.cwd().createFile(io, z_md, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "---\ndescription: Z skill\n---\n");
+    }
+
+    const a_skill_dir = try std.fs.path.join(allocator, &.{ skills_dir, "a-skill" });
+    defer allocator.free(a_skill_dir);
+    try Io.Dir.cwd().createDirPath(io, a_skill_dir);
+    const a_md = try std.fs.path.join(allocator, &.{ a_skill_dir, "SKILL.md" });
+    defer allocator.free(a_md);
+    {
+        const f = try Io.Dir.cwd().createFile(io, a_md, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "---\ndescription: A skill\n---\n");
+    }
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+    var p = provider.Provider{
+        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard, .compat = .{} },
+    };
+    const reg = registry_mod.buildRegistry();
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, test_root, 0, .{});
+
+    var buf: std.ArrayListAligned(u8, null) = .empty;
+    defer buf.deinit(allocator);
+    try appendSkillsList(&agent, &buf);
+
+    const out = buf.items;
+    try std.testing.expect(std.mem.indexOf(u8, out, "<available_skills>") != null);
+    // a-skill must come before z-skill (sorted)
+    const a_pos = std.mem.indexOf(u8, out, "a-skill") orelse return error.TestUnexpectedNull;
+    const z_pos = std.mem.indexOf(u8, out, "z-skill") orelse return error.TestUnexpectedNull;
+    try std.testing.expect(a_pos < z_pos);
+    try std.testing.expect(std.mem.indexOf(u8, out, "A skill") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Z skill") != null);
+}
+
+test "agent: appendSkillsList empty dir outputs empty state" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    const test_root = ".zig-test-skills-empty";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    const empty_skills = try std.fs.path.join(allocator, &.{ test_root, ".zagent", "skills" });
+    defer allocator.free(empty_skills);
+    try Io.Dir.cwd().createDirPath(io, empty_skills);
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+    var p = provider.Provider{
+        .config = .{ .base_url = "https://api.test.com", .api_key = "", .model = "test-model", .max_tokens = 1000, .vendor = .standard, .compat = .{} },
+    };
+    const reg = registry_mod.buildRegistry();
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, test_root, 0, .{});
+
+    var buf: std.ArrayListAligned(u8, null) = .empty;
+    defer buf.deinit(allocator);
+    try appendSkillsList(&agent, &buf);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "No skills are currently available.") != null);
 }

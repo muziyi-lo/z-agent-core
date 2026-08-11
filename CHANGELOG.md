@@ -3,6 +3,9 @@
 ## [0.2.5] — 2026-08-06
 
 ### Added
+- **上下文拼装修复（CONTEXT-ASSEMBLY）**: system prompt `<available_skills>` 索引修复（读 SKILL.md 而非目录，修 IsDir bug）+ 按名排序 + 空态输出；env 块补 Model/Date/Git repo 三行（模型自我认知/当前日期/git 状态）；skill 目录配置化 `skills_dir`（默认 `.zagent/skills`，可指向任意工具技能目录）
+- **frontmatter 解析统一**: 新增 `util/frontmatter.zig` 的 `parseField`（comptime 拼接零分配），统一 agent/skill 两处实现
+- **bash 工具描述禁令**: `DO NOT use for file operations` + 专用工具映射表（glob/grep/read/edit/write）+ `workdir` 替代 `cd`
 - **Web 停止按钮**: 输入栏 `#stop-btn`，流式期间启用，点击调 `POST /api/session/:id/abort`，含 `abortInFlight` 防重入（F11）
 - **Web 模型切换生效**: 前端 `sendPrompt` 的 SSE URL 附带 `&model=`，后端 `handlePrompt` 读取并应用；新增 `Provider.setModel()` 在 runTurn 前把会话模型写入 provider config（base_url/api_key/model/vendor/compat/context_window 一并切换）
 - **非法模型显式 400 + available_models**: 新会话模型解析失败返回 `{code, message, available_models}`，列出全部 `provider/model_id` 可选模型（LRN-20260811-001 修复的配套契约）

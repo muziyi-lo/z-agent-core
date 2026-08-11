@@ -1,9 +1,10 @@
 const std = @import("std");
 const types = @import("../types.zig");
 const path_util = @import("../util/path.zig");
+const frontmatter = @import("../util/frontmatter.zig");
 
 pub const tool_name = "skill";
-pub const tool_description = "Load a skill's SKILL.md file from .zagent/skills/<name>/SKILL.md.";
+pub const tool_description = "Load a skill's SKILL.md file from the configured skills directory (<skills_dir>/<name>/SKILL.md).";
 pub const tool_params =
     \\{"type":"object","properties":{"name":{"type":"string","description":"Name of the skill to load"}},"required":["name"]}
 ;
@@ -23,7 +24,7 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
         };
     }
 
-    const skill_rel = try std.fmt.allocPrint(ctx.allocator, ".zagent/skills/{s}/SKILL.md", .{name_val.string});
+    const skill_rel = try std.fmt.allocPrint(ctx.allocator, "{s}/{s}/SKILL.md", .{ ctx.skills_dir, name_val.string });
     defer ctx.allocator.free(skill_rel);
     const skill_path = path_util.resolvePath(ctx.allocator, ctx.project_root, skill_rel) catch |err| switch (err) {
         error.PathEscape => {
@@ -89,18 +90,18 @@ pub const SkillInfo = struct {
     description: []const u8,
 };
 
-pub fn listAvailableSkills(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8) ![]SkillInfo {
-    const skills_dir = try std.fs.path.join(allocator, &.{ project_root, ".zagent", "skills" });
-    defer allocator.free(skills_dir);
+pub fn listAvailableSkills(allocator: std.mem.Allocator, io: std.Io, project_root: []const u8, skills_dir: []const u8) ![]SkillInfo {
+    const skills_path = try std.fs.path.join(allocator, &.{ project_root, skills_dir });
+    defer allocator.free(skills_path);
 
-    var dir = Io.Dir.cwd().openDir(io, skills_dir, .{ .iterate = true }) catch return &.{};
+    var dir = Io.Dir.cwd().openDir(io, skills_path, .{ .iterate = true }) catch return &.{};
     defer dir.close(io);
 
     var list = std.ArrayListAligned(SkillInfo, null).empty;
     var iter = dir.iterate();
     while (try iter.next(io)) |entry| {
         if (entry.kind != .directory) continue;
-        const skill_path = try std.fs.path.join(allocator, &.{ skills_dir, entry.name, "SKILL.md" });
+        const skill_path = try std.fs.path.join(allocator, &.{ skills_path, entry.name, "SKILL.md" });
         defer allocator.free(skill_path);
 
         const file = Io.Dir.cwd().openFile(io, skill_path, .{ .mode = .read_only }) catch continue;
@@ -113,7 +114,7 @@ pub fn listAvailableSkills(allocator: std.mem.Allocator, io: std.Io, project_roo
         _ = file.readPositionalAll(io, content, 0) catch continue;
 
         var desc: []const u8 = entry.name;
-        if (parseFrontmatterField(content, "description")) |d| {
+        if (frontmatter.parseField(content, "description")) |d| {
             desc = d;
         }
 
@@ -123,24 +124,6 @@ pub fn listAvailableSkills(allocator: std.mem.Allocator, io: std.Io, project_roo
         try list.append(allocator, .{ .name = duped_name, .description = duped_desc });
     }
     return list.toOwnedSlice(allocator);
-}
-
-fn parseFrontmatterField(content: []const u8, field: []const u8) ?[]const u8 {
-    if (content.len < 3 or !std.mem.eql(u8, content[0..3], "---")) return null;
-    const normalized = content[3..];
-    const end = std.mem.indexOfPosLinear(u8, normalized, 0, "---") orelse return null;
-    const fm = normalized[0..end];
-
-    const prefix = std.fmt.allocPrint(std.heap.page_allocator, "{s}:", .{field}) catch return null;
-    defer std.heap.page_allocator.free(prefix);
-
-    const pos = std.mem.indexOfPosLinear(u8, fm, 0, prefix) orelse return null;
-    const value_start = pos + prefix.len;
-    const line_end = std.mem.indexOfScalarPos(u8, fm, value_start, '\n') orelse fm.len;
-    var val = fm[value_start..line_end];
-    val = std.mem.trim(u8, val, " \t\r");
-    if (val.len == 0) return null;
-    return val;
 }
 
 const Io = std.Io;
