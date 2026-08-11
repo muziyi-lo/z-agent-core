@@ -113,6 +113,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | N8 | 增量上下文更新（chronogical system 消息 + baseline 持久化） | 对齐 opencode D1，需 DB/会话格式扩展（CONTEXT-ASSEMBLY F3） |
 | N9 | 系统 prompt 缓存 breakpoint | 依赖 provider 缓存 hint 协议（CONTEXT-ASSEMBLY F4） |
 | N10 | 多 skill 目录数组（`skills_dir = ["...", "..."]`） | 索引与 tool 按顺序查找同名 skill，前者优先（CONTEXT-ASSEMBLY F5） |
+| N11 | 用户消息 hover 操作栏（revert/copy/delete）功能缺陷 | 见 `docs/0.2.6/PLAN-USER-MSG-ACTIONS-FIX.md`（DEEPSEEK-STYLE PR7 收尾） |
 
 ## Deferred (explicitly skipped)
 
