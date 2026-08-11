@@ -56,7 +56,11 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
     if (method == .GET) {
         if (std.mem.eql(u8, path, "/")) return serveIndex(ctx, request, a);
         if (std.mem.eql(u8, path, "/favicon.ico")) return handleFavicon(ctx, request, a);
-        if (std.mem.eql(u8, path, "/api/health")) return respondJson(request, "{\"status\":\"ok\"}");
+        if (std.mem.eql(u8, path, "/api/health")) {
+            const cwd_esc = try escapeJsonDynamic(a, ctx.project_root);
+            const body = try std.fmt.allocPrint(a, "{{\"status\":\"ok\",\"cwd\":\"{s}\"}}", .{cwd_esc});
+            return respondJson(request, body);
+        }
         if (std.mem.eql(u8, path, "/api/model")) return handleModelList(ctx, request, a);
         if (std.mem.eql(u8, path, "/api/provider")) return handleProviderList(ctx, request, a);
         if (std.mem.eql(u8, path, "/api/session")) return handleSessionList(ctx, request, a);

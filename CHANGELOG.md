@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.2.6] — 2026-08-11
+
+### Added
+- **Web 前端 DeepSeek 风格改造**（`docs/0.2.6/PLAN-DEEPSEEK-STYLE.md`，9 PR 分批）:
+  - **token 体系重写**: 深色 `#151517` 底 + `#1B1B1C` 侧边栏 + 主色 `#3964FE`，浅色纯白 + 淡蓝气泡 `#EDF3FE`，对齐 DeepSeek 实测；新增 6 语义 token（`--msg-max-width`/`--sider-width`/`--bubble-radius`/`--bg-user-bubble`/`--bg-active`/`--bg-inline-code`）；清理 16 个死 token
+  - **布局对齐**: sidebar 261px 无边框、消息区全宽滚动 + 内容限宽 840 居中、正文 15px/代码 12.5px、topbar flex 重排 + `#topbar-actions` 工具区
+  - **组件视觉**: 用户气泡 22px 全圆角胶囊、工具卡片弱底无边框、思考块折叠卡 12px、代码块容器 12px、行内 code 深浅主题分色
+  - **Bootstrap Icons**: 侧边栏切换 `bi-layout-sidebar`↔`bi-layout-sidebar-inset`（CSS 显隐）、用户消息操作栏 revert/copy/trash、代码块复制按钮；`biIcon()` 辅助函数
+  - **侧边栏收起**: 改 `width:0` + `flex-basis:0` 让 main 占满，保留 240ms 动画；`aria-pressed` 状态
+  - **发送/终止按钮合并**: 单 `#send-btn`，空闲显示发送 ✈、流式时切换红色 ✕ 终止（`setStreaming()`），对齐 DeepSeek
+  - **输入框胶囊**: `#input-wrap` 24px 圆角容器 + 圆形 34px 按钮，textarea 透明无边框
+  - **工作目录小字**: `#cwd-hint` 显示 `project_root`（`/api/health` 新增 `cwd` 字段，`escapeJsonDynamic` 转义）
+  - **置顶分组（K16）**: `zagent-pinned` localStorage + `groupSessions()` 纯函数 + 📌 按钮，Pinned 组置顶
+  - **⋮ 更多菜单（K17）**: 会话项 hover 显示 ⋮，菜单含 Rename/Pin/Delete，`closeAllMoreMenus()` + 全局点击关闭
+  - **模型选择器迁移（M1-M4）**: 原生 select → topbar 胶囊按钮 + 弹出列表（✓ 高亮选中），`selectModel()` 提取，保留降级
+  - **theme-btn 移顶栏**: 从侧边栏移到 `#topbar-actions` 圆形按钮，侧边栏收起时仍可切换
+  - **代码块 banner（R1/R2）**: `decorateCodeBlocks()` 给代码块加语言标签 + 常驻复制按钮，全局事件委托
+  - **`setTopbarTitle()`**: 修复 topbar 结构重排后 `textContent` 覆盖清掉 `#topbar-actions` 的问题（6 处替换）
+  - **测试防护网扩展（PR4）**: 新增 `groupSessions`/`renderModelMenu`/`moreMenuAction`/`decorateCodeBlocks` 4 纯函数 + 4 测试文件，断言 37 → 82
+
+### Fixed
+- **用户消息 hover 菜单重叠**: `.msg-actions` 定位到气泡下方预留 margin，不覆盖气泡/相邻消息
+- **思考内容无法选中复制**: `user-select:none` 从 `.thinking-block` 移到 header，`.content` 可选中
+- **浅色主题行内 code 涂黑**: `--bg-inline-code` 浅色改 `rgba(13,13,13,0.06)`（对齐千问实测），深色保持 `#2C2C2E`
+- **消息容器宽度**: 全宽滚动（空白区滚轮可滚），内容限宽居中，用户消息右缘对齐限宽容器
+- **代码块复制含 "Copy" 文本**: `addCopyButton` 默认复制 `code` 内容而非 `pre.textContent`（含按钮文本）
+- **`/model` slash 命令**: 引用已删除的 `#model-select`，改为触发 `#model-btn`
+
 ## [0.2.5] — 2026-08-06
 
 ### Added

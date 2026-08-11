@@ -5,6 +5,100 @@ let currentModel = null;
 let evtSrc = null;
 let isStreaming = false;
 
+function groupSessions(list, pinnedIds, now) {
+  now = now || new Date();
+  var todayStart = Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000);
+  var yesterdayStart = Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime() / 1000);
+  var weekStart = Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7).getTime() / 1000);
+  var pinned = [], today = [], yesterday = [], week = [], older = [];
+  (list || []).forEach(function(s) {
+    var isPinned = pinnedIds && pinnedIds.indexOf(s.id) !== -1;
+    if (isPinned) { pinned.push(s); return; }
+    if (s.timestamp >= todayStart) today.push(s);
+    else if (s.timestamp >= yesterdayStart) yesterday.push(s);
+    else if (s.timestamp >= weekStart) week.push(s);
+    else older.push(s);
+  });
+  return { pinned: pinned, today: today, yesterday: yesterday, week: week, older: older };
+}
+
+function getPinnedIds() {
+  try {
+    var raw = localStorage.getItem('zagent-pinned');
+    var arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch(e) { return []; }
+}
+function savePinnedIds(ids) {
+  localStorage.setItem('zagent-pinned', JSON.stringify(ids));
+}
+function togglePin(id) {
+  var ids = getPinnedIds();
+  var i = ids.indexOf(id);
+  if (i === -1) ids.push(id); else ids.splice(i, 1);
+  savePinnedIds(ids);
+  return i === -1; // true if now pinned
+}
+function closeAllMoreMenus() {
+  document.querySelectorAll('.more-menu.open').forEach(function(m) { m.classList.remove('open'); });
+}
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('.more-menu, .more-btn')) closeAllMoreMenus();
+});
+document.addEventListener('click', function(e) {
+  var copyBtn = e.target.closest('.code-copy');
+  if (!copyBtn) return;
+  var block = copyBtn.closest('.code-block');
+  if (!block) return;
+  var code = block.querySelector('pre code');
+  if (!code) return;
+  copyText(code.textContent, copyBtn, 'Copied!');
+});
+
+function renderModelMenu(models, currentId) {
+  return (models || []).map(function(m) {
+    return { id: m.id, name: m.name, active: m.id === currentId };
+  });
+}
+
+function moreMenuAction(action, sessionId) {
+  return { action: action, sessionId: sessionId };
+}
+
+function decorateCodeBlocks(html) {
+  if (!html) return html;
+  var re = /<pre><code class="language-([^"]+)">/g;
+  return html.replace(re, function(m, lang) {
+    return '<div class="code-block"><div class="code-banner"><span class="code-lang">' + lang + '</span><button class="code-copy" title="Copy">'
+      + '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1zM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1z"/></svg>'
+      + '</button></div><pre><code class="language-' + lang + '">';
+  }).replace(/<\/code><\/pre>/g, '</code></pre></div>');
+}
+
+function setStreaming(streaming) {
+  var btn = document.getElementById('send-btn');
+  var inp = document.getElementById('prompt-input');
+  if (btn) btn.classList.toggle('stop', streaming);
+  if (inp) inp.disabled = streaming;
+  return btn;
+}
+
+function setTopbarTitle(name) {
+  var el = document.getElementById('topbar-title');
+  if (el) el.textContent = name;
+}
+
+function biIcon(name, size) {
+  var paths = {
+    'revert': '<path fill-rule="evenodd" d="M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2z"/><path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466"/>',
+    'copy': '<path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1zM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1z"/>',
+    'trash': '<path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/><path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/>'
+  };
+  var p = paths[name] || '';
+  var s = size || 14;
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + s + '" height="' + s + '" fill="currentColor" viewBox="0 0 16 16">' + p + '</svg>';
+}
+
 // --- sidebar toggle ---
 document.getElementById('sidebar-toggle').onclick = function() {
   if (window.matchMedia('(max-width: 768px)').matches) {
@@ -13,10 +107,12 @@ document.getElementById('sidebar-toggle').onclick = function() {
   } else {
     var collapsed = document.body.classList.toggle('sidebar-collapsed');
     localStorage.setItem('zagent-sidebar-collapsed', collapsed ? '1' : '0');
+    this.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
   }
 };
 if (localStorage.getItem('zagent-sidebar-collapsed') === '1') {
   document.body.classList.add('sidebar-collapsed');
+  document.getElementById('sidebar-toggle').setAttribute('aria-pressed', 'true');
 }
 
 // --- theme toggle ---
@@ -89,41 +185,8 @@ async function api(path, opts) {
 })();
 
 // --- model selector ---
-async function loadModels() {
-  var sel = document.getElementById('model-select');
-  try {
-    var models = await api('/model');
-    if (!models || models.length === 0) throw new Error('empty');
-    sel.innerHTML = '';
-    models.forEach(function(m) {
-      var opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = m.name;
-      opt.title = m.id;
-      sel.appendChild(opt);
-    });
-    // restore from localStorage or use first
-    var saved = localStorage.getItem('zagent-model');
-    if (saved && models.some(function(m) { return m.id === saved; })) {
-      sel.value = saved;
-    } else {
-      sel.value = models[0].id;
-    }
-    currentModel = sel.value;
-  } catch(e) {
-    var saved = localStorage.getItem('zagent-model');
-    if (saved) {
-      sel.innerHTML = '<option value="' + esc(saved) + '">' + esc(saved) + '</option>';
-      sel.value = saved;
-      currentModel = saved;
-    } else {
-      sel.innerHTML = '<option value="">Default</option>';
-      currentModel = '';
-    }
-  }
-}
-document.getElementById('model-select').onchange = function() {
-  currentModel = this.value;
+function selectModel(id) {
+  currentModel = id || '';
   if (currentModel) localStorage.setItem('zagent-model', currentModel);
   var hasMsgs = document.querySelectorAll('#messages .msg:not(#system-prompt), #messages .tool-card').length > 0;
   if (hasMsgs) {
@@ -133,7 +196,66 @@ document.getElementById('model-select').onchange = function() {
     document.getElementById('messages').insertBefore(tip, document.getElementById('messages').firstChild);
     setTimeout(function() { if (tip.parentNode) tip.parentNode.removeChild(tip); }, 3000);
   }
+}
+function renderModelMenuHtml(items) {
+  return items.map(function(it) {
+    return '<div class="model-item' + (it.active ? ' active' : '') + '" data-id="' + esc(it.id) + '" title="' + esc(it.id) + '">' + esc(it.name) + (it.active ? ' &#10003;' : '') + '</div>';
+  }).join('');
+}
+async function loadModels() {
+  var nameEl = document.getElementById('model-btn-name');
+  try {
+    var models = await api('/model');
+    if (!models || models.length === 0) throw new Error('empty');
+    var saved = localStorage.getItem('zagent-model');
+    var cur = (saved && models.some(function(m) { return m.id === saved; })) ? saved : models[0].id;
+    currentModel = cur;
+    var curName = models.filter(function(m) { return m.id === cur; })[0].name;
+    if (nameEl) nameEl.textContent = curName;
+    return renderModelMenu(models, cur);
+  } catch(e) {
+    var saved = localStorage.getItem('zagent-model');
+    if (saved) { currentModel = saved; if (nameEl) nameEl.textContent = saved; }
+    else { currentModel = ''; if (nameEl) nameEl.textContent = 'Default'; }
+    return [];
+  }
+}
+document.getElementById('model-btn').onclick = function(e) {
+  e.stopPropagation();
+  closeAllMoreMenus();
+  var menu = document.getElementById('model-menu');
+  var btn = this;
+  var expanded = btn.getAttribute('aria-expanded') === 'true';
+  if (menu && expanded) { menu.remove(); btn.setAttribute('aria-expanded','false'); return; }
+  if (menu) menu.remove();
+  var models;
+  loadModels().then(function(items) {
+    menu = document.createElement('div');
+    menu.className = 'model-menu';
+    menu.id = 'model-menu';
+    menu.innerHTML = renderModelMenuHtml(items);
+    menu.querySelectorAll('.model-item').forEach(function(item) {
+      item.onclick = function(e2) {
+        e2.stopPropagation();
+        selectModel(item.getAttribute('data-id'));
+        document.getElementById('model-btn-name').textContent = item.querySelector ? item.textContent.replace(/[ \u2713]/g,'').trim() : item.getAttribute('data-id');
+        menu.remove();
+        btn.setAttribute('aria-expanded','false');
+      };
+    });
+    document.body.appendChild(menu);
+    var r = btn.getBoundingClientRect();
+    menu.style.top = (r.bottom + 4) + 'px';
+    menu.style.right = (window.innerWidth - r.right) + 'px';
+    btn.setAttribute('aria-expanded','true');
+  });
 };
+document.addEventListener('click', function(e) {
+  if (!e.target.closest('#model-btn, #model-menu')) {
+    var menu = document.getElementById('model-menu');
+    if (menu) { menu.remove(); var b = document.getElementById('model-btn'); if (b) b.setAttribute('aria-expanded','false'); }
+  }
+});
 
 // --- session list ---
 async function loadSessions() {
@@ -145,31 +267,49 @@ async function loadSessions() {
     return;
   }
 
-  var now = new Date();
-  var todayStart = Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000);
-  var yesterdayStart = Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1).getTime() / 1000);
-  var weekStart = Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7).getTime() / 1000);
+  var pinnedIds = getPinnedIds();
+  var groups = groupSessions(list, pinnedIds);
 
-  var groups = { today: [], yesterday: [], week: [], older: [] };
-  list.forEach(function(s) {
-    if (s.timestamp >= todayStart) groups.today.push(s);
-    else if (s.timestamp >= yesterdayStart) groups.yesterday.push(s);
-    else if (s.timestamp >= weekStart) groups.week.push(s);
-    else groups.older.push(s);
-  });
-
-  function renderGroup(label, items) {
+  function renderGroup(label, items, pinned) {
     if (items.length === 0) return;
     var hdr = document.createElement('div');
     hdr.className = 'section-header';
     hdr.textContent = label;
     el.appendChild(hdr);
     items.forEach(function(s) {
+      var isPinned = pinned || (pinnedIds && pinnedIds.indexOf(s.id) !== -1);
       var div = document.createElement('div');
       div.className = 'session' + (s.id === currentId ? ' active' : '');
-      div.innerHTML = '<div class="name">' + esc(s.name) + '</div><div class="meta">' + esc(s.model) + ' &middot; ' + s.msg_count + ' msgs</div><span class="delete-btn">&times;</span>';
+      div.innerHTML = '<div class="name">' + esc(s.name) + '</div><div class="meta">' + esc(s.model) + ' &middot; ' + s.msg_count + ' msgs</div>'
+        + '<button class="pin-btn' + (isPinned ? ' pinned' : '') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>'
+        + '<button class="more-btn" title="More actions">&#8942;</button>'
+        + '<span class="delete-btn">&times;</span>'
+        + '<div class="more-menu"><div class="more-item" data-act="rename">Rename</div><div class="more-item" data-act="pin">' + (isPinned ? 'Unpin' : 'Pin') + '</div><div class="more-item danger" data-act="delete">Delete</div></div>';
 
+      div.querySelector('.pin-btn').onclick = function(e) {
+        e.stopPropagation();
+        togglePin(s.id);
+        loadSessions();
+      };
       div.querySelector('.delete-btn').onclick = function(e) { e.stopPropagation(); deleteSession(s.id); };
+
+      var moreBtn = div.querySelector('.more-btn');
+      var moreMenu = div.querySelector('.more-menu');
+      moreBtn.onclick = function(e) {
+        e.stopPropagation();
+        closeAllMoreMenus();
+        moreMenu.classList.toggle('open');
+      };
+      moreMenu.querySelectorAll('.more-item').forEach(function(item) {
+        item.onclick = function(e) {
+          e.stopPropagation();
+          moreMenu.classList.remove('open');
+          var act = item.getAttribute('data-act');
+          if (act === 'rename') { nameSpan.dispatchEvent(new MouseEvent('dblclick')); }
+          else if (act === 'pin') { togglePin(s.id); loadSessions(); }
+          else if (act === 'delete') { deleteSession(s.id); }
+        };
+      });
 
       var nameSpan = div.querySelector('.name');
       nameSpan.ondblclick = function() {
@@ -183,7 +323,7 @@ async function loadSessions() {
           if (newName && newName !== nameSpan.textContent) {
             try {
               await fetch(A + '/session/' + s.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName }) });
-              if (currentId === s.id) { currentName = newName; document.getElementById('topbar').textContent = newName; }
+              if (currentId === s.id) { currentName = newName; setTopbarTitle(newName); }
               await loadSessions();
             } catch(err) { console.error(err); }
           }
@@ -201,6 +341,7 @@ async function loadSessions() {
     });
   }
 
+  renderGroup('Pinned', groups.pinned, true);
   var labels = { today: 'Today', yesterday: 'Yesterday', week: 'This Week', older: 'Older' };
   for (var i = 0; i < ['today','yesterday','week','older'].length; i++) {
     var key = ['today','yesterday','week','older'][i];
@@ -214,10 +355,8 @@ async function loadSession(id) {
   catch(e) { console.error('loadSession error', e); return; }
   currentId = id;
   currentName = sess.name;
-  document.getElementById('topbar').textContent = sess.name;
-  document.getElementById('prompt-input').disabled = false;
-  document.getElementById('send-btn').disabled = false;
-  document.getElementById('stop-btn').disabled = true;
+  setTopbarTitle(sess.name);
+  setStreaming(false);
   var msgs = document.getElementById('messages');
   msgs.innerHTML = '';
   var start = 0;
@@ -329,6 +468,7 @@ function renderMd(content) {
     }
     var raw = marked.parse(content || '');
     var clean = DOMPurify.sanitize(raw);
+    clean = decorateCodeBlocks(clean);
     renderMd._cache.unshift({key: content, value: clean});
     if (renderMd._cache.length > 200) renderMd._cache.pop();
     return clean;
@@ -506,7 +646,8 @@ function addMessage(m, index, toolName) {
     actions.className = 'msg-actions';
     var revertBtn = document.createElement('button');
     revertBtn.className = 'msg-action';
-    revertBtn.textContent = 'revert';
+    revertBtn.title = 'Revert to input';
+    revertBtn.innerHTML = biIcon('revert');
     revertBtn.onclick = function(e) {
       e.stopPropagation();
       document.getElementById('prompt-input').value = content;
@@ -515,7 +656,8 @@ function addMessage(m, index, toolName) {
     actions.appendChild(revertBtn);
     var copyBtn = document.createElement('button');
     copyBtn.className = 'msg-action';
-    copyBtn.textContent = 'copy';
+    copyBtn.title = 'Copy';
+    copyBtn.innerHTML = biIcon('copy');
     copyBtn.onclick = function(e) {
       e.stopPropagation();
       copyText(content, copyBtn, 'copied!');
@@ -524,7 +666,8 @@ function addMessage(m, index, toolName) {
     if (index !== undefined && index > 0) {
       var delActionBtn = document.createElement('button');
       delActionBtn.className = 'msg-action danger';
-      delActionBtn.textContent = '\u00d7';
+      delActionBtn.title = 'Delete message';
+      delActionBtn.innerHTML = biIcon('trash');
       delActionBtn.onclick = async function(e) {
         e.stopPropagation();
         if (isStreaming) return;
@@ -550,9 +693,7 @@ function sendPrompt(prompt) {
   if (!currentId) {
     currentId = genUuidV4();
   }
-  document.getElementById('send-btn').disabled = true;
-  document.getElementById('stop-btn').disabled = false;
-  document.getElementById('prompt-input').disabled = true;
+  setStreaming(true);
   isStreaming = true;
 
   var msgs = document.getElementById('messages');
@@ -619,7 +760,7 @@ function sendPrompt(prompt) {
     try { d = JSON.parse(e.data); } catch(ex) { return; }
     if (d.id) {
       currentId = d.id;
-      if (d.name) { currentName = d.name; document.getElementById('topbar').textContent = d.name; }
+      if (d.name) { currentName = d.name; setTopbarTitle(d.name); }
     }
   });
 
@@ -715,7 +856,7 @@ function sendPrompt(prompt) {
   evtSrc.addEventListener('done', function(e) {
     if (evtSrc) { evtSrc.close(); evtSrc = null; }
     isStreaming = false;
-    document.getElementById('stop-btn').disabled = true;
+    setStreaming(false);
 
     // render markdown per text segment
     curSegments.forEach(function(seg) {
@@ -755,8 +896,7 @@ function sendPrompt(prompt) {
       textSeg.el.appendChild(footer);
     }
 
-    document.getElementById('send-btn').disabled = false;
-    document.getElementById('prompt-input').disabled = false;
+    setStreaming(false);
     var spinners = asst.querySelectorAll('.spinner');
     for (var j = 0; j < spinners.length; j++) spinners[j].remove();
     // markdown render tool outputs + collapse + expand-all
@@ -798,7 +938,17 @@ loadSessions();
   });
 }
 
+async function loadCwd() {
+  try {
+    var r = await fetch(A + '/health');
+    var d = await r.json();
+    var hint = document.getElementById('cwd-hint');
+    if (hint && d.cwd) hint.textContent = d.cwd;
+  } catch(e) { /* health fetch is best-effort; hide hint on failure */ }
+}
+
 document.getElementById('send-btn').onclick = function() {
+  if (isStreaming) { abortPrompt(); return; }
   var inp = document.getElementById('prompt-input');
   var text = inp.value.trim();
   if (!text) return;
@@ -806,8 +956,6 @@ document.getElementById('send-btn').onclick = function() {
   inp.style.height = '';
   sendPrompt(text);
 };
-
-document.getElementById('stop-btn').onclick = function() { abortPrompt(); };
 
 document.getElementById('prompt-input').onkeydown = function(e) {
   if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
@@ -838,7 +986,7 @@ var slashCommands = [];
 var slashLocal = [
   { name: 'theme', description: 'Toggle light/dark theme', args_hint: '', run: function() { document.getElementById('theme-btn').click(); } },
   { name: 'clear', description: 'Clear current message view', args_hint: '', run: function() { document.getElementById('messages').innerHTML = ''; } },
-  { name: 'model', description: 'Switch model', args_hint: 'provider/model', run: function() { document.getElementById('model-select').focus(); } },
+  { name: 'model', description: 'Switch model', args_hint: 'provider/model', run: function() { document.getElementById('model-btn').click(); } },
 ];
 var slashFiltered = [];
 var slashIndex = -1;
@@ -969,7 +1117,7 @@ function switchToSession(id, name) {
   if (evtSrc) { evtSrc.close(); evtSrc = null; }
   currentId = id;
   currentName = name;
-  document.getElementById('topbar').textContent = name || 'z-agent-core';
+  setTopbarTitle(name || 'z-agent-core');
   loadSession(id);
 }
 
@@ -990,10 +1138,9 @@ document.getElementById('new-session-btn').onclick = async function() {
     if (sess.id) {
       currentId = sess.id;
       currentName = sess.name;
-      document.getElementById('topbar').textContent = sess.name;
+      setTopbarTitle(sess.name);
       document.getElementById('messages').innerHTML = '';
-      document.getElementById('prompt-input').disabled = false;
-      document.getElementById('send-btn').disabled = false;
+      setStreaming(false);
       await loadSessions();
     }
   } catch(e) { console.error(e); }
@@ -1006,11 +1153,9 @@ async function deleteSession(id) {
     if (currentId === id) {
       currentId = null;
       currentName = null;
-      document.getElementById('topbar').textContent = 'z-agent-core';
+      setTopbarTitle('z-agent-core');
       document.getElementById('messages').innerHTML = '';
-      document.getElementById('prompt-input').disabled = false;
-      document.getElementById('send-btn').disabled = false;
-      document.getElementById('stop-btn').disabled = true;
+      setStreaming(false);
     }
     await loadSessions();
   } catch(e) { console.error(e); }
@@ -1019,9 +1164,16 @@ async function deleteSession(id) {
 function copyText(text, btn, doneLabel) {
   var done = function() {
     if (!btn) return;
-    var orig = btn.textContent;
-    btn.textContent = doneLabel || 'Copied!';
-    setTimeout(function() { btn.textContent = orig; }, 1500);
+    var hasIcon = btn.querySelector('svg');
+    if (hasIcon) {
+      var orig = btn.title;
+      btn.title = doneLabel || 'Copied!';
+      setTimeout(function() { btn.title = orig; }, 1500);
+    } else {
+      var orig = btn.textContent;
+      btn.textContent = doneLabel || 'Copied!';
+      setTimeout(function() { btn.textContent = orig; }, 1500);
+    }
   };
   if (navigator.clipboard && window.isSecureContext) {
     navigator.clipboard.writeText(text).then(done).catch(function() { fallbackCopy(text); done(); });
@@ -1042,7 +1194,9 @@ function addCopyButton(container, getText) {
   btn.textContent = 'Copy';
   btn.onclick = function(e) {
     e.stopPropagation();
-    copyText(getText ? getText() : container.textContent, btn);
+    var codeEl = container.querySelector ? container.querySelector('code') : null;
+    var text = getText ? getText() : (codeEl ? codeEl.textContent : container.textContent);
+    copyText(text, btn);
   };
   container.appendChild(btn);
 }
@@ -1063,9 +1217,7 @@ function abortPrompt() {
     .catch(function() {})
     .finally(function() { abortInFlight = false; });
   if (evtSrc) { evtSrc.close(); evtSrc = null; }
-  document.getElementById('send-btn').disabled = false;
-  document.getElementById('stop-btn').disabled = true;
-  document.getElementById('prompt-input').disabled = false;
+  setStreaming(false);
   isStreaming = false;
   var spinners = document.querySelectorAll('#messages .spinner');
   for (var j = 0; j < spinners.length; j++) spinners[j].remove();
@@ -1208,3 +1360,4 @@ function applyToolType(toolDiv, toolName, toolData) {
 loadSessions();
 loadModels();
 loadSlashCommands();
+loadCwd();

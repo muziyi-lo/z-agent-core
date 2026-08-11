@@ -82,6 +82,7 @@ globalThis.renderMdBlocks = () => ""
 globalThis.addCopyButton = () => {}
 globalThis.loadModels = () => {}
 globalThis.loadSessions = () => {}
+globalThis.setStreaming = () => {}
 
 // sendPrompt depends on buildSegment (already in app.js); extract + eval both
 globalThis.buildSegment = eval(`(${extract("buildSegment")})`)

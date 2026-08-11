@@ -13,23 +13,24 @@
     <h1>z-agent-core</h1>
     <div class="subtitle">AI-powered agent</div>
   </div>
-  <button id="theme-btn" title="Toggle theme">&#9728;</button>
   <button id="new-session-btn">+ New Session</button>
   <div id="session-list"></div>
-  <div id="model-selector">
-    <select id="model-select" aria-label="Model"></select>
-  </div>
   <div id="resize-handle"></div>
 </div>
 <div id="main">
-  <div id="topbar"><span id="sidebar-toggle">&#9776;</span> z-agent-core</div>
+  <div id="topbar"><button id="sidebar-toggle" aria-label="Toggle sidebar" aria-pressed="false"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" class="icon-open"><path d="M0 3a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2zm5-1v12h9a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1zM4 2H2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h2z"/></svg><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" class="icon-collapsed"><path d="M14 2a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1zM2 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2z"/><path d="M3 4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/></svg></button> <span id="topbar-title">z-agent-core</span><div id="topbar-actions"><button id="model-btn" aria-haspopup="listbox" aria-expanded="false" title="Model"><span id="model-btn-name">Model</span><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16"><path fill-rule="evenodd" d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z"/></svg></button><button id="theme-btn" title="Toggle theme">&#9728;</button></div></div>
   <div id="messages">
     <div id="system-prompt" style="display:none"></div>
   </div>
   <div id="input-bar">
-    <textarea id="prompt-input" rows="1" placeholder="Enter a prompt... (Shift+Enter for new line)"></textarea>
-    <button id="stop-btn" class="stop-btn" disabled>Stop</button>
-    <button id="send-btn">Send</button>
+    <div class="input-wrap">
+      <textarea id="prompt-input" rows="1" placeholder="Enter a prompt... (Shift+Enter for new line)"></textarea>
+      <button id="send-btn" title="Send">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" class="icon-send"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11ZM6.636 10.07l2.761 4.338L14.13 2.576zm6.787-8.201L1.591 6.602l4.339 2.76z"/></svg>
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16" class="icon-stop"><path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8z"/></svg>
+      </button>
+    </div>
+    <div id="cwd-hint" title="Working directory"></div>
   </div>
 </div>
 <div id="confirm-modal" class="modal-overlay">

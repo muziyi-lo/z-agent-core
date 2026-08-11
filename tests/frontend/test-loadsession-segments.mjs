@@ -50,6 +50,7 @@ const els = {
   "stop-btn": { disabled: true },
   "prompt-input": { disabled: false, focus() {} },
   "topbar": { textContent: "" },
+  "topbar-title": { textContent: "" },
 }
 globalThis.document = {
   createElement: (t) => makeEl(t),
@@ -78,6 +79,9 @@ globalThis.wrapContextToolGroups = () => {}
 globalThis.loadSessions = () => {}
 globalThis.renderMd = (s) => "[md:" + (s ?? "") + "]"
 globalThis.esc = (s) => String(s)
+globalThis.setTopbarTitle = () => {}
+globalThis.setStreaming = () => {}
+globalThis.biIcon = (name, size) => '<svg data-icon="' + name + '"></svg>'
 globalThis.addCopyButton = () => {}
 globalThis.hljs = { highlightAll() {} }
 globalThis.isStreaming = false
