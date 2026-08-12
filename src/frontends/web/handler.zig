@@ -64,6 +64,7 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
         if (std.mem.eql(u8, path, "/api/model")) return handleModelList(ctx, request, a);
         if (std.mem.eql(u8, path, "/api/provider")) return handleProviderList(ctx, request, a);
         if (std.mem.eql(u8, path, "/api/session")) return handleSessionList(ctx, request, a);
+        if (std.mem.eql(u8, path, "/api/session/active")) return handleSessionActive(ctx, request, a);
         if (std.mem.eql(u8, path, "/api/command")) return handleCommandList(ctx, request, a);
         if (std.mem.startsWith(u8, path, "/api/session/")) {
             const rest = path["/api/session/".len..];
@@ -88,6 +89,8 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
                 const sub = rest[slash + 1 ..];
                 const sub_path = if (std.mem.indexOfScalar(u8, sub, '?')) |qm| sub[0..qm] else sub;
                 if (std.mem.eql(u8, sub_path, "abort")) return handleAbort(ctx, request, id, a);
+                if (std.mem.eql(u8, sub_path, "truncate")) return handleTruncate(ctx, request, id, a);
+                if (std.mem.eql(u8, sub_path, "branch")) return handleBranch(ctx, request, id, a);
             }
         }
     } else if (method == .PATCH) {
@@ -245,13 +248,40 @@ fn handleSessionList(ctx: *Context, request: *std.http.Server.Request, a: std.me
     for (list) |s| {
         if (!first) try buf.appendSlice(a, ",");
         first = false;
-        var item: [256]u8 = undefined;
         const display_name = if (uuid_mod.isUuid(s.name)) "New Session" else s.name;
-        const ss = try std.fmt.bufPrint(&item, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d}}}", .{ s.id, display_name, s.model, s.msg_count, s.timestamp });
-        try buf.appendSlice(a, ss);
+        if (s.parent_id) |pid| {
+            const ss = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":\"{s}\"}}", .{ s.id, display_name, s.model, s.msg_count, s.timestamp, pid });
+            defer a.free(ss);
+            try buf.appendSlice(a, ss);
+        } else {
+            const ss = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":null}}", .{ s.id, display_name, s.model, s.msg_count, s.timestamp });
+            defer a.free(ss);
+            try buf.appendSlice(a, ss);
+        }
     }
     try buf.appendSlice(a, "]");
     try respondJson(request, buf.items);
+}
+
+/// GET /api/session/active — most recently updated session (list is sorted by
+/// timestamp desc). Lets the frontend resume where the user left off after a
+/// refresh. 404 when no sessions exist.
+fn handleSessionActive(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
+    const list = session_mod.list(a, ctx.io, ctx.sessions_dir) catch |err| {
+        if (err == error.FileNotFound or err == error.NotDir) return err_mod.respondError(request, .not_found, "no sessions", a);
+        return err_mod.respondError(request, .internal_error, "failed to list sessions", a);
+    };
+    defer session_mod.freeSessionInfoList(a, list);
+    if (list.len == 0) return err_mod.respondError(request, .not_found, "no sessions", a);
+
+    const s = list[0];
+    const display_name = if (uuid_mod.isUuid(s.name)) "New Session" else s.name;
+    if (s.parent_id) |pid| {
+        const body = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":\"{s}\"}}", .{ s.id, display_name, s.model, s.msg_count, s.timestamp, pid });
+        return respondJson(request, body);
+    }
+    const body = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":null}}", .{ s.id, display_name, s.model, s.msg_count, s.timestamp });
+    return respondJson(request, body);
 }
 
 fn handleSessionGet(ctx: *Context, request: *std.http.Server.Request, id: []const u8, a: std.mem.Allocator) !void {
@@ -265,8 +295,13 @@ fn handleSessionGet(ctx: *Context, request: *std.http.Server.Request, id: []cons
     var buf: AlignedU8 = .empty;
     var hdr: [512]u8 = undefined;
     const display_name = if (uuid_mod.isUuid(session.name)) "New Session" else session.name;
-    const h = try std.fmt.bufPrint(&hdr, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"messages\":[", .{ display_name, session.model });
-    try buf.appendSlice(a, h);
+    if (session.parent_id) |pid| {
+        const h = try std.fmt.bufPrint(&hdr, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"parent_id\":\"{s}\",\"messages\":[", .{ display_name, session.model, pid });
+        try buf.appendSlice(a, h);
+    } else {
+        const h = try std.fmt.bufPrint(&hdr, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"messages\":[", .{ display_name, session.model });
+        try buf.appendSlice(a, h);
+    }
     const msgs = session.messages();
     var first = true;
     for (msgs) |m| {
@@ -431,6 +466,9 @@ fn handleCommandExec(ctx: *Context, request: *std.http.Server.Request, a: std.me
     }
 
     const sid = session_id orelse return err_mod.respondError(request, .bad_request, "missing session_id", a);
+    if (std.mem.eql(u8, name, "fork") or std.mem.eql(u8, name, "reset") or std.mem.eql(u8, name, "name")) {
+        if (isSessionStreaming(ctx, sid)) return err_mod.respondError(request, .agent_busy, "session is busy", a);
+    }
     var session = loadSession(ctx, sid) catch |err| return respondCmdLoadError(request, err, a);
     defer session.deinit();
 
@@ -521,11 +559,12 @@ fn handleSessionDelete(ctx: *Context, request: *std.http.Server.Request, id: []c
     try respondJson(request, "{\"status\":\"deleted\"}");
 }
 
-fn handleMessageDelete(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8, idx_str: []const u8, a: std.mem.Allocator) !void {
+fn handleMessageDelete(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8, msg_id_str: []const u8, a: std.mem.Allocator) !void {
     if (!isValidSessionId(session_id)) return err_mod.respondError(request, .bad_request, "invalid session id", a);
+    if (isSessionStreaming(ctx, session_id)) return err_mod.respondError(request, .agent_busy, "session is busy", a);
 
-    const index = std.fmt.parseUnsigned(usize, idx_str, 10) catch
-        return err_mod.respondError(request, .bad_request, "invalid message index", a);
+    const msg_id = std.fmt.parseUnsigned(u64, msg_id_str, 10) catch
+        return err_mod.respondError(request, .bad_request, "invalid message id", a);
 
     var session = loadSession(ctx, session_id) catch |err| {
         if (err == error.InvalidSessionId) return err_mod.respondError(request, .bad_request, "invalid session id", a);
@@ -534,12 +573,100 @@ fn handleMessageDelete(ctx: *Context, request: *std.http.Server.Request, session
     };
     defer session.deinit();
 
+    const index = session.indexOfId(msg_id) orelse
+        return err_mod.respondError(request, .message_not_found, "message not found", a);
+    if (index == 0) return err_mod.respondError(request, .bad_request, "cannot delete system message", a);
+
     session.removeMessage(index) catch |err| {
         if (err == error.IndexOutOfBounds) return err_mod.respondError(request, .bad_request, "message index out of bounds", a);
         return err_mod.respondError(request, .internal_error, "failed to remove message", a);
     };
 
     try respondJson(request, "{\"status\":\"deleted\"}");
+}
+
+/// POST /api/session/:id/truncate {"message_id":N} — keep messages before the
+/// message with id N (position-based, system prompt at index 0 preserved).
+fn handleTruncate(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8, a: std.mem.Allocator) !void {
+    if (!isValidSessionId(session_id)) return err_mod.respondError(request, .bad_request, "invalid session id", a);
+    if (isSessionStreaming(ctx, session_id)) return err_mod.respondError(request, .agent_busy, "session is busy", a);
+
+    const msg_id = readMessageIdBody(request, a) catch |err| switch (err) {
+        error.InvalidBody => return err_mod.respondError(request, .bad_request, "invalid JSON body", a),
+        error.InvalidMessageId => return err_mod.respondError(request, .bad_request, "missing or invalid message_id", a)
+    };
+
+    var session = loadSession(ctx, session_id) catch |err| {
+        if (err == error.InvalidSessionId) return err_mod.respondError(request, .bad_request, "invalid session id", a);
+        if (err == error.FileNotFound) return err_mod.respondError(request, .session_not_found, "session not found", a);
+        return err_mod.respondError(request, .internal_error, "failed to load session", a);
+    };
+    defer session.deinit();
+
+    const index = session.indexOfId(msg_id) orelse
+        return err_mod.respondError(request, .message_not_found, "message not found", a);
+    if (index == 0) return err_mod.respondError(request, .bad_request, "cannot truncate at system message", a);
+
+    session.truncateTo(index);
+    try session.flush();
+    try respondJson(request, "{\"status\":\"ok\"}");
+}
+
+/// POST /api/session/:id/branch {"message_id":N} — fork a new session containing
+/// messages up to and including the message with id N. Auto-named `(fork #N)`.
+fn handleBranch(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8, a: std.mem.Allocator) !void {
+    if (!isValidSessionId(session_id)) return err_mod.respondError(request, .bad_request, "invalid session id", a);
+    if (isSessionStreaming(ctx, session_id)) return err_mod.respondError(request, .agent_busy, "session is busy", a);
+
+    const msg_id = readMessageIdBody(request, a) catch |err| switch (err) {
+        error.InvalidBody => return err_mod.respondError(request, .bad_request, "invalid JSON body", a),
+        error.InvalidMessageId => return err_mod.respondError(request, .bad_request, "missing or invalid message_id", a)
+    };
+
+    var session = loadSession(ctx, session_id) catch |err| {
+        if (err == error.InvalidSessionId) return err_mod.respondError(request, .bad_request, "invalid session id", a);
+        if (err == error.FileNotFound) return err_mod.respondError(request, .session_not_found, "session not found", a);
+        return err_mod.respondError(request, .internal_error, "failed to load session", a);
+    };
+    defer session.deinit();
+
+    const boundary_idx = session.indexOfId(msg_id) orelse
+        return err_mod.respondError(request, .message_not_found, "message not found", a);
+    if (boundary_idx == 0) return err_mod.respondError(request, .bad_request, "cannot branch at system message", a);
+    const boundary_content = session.messages()[boundary_idx].content;
+
+    var fork_sess = session_ops.forkAt(ctx.allocator, ctx.io, &session, ctx.sessions_dir, msg_id, session_id) catch |err| {
+        if (err == error.MessageNotFound) return err_mod.respondError(request, .message_not_found, "message not found", a);
+        if (err == error.SessionAlreadyExists) return err_mod.respondError(request, .bad_request, "fork name already exists", a);
+        return err_mod.respondError(request, .internal_error, "branch failed", a);
+    };
+    defer fork_sess.deinit();
+    const fork_path = fork_sess.path orelse return err_mod.respondError(request, .internal_error, "fork session has no path", a);
+    const fork_id = try sessionIdFromPath(a, fork_path);
+    const esc_content = try escapeJsonDynamic(a, boundary_content);
+    defer a.free(esc_content);
+    const response = try std.fmt.allocPrint(a, "{{\"status\":\"ok\",\"data\":{{\"session_id\":\"{s}\",\"name\":\"{s}\",\"boundary_content\":\"{s}\"}}}}", .{ fork_id, fork_sess.name, esc_content });
+    return respondJson(request, response);
+}
+
+/// Parse {"message_id":N} from a JSON request body. Returns a plain error set;
+/// callers map to HTTP responses.
+fn readMessageIdBody(request: *std.http.Server.Request, a: std.mem.Allocator) !u64 {
+    var transfer_buf: [512]u8 = undefined;
+    var body_reader = request.readerExpectNone(&transfer_buf);
+    const body = body_reader.allocRemaining(a, @enumFromInt(2048)) catch return error.InvalidBody;
+    const parsed = std.json.parseFromSlice(std.json.Value, a, body, .{ .ignore_unknown_fields = true }) catch
+        return error.InvalidBody;
+    const obj = parsed.value.object;
+    const mid_val = obj.get("message_id") orelse return error.InvalidMessageId;
+    if (mid_val != .integer) return error.InvalidMessageId;
+    return @intCast(mid_val.integer);
+}
+
+/// True while a prompt stream is active for this session (populated by handlePrompt,
+/// cleared on stream end). Session-mutating endpoints must reject busy sessions.
+fn isSessionStreaming(ctx: *Context, session_id: []const u8) bool {
+    return ctx.abort_map.contains(session_id);
 }
 
 fn applySessionModel(ctx: *Context, agent: *agent_mod.AgentLoop, spec: []const u8, a: std.mem.Allocator) !void {
@@ -623,11 +750,15 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
         ctx.current_abort_session = null;
     }
 
-    if (is_new) {
+    {
+        // Always announce the session and the freshly appended user message id
+        // (binds the frontend's revert/branch/delete buttons to the stable id).
         const esc_name = try escapeJsonDynamic(ctx.allocator, session.name);
         defer ctx.allocator.free(esc_name);
-        var sid_buf: [256]u8 = undefined;
-        const sid_payload = try std.fmt.bufPrint(&sid_buf, "{{\"id\":\"{s}\",\"name\":\"{s}\"}}", .{ session_id, esc_name });
+        const msgs = session.messages();
+        const user_msg_id = if (msgs.len > 0) msgs[msgs.len - 1].id else @as(u64, 0);
+        var sid_buf: [320]u8 = undefined;
+        const sid_payload = try std.fmt.bufPrint(&sid_buf, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"message_id\":{d}}}", .{ session_id, esc_name, user_msg_id });
         try sse_state.writeFrame("session_ready", sid_payload);
     }
 
@@ -737,7 +868,9 @@ fn formatMessageJson(allocator: std.mem.Allocator, buf: *AlignedU8, msg: types.M
     const role = @tagName(msg.role);
     const escaped = try escapeJsonDynamic(allocator, msg.content);
     defer allocator.free(escaped);
-    try buf.appendSlice(allocator, "{\"role\":\"");
+    const id_str = try std.fmt.allocPrint(allocator, "{{\"id\":{d},\"role\":\"", .{msg.id});
+    defer allocator.free(id_str);
+    try buf.appendSlice(allocator, id_str);
     try buf.appendSlice(allocator, role);
     try buf.appendSlice(allocator, "\",\"content\":\"");
     try buf.appendSlice(allocator, escaped);

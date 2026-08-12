@@ -207,17 +207,22 @@ renderTool 执行流程:
 
 ## G11: MessageAction 增强
 
-### revert — 回退消息
+### revert — 截断 + 重新生成
 
-仅 user 消息支持: 点击 revert → 恢复 prompt 到输入框，不删除消息。
+仅 user 消息支持。**语义已变更（2026-08-12）**：从"回填输入框"改为"截断该消息及之后回复 + 回填输入框 + 重发重新生成"（对齐 opencode 消息编辑 / Claude retry）。见 `docs/0.2.6/PLAN-USER-MSG-ACTIONS-FIX.md` §revert 语义变更。
 
 ```
 消息右侧 hover 显操作栏:
   [revert] [copy] [×]
 
-revert 点击 → prompt-input.value = content → focus
+revert 点击 (message_id=N):
+  POST /api/session/:id/truncate {"message_id":N}   // 按 id 定位位置，删除该用户消息及之后所有回复（系统提示词保留）
+  → prompt-input.value = content → focus            // 回填，用户重发即重新生成
+  → reload 会话 (DOM 与服务端对齐)
 copy 点击 → navigator.clipboard.writeText(content) → "Copied!" 1.5s
 ```
+
+**守卫**: message_id 定位到的消息不能是系统消息（index 0）；流式进行中阻止 + 服务端 `busy` 兜底。
 
 **revert 时输入框已有内容的处理**: 用户已输入但未发送的草稿会被覆盖。
 

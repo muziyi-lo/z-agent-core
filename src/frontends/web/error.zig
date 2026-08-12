@@ -4,6 +4,7 @@ pub const ErrorCode = enum {
     not_found,
     bad_request,
     session_not_found,
+    message_not_found,
     agent_busy,
     internal_error,
 };
@@ -13,6 +14,7 @@ pub fn codeString(c: ErrorCode) []const u8 {
         .not_found => "not_found",
         .bad_request => "bad_request",
         .session_not_found => "session_not_found",
+        .message_not_found => "message_not_found",
         .agent_busy => "agent_busy",
         .internal_error => "internal_error",
     };
@@ -23,6 +25,7 @@ pub fn statusCode(c: ErrorCode) std.http.Status {
         .not_found => .not_found,
         .bad_request => .bad_request,
         .session_not_found => .not_found,
+        .message_not_found => .not_found,
         .agent_busy => .service_unavailable,
         .internal_error => .internal_server_error,
     };

@@ -78,8 +78,12 @@ function decorateCodeBlocks(html) {
 function setStreaming(streaming) {
   var btn = document.getElementById('send-btn');
   var inp = document.getElementById('prompt-input');
+  var msgs = document.getElementById('messages');
   if (btn) btn.classList.toggle('stop', streaming);
   if (inp) inp.disabled = streaming;
+  // Disable message action buttons visually while streaming (clicks are also
+  // guarded by `isStreaming` in each handler).
+  if (msgs) msgs.classList.toggle('streaming', streaming);
   return btn;
 }
 
@@ -92,7 +96,8 @@ function biIcon(name, size) {
   var paths = {
     'revert': '<path fill-rule="evenodd" d="M8 3a5 5 0 1 1-4.546 2.914.5.5 0 0 0-.908-.417A6 6 0 1 0 8 2z"/><path d="M8 4.466V.534a.25.25 0 0 0-.41-.192L5.23 2.308a.25.25 0 0 0 0 .384l2.36 1.966A.25.25 0 0 0 8 4.466"/>',
     'copy': '<path fill-rule="evenodd" d="M4 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zm2-1a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1zM2 5a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1h1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1v1z"/>',
-    'trash': '<path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/><path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/>'
+    'trash': '<path d="M5.5 5.5A.5.5 0 0 1 6 6v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m2.5 0a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-1 0V6a.5.5 0 0 1 .5-.5m3 .5a.5.5 0 0 0-1 0v6a.5.5 0 0 0 1 0z"/><path d="M14.5 3a1 1 0 0 1-1 1H13v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V4h-.5a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1H6a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1h3.5a1 1 0 0 1 1 1zM4.118 4 4 4.059V13a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V4.059L11.882 4zM2.5 3h11V2h-11z"/>',
+    'branch': '<path d="M9.585 2.568a2.5 2.5 0 1 1 2.83 2.83 3.5 3.5 0 0 1-2.83 2.83v3.25a3.5 3.5 0 1 1-2 0V8.228a3.5 3.5 0 0 1-2.83-2.83 2.5 2.5 0 1 1 2.83 2.83v.042a2.5 2.5 0 0 0 2 0V8.228a3.5 3.5 0 0 1 2.83-2.83v-.003a2.5 2.5 0 0 0-2.83-2.827zM6 1.5a1 1 0 1 0 0 2 1 1 0 0 0 0-2zm6 3a1 1 0 1 0 0 2 1 1 0 0 0 0-2zm-6 8a1 1 0 1 0 0 2 1 1 0 0 0 0-2z"/>'
   };
   var p = paths[name] || '';
   var s = size || 14;
@@ -130,13 +135,38 @@ themeBtn.onclick = function() {
   themeBtn.innerHTML = saved === 'light' ? '&#9790;' : '&#9728;';
 })();
 
-// --- auto-scroll helper ---
+// --- auto-scroll helper (opencode-style follow state machine) ---
+var autoScrollPaused = false;
+var autoScrollMark = { top: -1, time: 0 };
+var autoScrollMarkTimer = null;
+var SCROLL_THRESHOLD = 10;
+var SCROLL_MARK_MS = 1500;
+
 function isNearBottom(el) {
-  return el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD;
 }
-function scrollToBottom(el) {
-  if (isNearBottom(el)) el.scrollTop = el.scrollHeight;
+function scrollToBottom(el, force) {
+  if (autoScrollPaused && !force) return;
+  var top = Math.max(0, el.scrollHeight - el.clientHeight);
+  autoScrollMark = { top: top, time: Date.now() };
+  if (autoScrollMarkTimer) clearTimeout(autoScrollMarkTimer);
+  autoScrollMarkTimer = setTimeout(function() { autoScrollMark.time = 0; }, SCROLL_MARK_MS);
+  el.scrollTop = el.scrollHeight;
 }
+// User-driven scroll listener: leaving the bottom pauses following, returning
+// resumes. Programmatic scrolls are masked by the mark window; nested scrollable
+// regions (tool output / code blocks) are exempt.
+document.getElementById('messages').addEventListener('scroll', function(e) {
+  var el = document.getElementById('messages');
+  var t = e.target;
+  if (t && t !== el && t.closest && t.closest('[data-scrollable]')) return;
+  if (Date.now() - autoScrollMark.time < SCROLL_MARK_MS && Math.abs(el.scrollTop - autoScrollMark.top) < 2) return;
+  if (isNearBottom(el)) {
+    autoScrollPaused = false;
+  } else {
+    autoScrollPaused = true;
+  }
+}, true);
 function confirmModal(msg) {
   return new Promise(function(resolve) {
     document.getElementById('confirm-msg').textContent = msg;
@@ -257,7 +287,7 @@ document.addEventListener('click', function(e) {
   }
 });
 
-// --- session list ---
+// --- session list (branch tree: top-level grouped by time, children under parent) ---
 async function loadSessions() {
   var list; try { list = await api('/session'); } catch(e) { console.error('loadSessions error', e); return; }
   var el = document.getElementById('session-list');
@@ -268,80 +298,115 @@ async function loadSessions() {
   }
 
   var pinnedIds = getPinnedIds();
-  var groups = groupSessions(list, pinnedIds);
+  // Branch tree: sessions with parent_id render under their parent (depth-based
+  // indent); orphans whose parent no longer exists are promoted to top-level so
+  // they never become unreachable.
+  var knownIds = {};
+  list.forEach(function(s) { knownIds[s.id] = true; });
+  var childrenMap = {};
+  var topLevel = [];
+  list.forEach(function(s) {
+    if (s.parent_id && knownIds[s.parent_id]) {
+      (childrenMap[s.parent_id] = childrenMap[s.parent_id] || []).push(s);
+    } else {
+      topLevel.push(s);
+    }
+  });
+  Object.keys(childrenMap).forEach(function(k) {
+    childrenMap[k].sort(function(a, b) { return b.timestamp - a.timestamp; });
+  });
+  var groups = groupSessions(topLevel, pinnedIds);
 
-  function renderGroup(label, items, pinned) {
+  function renderItem(s, depth) {
+    var isChild = depth > 0;
+    var isPinned = pinnedIds && pinnedIds.indexOf(s.id) !== -1;
+    var div = document.createElement('div');
+    div.className = 'session' + (isChild ? ' child' : '') + (s.id === currentId ? ' active' : '');
+    // Depth-based indent so multi-generation branches stay visually distinct.
+    if (isChild) div.style.paddingLeft = (28 + (depth - 1) * 14) + 'px';
+    div.innerHTML = (isChild ? '<span class="branch-icon" title="Branch">' + biIcon('branch', 11) + '</span>' : '')
+      + '<div class="name">' + esc(s.name) + '</div><div class="meta">' + esc(s.model) + ' &middot; ' + s.msg_count + ' msgs</div>'
+      + '<button class="pin-btn' + (isPinned ? ' pinned' : '') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>'
+      + '<button class="more-btn" title="More actions">&#8942;</button>'
+      + '<span class="delete-btn">&times;</span>'
+      + '<div class="more-menu"><div class="more-item" data-act="rename">Rename</div><div class="more-item" data-act="pin">' + (isPinned ? 'Unpin' : 'Pin') + '</div><div class="more-item danger" data-act="delete">Delete</div></div>';
+
+    div.querySelector('.pin-btn').onclick = function(e) {
+      e.stopPropagation();
+      togglePin(s.id);
+      loadSessions();
+    };
+    div.querySelector('.delete-btn').onclick = function(e) { e.stopPropagation(); deleteSession(s.id); };
+
+    var moreBtn = div.querySelector('.more-btn');
+    var moreMenu = div.querySelector('.more-menu');
+    moreBtn.onclick = function(e) {
+      e.stopPropagation();
+      closeAllMoreMenus();
+      moreMenu.classList.toggle('open');
+    };
+    moreMenu.querySelectorAll('.more-item').forEach(function(item) {
+      item.onclick = function(e) {
+        e.stopPropagation();
+        moreMenu.classList.remove('open');
+        var act = item.getAttribute('data-act');
+        if (act === 'rename') { nameSpan.dispatchEvent(new MouseEvent('dblclick')); }
+        else if (act === 'pin') { togglePin(s.id); loadSessions(); }
+        else if (act === 'delete') { deleteSession(s.id); }
+      };
+    });
+
+    var nameSpan = div.querySelector('.name');
+    nameSpan.ondblclick = function() {
+      var input = document.createElement('input');
+      input.value = nameSpan.textContent;
+      input.className = 'rename-input';
+      var finish = async function() {
+        var newName = input.value.trim();
+        nameSpan.style.display = '';
+        input.remove();
+        if (newName && newName !== nameSpan.textContent) {
+          try {
+            await fetch(A + '/session/' + s.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName }) });
+            if (currentId === s.id) { currentName = newName; setTopbarTitle(newName); }
+            await loadSessions();
+          } catch(err) { console.error(err); }
+        }
+      };
+      input.onblur = finish;
+      input.onkeydown = function(e) { if (e.key === 'Enter') finish(); };
+      nameSpan.style.display = 'none';
+      nameSpan.parentNode.insertBefore(input, nameSpan.nextSibling);
+      input.focus();
+      input.select();
+    };
+
+    div.onclick = function() { loadSession(s.id); };
+    return div;
+  }
+
+  function renderChildren(parentId, depth) {
+    var kids = childrenMap[parentId];
+    if (!kids) return;
+    kids.forEach(function(k) {
+      el.appendChild(renderItem(k, depth));
+      if (depth < 6) renderChildren(k.id, depth + 1);
+    });
+  }
+
+  function renderGroup(label, items) {
     if (items.length === 0) return;
     var hdr = document.createElement('div');
     hdr.className = 'section-header';
     hdr.textContent = label;
     el.appendChild(hdr);
     items.forEach(function(s) {
-      var isPinned = pinned || (pinnedIds && pinnedIds.indexOf(s.id) !== -1);
-      var div = document.createElement('div');
-      div.className = 'session' + (s.id === currentId ? ' active' : '');
-      div.innerHTML = '<div class="name">' + esc(s.name) + '</div><div class="meta">' + esc(s.model) + ' &middot; ' + s.msg_count + ' msgs</div>'
-        + '<button class="pin-btn' + (isPinned ? ' pinned' : '') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>'
-        + '<button class="more-btn" title="More actions">&#8942;</button>'
-        + '<span class="delete-btn">&times;</span>'
-        + '<div class="more-menu"><div class="more-item" data-act="rename">Rename</div><div class="more-item" data-act="pin">' + (isPinned ? 'Unpin' : 'Pin') + '</div><div class="more-item danger" data-act="delete">Delete</div></div>';
-
-      div.querySelector('.pin-btn').onclick = function(e) {
-        e.stopPropagation();
-        togglePin(s.id);
-        loadSessions();
-      };
-      div.querySelector('.delete-btn').onclick = function(e) { e.stopPropagation(); deleteSession(s.id); };
-
-      var moreBtn = div.querySelector('.more-btn');
-      var moreMenu = div.querySelector('.more-menu');
-      moreBtn.onclick = function(e) {
-        e.stopPropagation();
-        closeAllMoreMenus();
-        moreMenu.classList.toggle('open');
-      };
-      moreMenu.querySelectorAll('.more-item').forEach(function(item) {
-        item.onclick = function(e) {
-          e.stopPropagation();
-          moreMenu.classList.remove('open');
-          var act = item.getAttribute('data-act');
-          if (act === 'rename') { nameSpan.dispatchEvent(new MouseEvent('dblclick')); }
-          else if (act === 'pin') { togglePin(s.id); loadSessions(); }
-          else if (act === 'delete') { deleteSession(s.id); }
-        };
-      });
-
-      var nameSpan = div.querySelector('.name');
-      nameSpan.ondblclick = function() {
-        var input = document.createElement('input');
-        input.value = nameSpan.textContent;
-        input.className = 'rename-input';
-        var finish = async function() {
-          var newName = input.value.trim();
-          nameSpan.style.display = '';
-          input.remove();
-          if (newName && newName !== nameSpan.textContent) {
-            try {
-              await fetch(A + '/session/' + s.id, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName }) });
-              if (currentId === s.id) { currentName = newName; setTopbarTitle(newName); }
-              await loadSessions();
-            } catch(err) { console.error(err); }
-          }
-        };
-        input.onblur = finish;
-        input.onkeydown = function(e) { if (e.key === 'Enter') finish(); };
-        nameSpan.style.display = 'none';
-        nameSpan.parentNode.insertBefore(input, nameSpan.nextSibling);
-        input.focus();
-        input.select();
-      };
-
-      div.onclick = function() { loadSession(s.id); };
-      el.appendChild(div);
+      el.appendChild(renderItem(s, 0));
+      renderChildren(s.id, 1);
     });
   }
 
-  renderGroup('Pinned', groups.pinned, true);
+  renderGroup('Pinned', groups.pinned);
   var labels = { today: 'Today', yesterday: 'Yesterday', week: 'This Week', older: 'Older' };
   for (var i = 0; i < ['today','yesterday','week','older'].length; i++) {
     var key = ['today','yesterday','week','older'][i];
@@ -358,6 +423,11 @@ async function loadSession(id) {
   setTopbarTitle(sess.name);
   setStreaming(false);
   var msgs = document.getElementById('messages');
+  // Preserve scroll position across reloads when the user is reading history
+  // (autoScrollPaused); otherwise the reload lands at the bottom.
+  var keepScroll = autoScrollPaused;
+  var prevScrollTop = msgs.scrollTop;
+  var prevScrollHeight = msgs.scrollHeight;
   msgs.innerHTML = '';
   var start = 0;
   if (sess.messages.length > 0) {
@@ -384,6 +454,12 @@ async function loadSession(id) {
     }
     lastAsst = addMessage(m, i, null);
     if (m.role === 'assistant') wrapContextToolGroups(lastAsst);
+  }
+  if (keepScroll && prevScrollHeight > 0) {
+    msgs.scrollTop = Math.round(prevScrollTop / prevScrollHeight * msgs.scrollHeight);
+  } else {
+    autoScrollPaused = false;
+    scrollToBottom(msgs, true);
   }
   await loadSessions();
 }
@@ -578,6 +654,7 @@ function addMessage(m, index, toolName) {
   var role = m.role;
   var content = m.content || '';
   var div = document.createElement('div');
+  div._msgId = m.id || 0;
 
   div.className = 'msg ' + role;
 
@@ -622,7 +699,7 @@ function addMessage(m, index, toolName) {
   }
 
   // delete button (not for system message, not for user — user has actions bar)
-  if (index !== undefined && index > 0 && role !== 'user') {
+  if (div._msgId && role !== 'user') {
     var delBtn = document.createElement('span');
     delBtn.className = 'msg-delete';
     delBtn.textContent = '\u00d7';
@@ -632,10 +709,10 @@ function addMessage(m, index, toolName) {
       if (isStreaming) return;
       if (!(await confirmModal('Delete this message?'))) return;
       try {
-        await api('/session/' + currentId + '/message/' + index, { method: 'DELETE' });
+        await api('/session/' + currentId + '/message/' + div._msgId, { method: 'DELETE' });
         div.remove();
         await loadSession(currentId);
-      } catch(err) { console.error(err); }
+      } catch(err) { showStatus('delete failed', true); }
     };
     div.appendChild(delBtn);
   }
@@ -646,12 +723,17 @@ function addMessage(m, index, toolName) {
     actions.className = 'msg-actions';
     var revertBtn = document.createElement('button');
     revertBtn.className = 'msg-action';
-    revertBtn.title = 'Revert to input';
+    revertBtn.title = 'Revert & regenerate';
     revertBtn.innerHTML = biIcon('revert');
-    revertBtn.onclick = function(e) {
+    revertBtn.onclick = async function(e) {
       e.stopPropagation();
-      document.getElementById('prompt-input').value = content;
-      document.getElementById('prompt-input').focus();
+      if (isStreaming || !div._msgId) return;
+      try {
+        await api('/session/' + currentId + '/truncate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message_id: div._msgId }) });
+        document.getElementById('prompt-input').value = content;
+        document.getElementById('prompt-input').focus();
+        await loadSession(currentId);
+      } catch(err) { showStatus('revert failed', true); }
     };
     actions.appendChild(revertBtn);
     var copyBtn = document.createElement('button');
@@ -663,28 +745,46 @@ function addMessage(m, index, toolName) {
       copyText(content, copyBtn, 'copied!');
     };
     actions.appendChild(copyBtn);
-    if (index !== undefined && index > 0) {
-      var delActionBtn = document.createElement('button');
-      delActionBtn.className = 'msg-action danger';
-      delActionBtn.title = 'Delete message';
-      delActionBtn.innerHTML = biIcon('trash');
-      delActionBtn.onclick = async function(e) {
-        e.stopPropagation();
-        if (isStreaming) return;
-        if (!(await confirmModal('Delete this message?'))) return;
-        try {
-          await api('/session/' + currentId + '/message/' + index, { method: 'DELETE' });
-          div.remove();
-          await loadSession(currentId);
-        } catch(err) { console.error(err); }
-      };
-      actions.appendChild(delActionBtn);
-    }
+    var branchBtn = document.createElement('button');
+    branchBtn.className = 'msg-action';
+    branchBtn.title = 'Branch from here';
+    branchBtn.innerHTML = biIcon('branch');
+    branchBtn.onclick = async function(e) {
+      e.stopPropagation();
+      if (isStreaming || !div._msgId) return;
+      try {
+        var r = await api('/session/' + currentId + '/branch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message_id: div._msgId }) });
+        if (!(r.data && r.data.session_id)) { showStatus('branch failed', true); return; }
+        if (evtSrc) { evtSrc.close(); evtSrc = null; }
+        currentId = r.data.session_id;
+        currentName = r.data.name;
+        setTopbarTitle(r.data.name || 'z-agent-core');
+        await loadSession(r.data.session_id);
+        // 方案 B: fork 不含边界消息，重发它作为新 prompt → 立即生成新答案
+        if (r.data.boundary_content) sendPrompt(r.data.boundary_content);
+      } catch(err) { showStatus('branch failed', true); }
+    };
+    actions.appendChild(branchBtn);
+    var delActionBtn = document.createElement('button');
+    delActionBtn.className = 'msg-action danger';
+    delActionBtn.title = 'Delete message';
+    delActionBtn.innerHTML = biIcon('trash');
+    delActionBtn.onclick = async function(e) {
+      e.stopPropagation();
+      if (isStreaming || !div._msgId) return;
+      if (!(await confirmModal('Delete this message?'))) return;
+      try {
+        await api('/session/' + currentId + '/message/' + div._msgId, { method: 'DELETE' });
+        div.remove();
+        await loadSession(currentId);
+      } catch(err) { showStatus('delete failed', true); }
+    };
+    actions.appendChild(delActionBtn);
     div.appendChild(actions);
   }
 
   msgs.appendChild(div);
-  msgs.scrollTop = msgs.scrollHeight;
+  scrollToBottom(msgs);
   return div;
 }
 
@@ -697,14 +797,13 @@ function sendPrompt(prompt) {
   isStreaming = true;
 
   var msgs = document.getElementById('messages');
-  var nextIndex = document.querySelectorAll('#messages .msg, #messages .tool-card').length;
-  addMessage({role:'user', content:prompt}, nextIndex);
+  var userMsg = addMessage({role:'user', content:prompt}, 0);
 
   var asst = document.createElement('div');
   asst.className = 'msg assistant';
   asst.innerHTML = '<span class="spinner"></span>';
   msgs.appendChild(asst);
-  msgs.scrollTop = msgs.scrollHeight;
+  scrollToBottom(msgs, true);
 
   var curSegments = [];
   var currentThinking = null;
@@ -761,6 +860,9 @@ function sendPrompt(prompt) {
     if (d.id) {
       currentId = d.id;
       if (d.name) { currentName = d.name; setTopbarTitle(d.name); }
+    }
+    if (d.message_id && userMsg) {
+      userMsg._msgId = d.message_id;
     }
   });
 
@@ -1361,3 +1463,7 @@ loadSessions();
 loadModels();
 loadSlashCommands();
 loadCwd();
+// Resume the most recently updated session after a refresh.
+api('/session/active').then(function(s) {
+  if (s && s.id && !currentId) loadSession(s.id);
+}).catch(function() {});

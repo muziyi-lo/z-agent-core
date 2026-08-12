@@ -3,7 +3,11 @@ const std = @import("std");
 pub const VERSION = @import("build_options").version;
 
 /// Chat message in the session history. All slices owned by session arena.
+/// `id` is a monotonic stable message identifier assigned by the session
+/// (see Session._next_id). Position-ordered for legacy files: ids follow
+/// append order except the system prompt (prepended, may have the highest id).
 pub const Message = struct {
+    id: u64 = 0,
     role: Role,
     content: []const u8,
     reasoning_content: ?[]const u8 = null,
@@ -229,6 +233,8 @@ pub const SessionInfo = struct {
     timestamp: i64,
     model: []const u8,
     msg_count: usize,
+    /// Source session id for fork/branch children (null for top-level sessions).
+    parent_id: ?[]const u8 = null,
 };
 
 /// Infer protocol compat from provider base_url. Path keywords (case-insensitive,

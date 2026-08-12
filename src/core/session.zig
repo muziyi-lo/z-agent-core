@@ -14,6 +14,10 @@ pub const Session = struct {
     _messages: std.ArrayListAligned(types.Message, null),
     modified: bool,
     model: []const u8,
+    /// Source session id for fork/branch children (null for top-level sessions).
+    parent_id: ?[]const u8 = null,
+    /// Next message id to assign. Monotonic across appends; loaded ids bump it.
+    _next_id: u64,
 
     /// Create a new empty session. Name defaults to "New Session".
     pub fn init(allocator: std.mem.Allocator, io: Io, model: []const u8) !Session {
@@ -25,6 +29,8 @@ pub const Session = struct {
             ._messages = std.ArrayListAligned(types.Message, null).empty,
             .modified = false,
             .model = &.{},
+            .parent_id = null,
+            ._next_id = 1,
         };
         errdefer self._arena.deinit();
         const arena = self._arena.allocator();
@@ -66,6 +72,8 @@ pub const Session = struct {
             ._messages = std.ArrayListAligned(types.Message, null).empty,
             .modified = false,
             .model = &.{},
+            .parent_id = null,
+            ._next_id = 1,
         };
         errdefer self._arena.deinit();
         const arena = self._arena.allocator();
@@ -77,6 +85,7 @@ pub const Session = struct {
 
         var lines = std.mem.splitScalar(u8, content, '\n');
         var header_seen = false;
+        var migrated = false;
 
         while (lines.next()) |raw_line| {
             const line = std.mem.trim(u8, raw_line, "\r");
@@ -102,6 +111,9 @@ pub const Session = struct {
                     if (obj.get("name")) |nv| if (nv == .string) {
                         arena.free(self.name);
                         self.name = try arena.dupe(u8, nv.string);
+                    };
+                    if (obj.get("parent_id")) |pv| if (pv == .string and pv.string.len > 0) {
+                        self.parent_id = try arena.dupe(u8, pv.string);
                     };
                     header_seen = true;
                     continue;
@@ -166,7 +178,26 @@ pub const Session = struct {
                 break :blk null;
             } else null;
 
+            // Message id: preserve persisted id; assign a fresh monotonic id for
+            // legacy lines without one (one-time migration, flushed below).
+            var assigned_id: u64 = undefined;
+            if (obj.get("id")) |v| {
+                if (v == .integer) {
+                    assigned_id = @intCast(v.integer);
+                    if (self._next_id <= assigned_id) self._next_id = assigned_id + 1;
+                } else {
+                    assigned_id = self._next_id;
+                    self._next_id += 1;
+                    migrated = true;
+                }
+            } else {
+                assigned_id = self._next_id;
+                self._next_id += 1;
+                migrated = true;
+            }
+
             try self._messages.append(arena, .{
+                .id = assigned_id,
                 .role = role,
                 .content = try arena.dupe(u8, content_val),
                 .reasoning_content = reasoning_content,
@@ -179,13 +210,32 @@ pub const Session = struct {
         }
 
         if (!header_seen) return error.InvalidSession;
+
+        // Legacy session without ids: write back once so ids become stable.
+        // Best-effort — a read-only file must not prevent loading (ids stay
+        // assigned in memory for this load; the next flush retries persistence).
+        if (migrated) {
+            self.modified = true;
+            self.flush() catch |err| {
+                var dbuf: [256]u8 = undefined;
+                var dw: Io.File.Writer = .init(.stderr(), io, &dbuf);
+                _ = dw.interface.writeAll("z-agent-core: warning: failed to persist migrated message ids: ") catch {};
+                _ = dw.interface.writeAll(@errorName(err)) catch {};
+                _ = dw.interface.flush() catch {};
+            };
+        }
+
         return self;
     }
 
-    /// Append a message with deep copy into session arena. Auto-fills timestamp and model.
+    /// Append a message with deep copy into session arena. Auto-fills timestamp,
+    /// model and a fresh monotonic id.
     pub fn append(self: *Session, msg: types.Message) !void {
         const arena = self._arena.allocator();
         var duped = msg;
+
+        duped.id = self._next_id;
+        self._next_id += 1;
 
         if (duped.timestamp == 0) {
             const clock_ts = Io.Clock.Timestamp.now(self.io, .real);
@@ -234,15 +284,27 @@ pub const Session = struct {
     }
 
     /// Replace the first system message or prepend one. Used for per-turn system prompt refresh.
+    /// Prepend assigns a fresh id (system message may carry a high id — truncate/branch
+    /// locate boundaries by id then operate on position, so system is always kept).
     pub fn updateFirstSystem(self: *Session, content: []const u8) !void {
         const arena = self._arena.allocator();
         const duped = try arena.dupe(u8, content);
         if (self._messages.items.len > 0 and self._messages.items[0].role == .system) {
             self._messages.items[0].content = duped;
         } else {
-            try self._messages.insert(arena, 0, .{ .role = .system, .content = duped });
+            const new_id = self._next_id;
+            self._next_id += 1;
+            try self._messages.insert(arena, 0, .{ .id = new_id, .role = .system, .content = duped });
         }
         self.modified = true;
+    }
+
+    /// Find the array index of a message by id. Null when not found.
+    pub fn indexOfId(self: *const Session, id: u64) ?usize {
+        for (self._messages.items, 0..) |msg, i| {
+            if (msg.id == id) return i;
+        }
+        return null;
     }
 
     /// Write all messages to JSONL file. Creates .zagent/sessions/ if needed.
@@ -275,7 +337,7 @@ pub const Session = struct {
             const file = try cwd.createFile(self.io, tmp_path, .{});
             defer file.close(self.io);
 
-            try writeHeader(arena, self.io, file, self.name, self.model);
+            try writeHeader(arena, self.io, file, self.name, self.model, self.parent_id, self._messages.items.len);
             for (self._messages.items) |msg| {
                 var buf = std.array_list.Managed(u8).init(arena);
                 defer buf.deinit();
@@ -306,6 +368,16 @@ pub const Session = struct {
     /// Write current session messages to a JSONL file. Does not change internal path.
     /// Uses temp-then-rename for atomicity.
     pub fn writeTo(self: *Session, file_path: []const u8, io: Io) !void {
+        try writeMessagesTo(self, file_path, io, self._messages.items.len, self.name, self.model, self.parent_id);
+    }
+
+    /// Write the first `count` messages to a JSONL file under `name` and `parent_id`
+    /// (branch-at-message fork). Uses temp-then-rename for atomicity.
+    pub fn writePrefixTo(self: *Session, file_path: []const u8, io: Io, count: usize, name: []const u8, parent_id: ?[]const u8) !void {
+        try writeMessagesTo(self, file_path, io, @min(count, self._messages.items.len), name, self.model, parent_id);
+    }
+
+    fn writeMessagesTo(self: *Session, file_path: []const u8, io: Io, count: usize, name: []const u8, model: []const u8, parent_id: ?[]const u8) !void {
         const arena = self._arena.allocator();
         const cwd = Io.Dir.cwd();
 
@@ -316,8 +388,8 @@ pub const Session = struct {
             const file = try cwd.createFile(io, tmp_path, .{});
             defer file.close(io);
 
-            try writeHeader(arena, io, file, self.name, self.model);
-            for (self._messages.items) |msg| {
+            try writeHeader(arena, io, file, name, model, parent_id, count);
+            for (self._messages.items[0..count]) |msg| {
                 var buf = std.array_list.Managed(u8).init(arena);
                 defer buf.deinit();
                 try serializeMessage(&buf, msg);
@@ -360,7 +432,7 @@ pub const Session = struct {
             const file = try cwd.createFile(self.io, tmp_path, .{});
             defer file.close(self.io);
 
-            try writeHeader(arena, self.io, file, self.name, self.model);
+            try writeHeader(arena, self.io, file, self.name, self.model, self.parent_id, self._messages.items.len);
             for (self._messages.items) |msg| {
                 var buf = std.array_list.Managed(u8).init(arena);
                 defer buf.deinit();
@@ -469,7 +541,7 @@ fn epochToISO8601(allocator: std.mem.Allocator, epoch_s: i64) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{ @as(u32, @intCast(year)), m, d, @as(u32, @intCast(h)), @as(u32, @intCast(min)), @as(u32, @intCast(sec)) });
 }
 
-fn writeHeader(allocator: std.mem.Allocator, io: Io, file: Io.File, name: []const u8, model: []const u8) !void {
+fn writeHeader(allocator: std.mem.Allocator, io: Io, file: Io.File, name: []const u8, model: []const u8, parent_id: ?[]const u8, msg_count: usize) !void {
     const clock_ts = Io.Clock.Timestamp.now(io, .real);
     const now = Io.Timestamp.toSeconds(clock_ts.raw);
     var buf = std.array_list.Managed(u8).init(allocator);
@@ -483,13 +555,22 @@ fn writeHeader(allocator: std.mem.Allocator, io: Io, file: Io.File, name: []cons
     try appendEscapedJsonString(&buf, model);
     try buf.appendSlice("\",\"name\":\"");
     try appendEscapedJsonString(&buf, name);
-    try buf.appendSlice("\"}\n");
+    if (parent_id) |pid| {
+        try buf.appendSlice("\",\"parent_id\":\"");
+        try appendEscapedJsonString(&buf, pid);
+    }
+    var cnt_buf: [24]u8 = undefined;
+    const cnt_str = try std.fmt.bufPrint(&cnt_buf, "\",\"msg_count\":{d}", .{msg_count});
+    try buf.appendSlice(cnt_str);
+    try buf.appendSlice("}\n");
 
     try file.writeStreamingAll(io, buf.items);
 }
 
 fn serializeMessage(buf: *std.array_list.Managed(u8), msg: types.Message) !void {
-    try buf.appendSlice("{\"role\":\"");
+    var id_buf: [24]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{{\"id\":{d},\"role\":\"", .{msg.id});
+    try buf.appendSlice(id_str);
     try buf.appendSlice(@tagName(msg.role));
     try buf.appendSlice("\"");
 
@@ -605,6 +686,8 @@ pub fn list(allocator: std.mem.Allocator, io: Io, session_dir: []const u8) ![]Se
             timestamp: i64 = 0,
             name: []const u8 = "",
             model: []const u8 = "",
+            parent_id: ?[]const u8 = null,
+            msg_count: ?usize = null,
         } = .{};
         var found = false;
 
@@ -628,6 +711,12 @@ pub fn list(allocator: std.mem.Allocator, io: Io, session_dir: []const u8) ![]Se
                     if (parsed.value.object.get("model")) |mv| {
                         if (mv == .string) header.model = try allocator.dupe(u8, mv.string);
                     }
+                    if (parsed.value.object.get("parent_id")) |pv| {
+                        if (pv == .string and pv.string.len > 0) header.parent_id = try allocator.dupe(u8, pv.string);
+                    }
+                    if (parsed.value.object.get("msg_count")) |cv| {
+                        if (cv == .integer) header.msg_count = @intCast(cv.integer);
+                    }
                     found = true;
                     break;
                 }
@@ -642,7 +731,17 @@ pub fn list(allocator: std.mem.Allocator, io: Io, session_dir: []const u8) ![]Se
         else
             entry.name;
 
-        const msg_count_est = @max(size / 150, 0);
+        // Exact count from the header when present; otherwise count message lines
+        // (fallback for legacy files written before msg_count was stored); the
+        // size-based estimate is the last resort.
+        const msg_count: usize = header.msg_count orelse blk: {
+            var cnt: usize = 0;
+            var it = std.mem.splitScalar(u8, content[0..n], '\n');
+            while (it.next()) |ln| {
+                if (std.mem.indexOf(u8, ln, "\"role\"") != null) cnt += 1;
+            }
+            break :blk if (cnt > 0) cnt else @max(size / 150, 0);
+        };
 
         try results.append(allocator, .{
             .id = try allocator.dupe(u8, stem),
@@ -650,7 +749,8 @@ pub fn list(allocator: std.mem.Allocator, io: Io, session_dir: []const u8) ![]Se
             .file_path = try allocator.dupe(u8, file_path),
             .timestamp = header.timestamp,
             .model = header.model,
-            .msg_count = msg_count_est,
+            .msg_count = msg_count,
+            .parent_id = header.parent_id,
         });
     }
 
@@ -1051,4 +1151,117 @@ test "session: truncateTo keep >= len is no-op" {
     sess.truncateTo(5);
     try std.testing.expectEqual(@as(usize, 1), sess.messages().len);
     try std.testing.expect(!sess.modified);
+}
+
+test "session: append assigns monotonic ids" {
+    const io = std.testing.io;
+    var sess = try Session.init(std.testing.allocator, io, "test");
+    defer sess.deinit();
+
+    try sess.append(.{ .role = .user, .content = "u1" });
+    try sess.append(.{ .role = .assistant, .content = "a1" });
+    try sess.append(.{ .role = .tool, .content = "t1" });
+
+    const msgs = sess.messages();
+    try std.testing.expectEqual(@as(usize, 3), msgs.len);
+    try std.testing.expectEqual(@as(u64, 1), msgs[0].id);
+    try std.testing.expect(msgs[0].id < msgs[1].id);
+    try std.testing.expect(msgs[1].id < msgs[2].id);
+}
+
+test "session: indexOfId finds position and misses" {
+    const io = std.testing.io;
+    var sess = try Session.init(std.testing.allocator, io, "test");
+    defer sess.deinit();
+
+    try sess.append(.{ .role = .system, .content = "sys" });
+    try sess.append(.{ .role = .user, .content = "u1" });
+    const id2 = sess.messages()[1].id;
+    try std.testing.expectEqual(@as(?usize, 1), sess.indexOfId(id2));
+    try std.testing.expectEqual(@as(?usize, null), sess.indexOfId(999));
+}
+
+test "session: updateFirstSystem prepend assigns id, replace keeps id" {
+    const io = std.testing.io;
+    var sess = try Session.init(std.testing.allocator, io, "test");
+    defer sess.deinit();
+
+    try sess.append(.{ .role = .user, .content = "u1" });
+    try sess.updateFirstSystem("sys");
+    const sys_id = sess.messages()[0].id;
+    try std.testing.expect(sys_id > 0);
+    try std.testing.expect(sys_id != sess.messages()[1].id);
+
+    try sess.updateFirstSystem("sys2");
+    try std.testing.expectEqual(sys_id, sess.messages()[0].id);
+    try std.testing.expectEqualStrings("sys2", sess.messages()[0].content);
+}
+
+test "session: load legacy file assigns ids and persists migration" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-session-migrate";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, "legacy.jsonl" });
+    defer allocator.free(file_path);
+    {
+        const content =
+            \\{"type":"header","timestamp":"2026-07-09T12:00:00Z","model":"deepseek/model","name":"Test"}
+            \\{"role":"system","content":"sys","timestamp":1}
+            \\{"role":"user","content":"u1","timestamp":2}
+            \\{"role":"assistant","content":"a1","timestamp":3}
+        ;
+        const file = try Io.Dir.cwd().createFile(io, file_path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, content);
+    }
+
+    var loaded = try Session.load(allocator, io, file_path);
+    defer loaded.deinit();
+    const msgs = loaded.messages();
+    try std.testing.expectEqual(@as(usize, 3), msgs.len);
+    const ids0 = msgs[0].id;
+    const ids1 = msgs[1].id;
+    const ids2 = msgs[2].id;
+    try std.testing.expect(ids0 < ids1);
+    try std.testing.expect(ids1 < ids2);
+
+    // Migration flushed ids to disk — reload must produce identical ids.
+    var reloaded = try Session.load(allocator, io, file_path);
+    defer reloaded.deinit();
+    const rmsgs = reloaded.messages();
+    try std.testing.expectEqual(ids0, rmsgs[0].id);
+    try std.testing.expectEqual(ids1, rmsgs[1].id);
+    try std.testing.expectEqual(ids2, rmsgs[2].id);
+}
+
+test "session: load persisted ids preserved and bump next" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var sess = try Session.init(allocator, io, "test");
+    defer sess.deinit();
+    try sess.append(.{ .role = .system, .content = "sys" });
+    try sess.append(.{ .role = .user, .content = "u1" });
+    const saved_ids = [_]u64{ sess.messages()[0].id, sess.messages()[1].id };
+
+    const test_root = ".zig-test-session-idroundtrip";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, "s.jsonl" });
+    defer allocator.free(file_path);
+    sess.path = file_path;
+    try sess.flush();
+
+    var loaded = try Session.load(allocator, io, file_path);
+    defer loaded.deinit();
+    try std.testing.expectEqual(saved_ids[0], loaded.messages()[0].id);
+    try std.testing.expectEqual(saved_ids[1], loaded.messages()[1].id);
+    try loaded.append(.{ .role = .assistant, .content = "a1" });
+    const new_id = loaded.messages()[2].id;
+    try std.testing.expect(new_id > saved_ids[1]);
+    try std.testing.expectEqual(loaded.messages()[2].id, new_id);
 }

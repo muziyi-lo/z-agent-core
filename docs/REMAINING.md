@@ -113,7 +113,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | N8 | 增量上下文更新（chronogical system 消息 + baseline 持久化） | 对齐 opencode D1，需 DB/会话格式扩展（CONTEXT-ASSEMBLY F3） |
 | N9 | 系统 prompt 缓存 breakpoint | 依赖 provider 缓存 hint 协议（CONTEXT-ASSEMBLY F4） |
 | N10 | 多 skill 目录数组（`skills_dir = ["...", "..."]`） | 索引与 tool 按顺序查找同名 skill，前者优先（CONTEXT-ASSEMBLY F5） |
-| N11 | 用户消息 hover 操作栏（revert/copy/delete）功能缺陷 | 见 `docs/0.2.6/PLAN-USER-MSG-ACTIONS-FIX.md`（DEEPSEEK-STYLE PR7 收尾） |
+| N11 | 会话系统优化（消息 ID 模型 + 按 ID 操作 + 分页/compact/history） | **P1+P2 已实施（2026-08-12）**：消息 id 模型 + 迁移 + 按 id 的 delete/truncate/branch + `(fork #N)` 命名 + 操作栏 4 按钮 + 滚动状态机 + 三层流式防护 + branch 自动重答（方案 B）+ `parent_id` 分支树 + `/active` + `message_not_found`。P3 分页/P4 compact/P5 history 见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT.md` |
 
 ## Deferred (explicitly skipped)
 
@@ -135,7 +135,9 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 
 | # | Item | Notes |
 |---|------|-------|
+| F2 | **LLM 自动标题**（会话命名） | 对齐 opencode `SessionPrompt.ensureTitle`（`prompt.ts:193-255`）：无 parentID + 仅 1 条真实用户消息 + 默认标题 → title agent 生成首行。依赖 P4 compact 的 LLM 基建，P4 落地后评估（SESSION-SYSTEM-OPT P2 延后项） |
 | F3 | MCP tool discovery | `mcp_connect` tool — LLM discovers remote tools at runtime |
+| F4 | **分支摘要注入**（branch_summary） | 借鉴 pi-repos `branch-summarization.ts`：离开分支/切回主线时 LLM 摘要注入（"用户探索了另一分支..."），告知模型分支探索内容。依赖 P4 LLM 基建（SESSION-SYSTEM-OPT P2 延后项） |
 
 ## Architecture wishlist
 

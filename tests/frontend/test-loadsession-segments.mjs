@@ -87,6 +87,9 @@ globalThis.hljs = { highlightAll() {} }
 globalThis.isStreaming = false
 globalThis.currentId = null
 globalThis.currentName = null
+globalThis.autoScrollPaused = false
+globalThis.scrollToBottom = () => {}
+globalThis.showStatus = () => {}
 
 globalThis.buildSegment = eval(`(${extract("buildSegment")})`)
 globalThis.renderAssistantMessage = eval(`(${extract("renderAssistantMessage")})`)

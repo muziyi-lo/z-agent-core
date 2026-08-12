@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.2.7] — 2026-08-12
+
+### Added
+- **消息 ID 模型**（`docs/0.2.7/PLAN-SESSION-SYSTEM-OPT.md` P1）:
+  - `Message` 增 `id: u64` 单调递增（`Session._next_id` 分配），JSONL 序列化/解析支持；旧会话文件加载时一次性分配 id + 迁移写回（非正式版不兼容策略）
+  - 会话操作按 id：`DELETE /message/:id`、`POST /truncate {message_id}`（revert 用，按位置截断保留系统提示词）、`POST /branch {message_id}`（`forkAt`，按 id 定位）
+  - `(fork #N)` 自动命名（按基础标题扫描递增）；`sanitizeForkName` URL 安全化
+  - SSE `session_ready` 携带新用户消息 `message_id`，前端按 id 绑定操作按钮
+- **Web 前端消息操作栏增强**:
+  - 用户消息操作栏 4 按钮（revert/copy/branch/delete），全部按消息 id 绑定 + `status-msg` 失败提示
+  - revert 语义改为"截断 + 重新生成"；branch 从消息分叉（`(fork #N)` 自动命名 + 自动切换）
+- **滚动状态机**（吸收 opencode `createAutoScroll`）: 用户离开底部暂停跟随、回底恢复、程序滚动防误判（mark 时间窗）、reload 保留滚动位置、嵌套滚动豁免
+- **流式期间三层操作防护**: 前端 `isStreaming` 守卫 + `#messages.streaming` 灰显禁用 + 服务端 `agent_busy` 兜底（基于 `abort_map` 流式追踪）
+- **分支关系（P2）**:
+  - `Session.parent_id`：fork/branch 子会话记录来源会话，header 序列化/解析，列表与详情输出
+  - **侧边栏分支树**：子会话按 parent_id 缩进渲染在父会话下 + 分支图标（`bi-git-branch`），**多代嵌套按层级递进缩进（28+14px/代）**；孤儿分支（父已删除）自动提升到顶层保证可达
+  - **branch 自动重答（方案 B，对齐 pi-repos）**：fork 到边界消息之前，`branch` 响应回传 `boundary_content`，前端切换后自动重发 → 立即生成新答案，消除悬空/连续 user 消息
+  - `GET /api/session/active`：返回最近更新会话，前端刷新后自动恢复
+- **结构化错误**: `err_mod` 增 `message_not_found`（消息不存在返回 404 区分）
+
+### Fixed
+- **用户消息 delete 索引漂移**：按钮 index 用 DOM 计数，与服务端消息数组下标漂移（工具回合 N+2 条 vs N+1 元素）→ 删错/静默 400；改为按消息 id 操作根治
+- **删除按钮流式会话不可见**：删除按钮创建被 `_msgId` 门控，改为总是创建 + 点击时守卫
+- **fork 命名 `#` 进文件名**：`sanitizeForkName` 白名单化，`#` 被 URL 片段截断导致 session not found
+- **Node 前端测试适配**：`test-loadsession-segments.mjs` 补滚动状态机全局 stub
+
 ## [0.2.6] — 2026-08-11
 
 ### Added

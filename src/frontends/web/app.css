@@ -30,6 +30,10 @@ body{font-family:var(--font-ui);background:var(--bg-base);color:var(--text-base)
 #session-list .session.active{background:var(--bg-active);border-radius:100px}
 #session-list .session .name{color:var(--text-base);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #session-list .session .meta{font-size:var(--text-xs);color:var(--text-muted)}
+#session-list .session.child{padding-left:28px}
+#session-list .session.child .name{color:var(--text-muted)}
+#session-list .session.child.active .name{color:var(--text-strong)}
+#session-list .branch-icon{display:inline-flex;margin-right:4px;color:var(--text-faint);vertical-align:-2px}
 .section-header{padding:8px 12px 4px;font-size:var(--text-xs);color:var(--text-faint);text-transform:uppercase;letter-spacing:0.5px}
 #new-session-btn{margin:8px;padding:8px;background:var(--bg-layer-01);border:1px solid var(--border-base);border-radius:var(--radius-sm);color:var(--text-base);cursor:pointer;font-size:var(--text-sm)}
 #new-session-btn:hover{background:var(--bg-layer-02)}
@@ -101,6 +105,7 @@ body{font-family:var(--font-ui);background:var(--bg-base);color:var(--text-base)
 .msg-action{padding:3px;background:var(--bg-layer-02);border:0.5px solid var(--border-base);border-radius:var(--radius-sm);color:var(--text-muted);font-size:9px;cursor:pointer;font-family:var(--font-ui);display:flex;align-items:center;justify-content:center;line-height:1}
 .msg-action:hover{color:var(--text-strong);border-color:var(--border-focus)}
 .msg-action.danger:hover{color:var(--accent-error)}
+#messages.streaming .msg-action,#messages.streaming .msg-delete{opacity:.35;pointer-events:none;cursor:default}
 .context-tool-group{border:0.5px solid var(--border-base);border-radius:var(--radius-md);margin:4px auto;max-width:var(--msg-max-width);padding:4px}
 .context-tool-group .group-summary{padding:4px 8px;font-size:var(--text-xs);color:var(--text-muted);border-bottom:0.5px solid var(--border-muted);cursor:pointer}
 .context-tool-group .group-summary:hover{color:var(--text-strong)}
