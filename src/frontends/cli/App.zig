@@ -11,6 +11,9 @@ const render = @import("render.zig");
 const signal = @import("../../util/signal.zig");
 const session_ops = @import("../../session_ops.zig");
 const command_mod = @import("../../command.zig");
+const log = @import("../../util/log.zig");
+const trace = @import("../../util/trace.zig");
+const timing = @import("../../util/timing.zig");
 
 const Io = std.Io;
 
@@ -100,6 +103,10 @@ pub const App = struct {
             .api_key_override = null,
         });
         errdefer state.deinit();
+
+        log.init(allocator, io, state.project_root);
+        trace.init(allocator, io, state.project_root);
+        timing.init(io);
 
         if (model_override) |spec| {
             const duped = try allocator.dupe(u8, spec);
@@ -219,6 +226,7 @@ pub const App = struct {
         try render.writeLabeled(display_w, .user, prompt);
         try display_w.flush();
 
+        _ = self.agent.maybeAutoCompact();
         const pre_count = self.session.messages().len;
         try self.session.append(.{ .role = .user, .content = prompt });
         _ = display_w.write("\n") catch {};
@@ -370,6 +378,7 @@ pub const App = struct {
             return;
         }
 
+        _ = self.agent.maybeAutoCompact();
         const pre_count = self.session.messages().len;
         try self.session.append(.{ .role = .user, .content = line });
         _ = stdout.interface.write("\n") catch {};
@@ -478,6 +487,7 @@ pub const App = struct {
         if (std.mem.eql(u8, name, "list")) return self.listSessions(stdout);
         if (std.mem.eql(u8, name, "load")) return self.loadSession(stdout, args);
         if (std.mem.eql(u8, name, "fork")) return self.forkSession(stdout, args);
+        if (std.mem.eql(u8, name, "delete")) return self.deleteSession(stdout, args);
         if (std.mem.eql(u8, name, "thinking")) {
             if (types.ThinkingLevel.fromString(args)) |tl| {
                 self.provider.config.compat.thinking_level = tl;
@@ -710,6 +720,67 @@ pub const App = struct {
         try render.writeLabeled(&stdout.interface, .success, msg);
     }
 
+    /// /delete <id> — confirm, guard the active session, then delete the file.
+    fn deleteSession(self: *App, stdout: *Io.File.Writer, id_raw: []const u8) !void {
+        const id = std.mem.trim(u8, id_raw, " \t");
+        if (id.len == 0) {
+            try render.writeLabeled(&stdout.interface, .err, "Usage: /delete <id> (use /list to see IDs)");
+            return;
+        }
+        if (!session_mod.Session.isValidId(id)) {
+            try render.writeLabeled(&stdout.interface, .err, "Invalid session id");
+            return;
+        }
+
+        // Active-session guard (canonicalized compare) BEFORE any deletion.
+        if (self.session.path) |cur_path| {
+            const target = try std.fs.path.join(self.allocator, &.{ self.session_dir, id });
+            defer self.allocator.free(target);
+            const target_file = try std.fmt.allocPrint(self.allocator, "{s}.jsonl", .{target});
+            defer self.allocator.free(target_file);
+            const cur_res = std.fs.path.resolve(self.allocator, &.{cur_path}) catch null;
+            defer if (cur_res) |r| self.allocator.free(r);
+            const tgt_res = std.fs.path.resolve(self.allocator, &.{target_file}) catch null;
+            defer if (tgt_res) |r| self.allocator.free(r);
+            if (cur_res != null and tgt_res != null and std.mem.eql(u8, cur_res.?, tgt_res.?)) {
+                try render.writeLabeled(&stdout.interface, .err, "Cannot delete the active session (use /new first)");
+                return;
+            }
+        }
+
+        // y/N confirmation.
+        try stdout.interface.print("Delete session {s}? (y/N) ", .{id});
+        _ = stdout.interface.flush() catch {};
+        var rbuf: [128]u8 = undefined;
+        var stdin_file = Io.File.stdin();
+        var stdin_reader = stdin_file.reader(self.io, rbuf[0..]);
+        var confirm_buf: std.ArrayListAligned(u8, null) = .empty;
+        const ans = readLine(&stdin_reader.interface, &confirm_buf, self.allocator) catch null;
+        const answer = if (ans) |a| a else "";
+        if (answer.len > 0) self.allocator.free(answer);
+        _ = stdout.interface.write("\n") catch {};
+        if (answer.len == 0 or !(answer[0] == 'y' or answer[0] == 'Y')) {
+            try render.writeLabeled(&stdout.interface, .success, "Cancelled.");
+            return;
+        }
+
+        const deleted = session_ops.deleteById(self.allocator, self.io, self.session_dir, id) catch |err| {
+            const msg = switch (err) {
+                error.InvalidSessionId => "Invalid session id",
+                error.FileNotFound => "Session not found",
+                else => blk: {
+                    var ebuf: [128]u8 = undefined;
+                    break :blk std.fmt.bufPrint(&ebuf, "Cannot delete: {s}", .{@errorName(err)}) catch "Cannot delete";
+                },
+            };
+            try render.writeLabeled(&stdout.interface, .err, msg);
+            return;
+        };
+        defer self.allocator.free(deleted);
+
+        try render.writeLabeled(&stdout.interface, .success, "Session deleted");
+    }
+
     /// Free session, config, and all heap-allocated fields. Safe to call on zero-value App.
     pub fn deinit(self: *App) void {
         if (self.project_context) |ctx| self.allocator.free(@constCast(ctx));
@@ -717,6 +788,7 @@ pub const App = struct {
         self.allocator.free(self.session_dir);
         self.session.deinit();
         self.cfg.deinit();
+        log.deinit();
     }
 };
 

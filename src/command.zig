@@ -32,6 +32,7 @@ pub const builtin = [_]Command{
     .{ .name = "fork", .description = "Fork current session", .args_hint = "name", .kind = .action },
     .{ .name = "thinking", .description = "Set thinking level", .args_hint = enumHint(types.ThinkingLevel), .kind = .action },
     .{ .name = "reset", .description = "Reset current session", .kind = .action },
+    .{ .name = "delete", .description = "Delete a saved session", .args_hint = "id", .kind = .action },
 };
 
 /// Look up a command by name in the shared registry.
@@ -55,6 +56,13 @@ test "command: find returns builtin command" {
 
 test "command: find unknown returns null" {
     try std.testing.expect(find("nonexistent") == null);
+}
+
+test "command: find returns delete command" {
+    const c = find("delete") orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("delete", c.name);
+    try std.testing.expect(c.kind == .action);
+    try std.testing.expectEqualStrings("id", c.args_hint);
 }
 
 test "command: thinking hint is enum-derived" {

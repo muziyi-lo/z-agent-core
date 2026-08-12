@@ -97,7 +97,7 @@ pub fn init(
     var session = try session_mod.Session.init(allocator, io, cfg.default_model);
     errdefer session.deinit();
 
-    const session_dir = try std.fs.path.join(allocator, &.{ project_root, ".zagent", "sessions" });
+    const session_dir = try std.fs.path.join(allocator, &.{ project_root, session_mod.sessions_subdir });
 
     return FrontendState{
         .allocator = allocator,

@@ -1,6 +1,7 @@
 test {
     _ = @import("core/agent.zig");
     _ = @import("core/session.zig");
+    _ = @import("core/compact.zig");
     _ = @import("session_ops.zig");
     _ = @import("config.zig");
     _ = @import("command.zig");
@@ -16,6 +17,9 @@ test {
     _ = @import("util/text.zig");
     _ = @import("util/path.zig");
     _ = @import("util/signal.zig");
+    _ = @import("util/log.zig");
+    _ = @import("util/trace.zig");
+    _ = @import("util/timing.zig");
     _ = @import("toml.zig");
     _ = @import("frontends/cli/render.zig");
     _ = @import("frontends/cli/App.zig");

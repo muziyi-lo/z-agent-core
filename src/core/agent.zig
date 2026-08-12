@@ -7,6 +7,8 @@ const session_mod = @import("session.zig");
 const signal = @import("../util/signal.zig");
 const frontmatter = @import("../util/frontmatter.zig");
 const skill_tool = @import("../tool/skill.zig");
+const compact_mod = @import("compact.zig");
+const log = @import("../util/log.zig");
 
 /// Turn-level termination reason. Distinct from types.FinishReason (per-request LLM status).
 pub const TurnFinish = enum {
@@ -113,6 +115,66 @@ pub const AgentLoop = struct {
     /// Swap the session reference — used by web frontend for per-request session isolation.
     pub fn setSession(self: *AgentLoop, session: *session_mod.Session) void {
         self.session_ref = session;
+    }
+
+    /// Estimate current context token usage: the last assistant message's
+    /// usage.total when available (it reflects the full context sent to the
+    /// model), otherwise a length-based estimate across all messages. Never
+    /// sums per-message usage — each total is a per-request value and summing
+    /// over-approximates the real context badly.
+    fn estimateContextTokens(self: *AgentLoop) u32 {
+        const msgs = self.session_ref.messages();
+        var i: usize = msgs.len;
+        while (i > 0) {
+            i -= 1;
+            const m = msgs[i];
+            if (m.role == .assistant) {
+                if (m.usage) |u| return u.total;
+                break;
+            }
+        }
+        var total: u32 = 0;
+        for (msgs) |m| {
+            total += @as(u32, @intCast(m.content.len / 4));
+            if (m.reasoning_content) |rc| {
+                total += @as(u32, @intCast(rc.len / 4));
+            }
+        }
+        return total;
+    }
+
+    /// Auto-compact at a turn boundary when the estimated context exceeds the
+    /// window budget (context_window - reserved). Returns true when a
+    /// compaction happened. Never fails the turn: summarization errors are
+    /// swallowed and the in-runTurn context warning stays as the fallback.
+    /// Frontends call this before capturing pre_count / invoking runTurn.
+    pub fn maybeAutoCompact(self: *AgentLoop) bool {
+        if (self.context_window == 0) return false;
+
+        const context_tokens = self.estimateContextTokens();
+        const reserved: u32 = @max(@as(u32, 20000), self.context_window / 10);
+        const usable = if (self.context_window > reserved) self.context_window - reserved else self.context_window;
+        if (context_tokens <= usable) return false;
+
+        // Stale-usage guard: a last assistant message written before the latest
+        // compaction carries pre-compaction usage and would re-trigger
+        // immediately. A null bound (never compacted in-process) skips this.
+        if (self.session_ref.last_compact_id) |bound| {
+            const msgs = self.session_ref.messages();
+            var i: usize = msgs.len;
+            while (i > 0) {
+                i -= 1;
+                if (msgs[i].role == .assistant) {
+                    if (msgs[i].id <= bound) return false;
+                    break;
+                }
+            }
+        }
+
+        _ = compact_mod.compactSession(self.provider_ref, self.session_ref, self.allocator, self.io, compact_mod.DEFAULT_KEEP_RECENT_TOKENS) catch {
+            return false;
+        };
+        return true;
     }
 
     pub fn init(
@@ -337,6 +399,7 @@ pub const AgentLoop = struct {
                                 }
                                 if (all_same) {
                                     self._loop_warning_injected = true;
+                                    log.dbg(0, 0, "stormbreaker_trigger", "tool={s}", .{tc.name});
                                     try self.session_ref.append(.{
                                         .role = .system,
                                         .content = "[Notice: You appear to be repeating the same tool call. Consider adjusting your strategy or asking the user for guidance.]",
@@ -381,6 +444,7 @@ pub const AgentLoop = struct {
                     }
                 }
                 tool_rounds += 1;
+                log.dbg(0, 0, "tool_round", "round={d} max={d}", .{ tool_rounds, self.max_tool_rounds });
                 continue;
             }
 
@@ -626,6 +690,131 @@ test "agent: init stores fields" {
     try std.testing.expectEqual(@as(u32, 10), agent.max_tool_rounds);
     try std.testing.expectEqualStrings("/tmp/project", agent.project_root);
     try std.testing.expect(agent.chat_fn == null);
+}
+
+test "agent: estimateContextTokens prefers last assistant usage" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+    try sess.append(.{ .role = .system, .content = "sys" });
+    try sess.append(.{ .role = .user, .content = "abcdefgh" });
+    try sess.append(.{ .role = .assistant, .content = "hi", .usage = .{ .input = 100, .output = 50, .total = 150 } });
+
+    var p = provider.Provider{
+        .config = .{
+            .base_url = "https://api.test.com",
+            .api_key = "",
+            .model = "test-model",
+            .max_tokens = 1000,
+            .vendor = .standard,
+            .compat = .{},
+        },
+    };
+    const reg = registry_mod.buildRegistry();
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
+    try std.testing.expectEqual(@as(u32, 150), agent.estimateContextTokens());
+}
+
+test "agent: estimateContextTokens falls back to length estimate" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+    try sess.append(.{ .role = .system, .content = "sys" });
+    try sess.append(.{ .role = .user, .content = "abcdefghijklmnop" });
+    try sess.append(.{ .role = .assistant, .content = "abcdefghijklmnop" });
+
+    var p = provider.Provider{
+        .config = .{
+            .base_url = "https://api.test.com",
+            .api_key = "",
+            .model = "test-model",
+            .max_tokens = 1000,
+            .vendor = .standard,
+            .compat = .{},
+        },
+    };
+    const reg = registry_mod.buildRegistry();
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
+    try std.testing.expectEqual(@as(u32, 8), agent.estimateContextTokens());
+}
+
+test "agent: maybeAutoCompact no-op when context_window zero" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+    try sess.append(.{ .role = .system, .content = "sys" });
+    try sess.append(.{ .role = .assistant, .content = "hi", .usage = .{ .input = 1, .output = 1, .total = 2 } });
+
+    var p = provider.Provider{
+        .config = .{
+            .base_url = "https://api.test.com",
+            .api_key = "",
+            .model = "test-model",
+            .max_tokens = 1000,
+            .vendor = .standard,
+            .compat = .{},
+        },
+    };
+    const reg = registry_mod.buildRegistry();
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
+    try std.testing.expect(!agent.maybeAutoCompact());
+}
+
+test "agent: maybeAutoCompact no-op under threshold" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+    try sess.append(.{ .role = .system, .content = "sys" });
+    try sess.append(.{ .role = .assistant, .content = "hi", .usage = .{ .input = 100, .output = 100, .total = 200 } });
+
+    var p = provider.Provider{
+        .config = .{
+            .base_url = "https://api.test.com",
+            .api_key = "",
+            .model = "test-model",
+            .max_tokens = 1000,
+            .vendor = .standard,
+            .compat = .{},
+        },
+    };
+    const reg = registry_mod.buildRegistry();
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 100000, .{});
+    try std.testing.expect(!agent.maybeAutoCompact());
+}
+
+test "agent: maybeAutoCompact stale usage blocked by compaction boundary" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+    try sess.append(.{ .role = .system, .content = "sys" });
+    try sess.append(.{ .role = .assistant, .content = "hi", .usage = .{ .input = 5000, .output = 0, .total = 5000 } });
+    // Over-threshold for a tiny window, but the last assistant predates the
+    // compaction boundary → must not trigger (and must not call the LLM).
+    sess.last_compact_id = 9999;
+
+    var p = provider.Provider{
+        .config = .{
+            .base_url = "https://api.test.com",
+            .api_key = "",
+            .model = "test-model",
+            .max_tokens = 1000,
+            .vendor = .standard,
+            .compat = .{},
+        },
+    };
+    const reg = registry_mod.buildRegistry();
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 100, .{});
+    try std.testing.expect(!agent.maybeAutoCompact());
 }
 
 test "agent: runTurn stop" {

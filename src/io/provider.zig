@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const types = @import("../types.zig");
 const config_mod = @import("../config.zig");
 const signal = @import("../util/signal.zig");
+const log = @import("../util/log.zig");
 
 pub const PhaseType = enum { none, thinking, content };
 
@@ -155,7 +156,10 @@ pub const Provider = struct {
                 if (attempt >= max_retries) return err;
                 switch (err) {
                     error.Interrupted, error.ApiError => return err,
-                    else => continue,
+                    else => {
+                        log.dbg(0, 0, "provider_retry", "attempt={d} err={s}", .{ attempt + 1, @errorName(err) });
+                        continue;
+                    },
                 }
             };
         }
@@ -171,6 +175,8 @@ pub const Provider = struct {
         pw: ?PhaseWriterCb,
     ) !types.ProviderResponse {
         const alloc = arena.allocator();
+
+        log.dbg(0, 0, "provider_stream_start", "msgs={d} tools={d}", .{ messages.len, if (tools) |t| t.len else @as(usize, 0) });
 
         const url = if (std.mem.endsWith(u8, self.config.base_url, "/chat/completions"))
             self.config.base_url

@@ -4,6 +4,9 @@ const Io = std.Io;
 
 pub const DEFAULT_SESSION_NAME = "New Session";
 pub const DEFAULT_SESSION_FILENAME = "New_Session";
+/// Single source of truth for the sessions directory (relative to project root).
+/// Referenced by Session.flush and both frontends (init.zig, server.zig).
+pub const sessions_subdir = ".zagent/sessions";
 
 /// Linear session storing messages in a JSONL file. All data owned by internal arena.
 pub const Session = struct {
@@ -18,6 +21,10 @@ pub const Session = struct {
     parent_id: ?[]const u8 = null,
     /// Next message id to assign. Monotonic across appends; loaded ids bump it.
     _next_id: u64,
+    /// Id of the latest `[Compaction]` system message written by compactSession.
+    /// Null when never compacted in-process. Not persisted (non-backward-compat
+    /// policy): stale-usage guard only needs a non-null bound once compacted.
+    last_compact_id: ?u64 = null,
 
     /// Create a new empty session. Name defaults to "New Session".
     pub fn init(allocator: std.mem.Allocator, io: Io, model: []const u8) !Session {
@@ -31,6 +38,7 @@ pub const Session = struct {
             .model = &.{},
             .parent_id = null,
             ._next_id = 1,
+            .last_compact_id = null,
         };
         errdefer self._arena.deinit();
         const arena = self._arena.allocator();
@@ -74,6 +82,7 @@ pub const Session = struct {
             .model = &.{},
             .parent_id = null,
             ._next_id = 1,
+            .last_compact_id = null,
         };
         errdefer self._arena.deinit();
         const arena = self._arena.allocator();
@@ -383,8 +392,8 @@ pub const Session = struct {
                 break :blk try std.fmt.allocPrint(arena, "{d}", .{now_ms});
             } else file_name;
             const filename = try std.fmt.allocPrint(arena, "{s}.jsonl", .{final_name});
-            cwd.createDirPath(self.io, ".zagent/sessions") catch {};
-            self.path = try std.fs.path.join(arena, &.{ ".zagent/sessions", filename });
+            cwd.createDirPath(self.io, sessions_subdir) catch {};
+            self.path = try std.fs.path.join(arena, &.{ sessions_subdir, filename });
         }
 
         const tmp_path = try std.fmt.allocPrint(arena, "{s}.tmp", .{self.path.?});
@@ -933,7 +942,7 @@ test "session: flush writes JSONL" {
     const test_root = ".zig-test-session-flush";
     defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
     try Io.Dir.cwd().createDirPath(io, test_root);
-    try Io.Dir.cwd().createDirPath(io, test_root ++ "/.zagent/sessions");
+    try Io.Dir.cwd().createDirPath(io, try std.fs.path.join(allocator, &.{ test_root, sessions_subdir }));
 
     var orig_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const orig_len = Io.Dir.cwd().realPath(io, &orig_cwd_buf) catch unreachable;
@@ -947,7 +956,7 @@ test "session: flush writes JSONL" {
     try sess.flush();
     try std.testing.expect(!sess.modified);
 
-    const real_dir = try Io.Dir.cwd().openDir(io, ".zagent/sessions", .{ .iterate = true });
+    const real_dir = try Io.Dir.cwd().openDir(io, sessions_subdir, .{ .iterate = true });
     defer real_dir.close(io);
     var iter2 = real_dir.iterate();
     var found_file = false;
@@ -969,7 +978,7 @@ test "session: load reads JSONL" {
     const test_root = ".zig-test-session-load";
     defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
     try Io.Dir.cwd().createDirPath(io, test_root);
-    const sessions_dir = try std.fs.path.join(allocator, &.{ test_root, ".zagent", "sessions" });
+    const sessions_dir = try std.fs.path.join(allocator, &.{ test_root, sessions_subdir });
     defer allocator.free(sessions_dir);
     try Io.Dir.cwd().createDirPath(io, sessions_dir);
 
@@ -980,7 +989,7 @@ test "session: load reads JSONL" {
         \\
     ;
 
-    const file_path = try std.fs.path.join(allocator, &.{ test_root, ".zagent", "sessions", "test.jsonl" });
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, sessions_subdir, "test.jsonl" });
     defer allocator.free(file_path);
     {
         const file = try Io.Dir.cwd().createFile(io, file_path, .{});
@@ -1008,7 +1017,7 @@ test "session: flush then load roundtrip" {
     const test_root = ".zig-test-session-roundtrip";
     defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
     try Io.Dir.cwd().createDirPath(io, test_root);
-    try Io.Dir.cwd().createDirPath(io, test_root ++ "/.zagent/sessions");
+    try Io.Dir.cwd().createDirPath(io, try std.fs.path.join(allocator, &.{ test_root, sessions_subdir }));
 
     var orig_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const orig_len = Io.Dir.cwd().realPath(io, &orig_cwd_buf) catch unreachable;
@@ -1040,11 +1049,11 @@ test "session: rename keeps file name (stable id)" {
     const test_root = ".zig-test-session-rename";
     defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
     try Io.Dir.cwd().createDirPath(io, test_root);
-    const sessions_dir = try std.fs.path.join(allocator, &.{ test_root, ".zagent", "sessions" });
+    const sessions_dir = try std.fs.path.join(allocator, &.{ test_root, sessions_subdir });
     defer allocator.free(sessions_dir);
     try Io.Dir.cwd().createDirPath(io, sessions_dir);
 
-    const file_path = try std.fs.path.join(allocator, &.{ test_root, ".zagent", "sessions", "test.jsonl" });
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, sessions_subdir, "test.jsonl" });
     defer allocator.free(file_path);
     {
         const file = try Io.Dir.cwd().createFile(io, file_path, .{});
@@ -1096,7 +1105,7 @@ test "session: list sessions" {
     const test_root = ".zig-test-session-list";
     defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
     try Io.Dir.cwd().createDirPath(io, test_root);
-    const sessions_dir = try std.fs.path.join(allocator, &.{ test_root, ".zagent", "sessions" });
+    const sessions_dir = try std.fs.path.join(allocator, &.{ test_root, sessions_subdir });
     defer allocator.free(sessions_dir);
     try Io.Dir.cwd().createDirPath(io, sessions_dir);
 

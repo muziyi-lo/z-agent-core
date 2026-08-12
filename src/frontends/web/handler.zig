@@ -9,6 +9,9 @@ const uuid_mod = @import("../../util/uuid.zig");
 const log = @import("../../util/log.zig");
 const command_mod = @import("../../command.zig");
 const session_ops = @import("../../session_ops.zig");
+const compact_mod = @import("../../core/compact.zig");
+const trace = @import("../../util/trace.zig");
+const timing = @import("../../util/timing.zig");
 
 const AlignedU8 = std.ArrayListAligned(u8, null);
 const Io = std.Io;
@@ -622,6 +625,21 @@ fn handleSessionDelete(ctx: *Context, request: *std.http.Server.Request, id: []c
     defer a.free(filename);
     const path = try std.fs.path.join(a, &.{ ctx.sessions_dir, filename });
     defer a.free(path);
+
+    // Active-session guard (canonicalized compare) BEFORE deletion: deleting the
+    // default session leaves a stale in-memory Session whose next flush would
+    // recreate an empty file.
+    const def_session: *session_mod.Session = @ptrCast(@alignCast(ctx.default_session));
+    if (def_session.path) |cur_path| {
+        const cur_res = std.fs.path.resolve(a, &.{cur_path}) catch null;
+        defer if (cur_res) |r| a.free(r);
+        const tgt_res = std.fs.path.resolve(a, &.{path}) catch null;
+        defer if (tgt_res) |r| a.free(r);
+        if (cur_res != null and tgt_res != null and std.mem.eql(u8, cur_res.?, tgt_res.?)) {
+            return err_mod.respondError(request, .bad_request, "cannot delete the active session", a);
+        }
+    }
+
     session_mod.Session.deleteFile(ctx.io, path) catch |err| {
         if (err == error.FileNotFound) return err_mod.respondError(request, .session_not_found, "session not found", a);
         return err_mod.respondError(request, .internal_error, "failed to delete session", a);
@@ -731,8 +749,9 @@ fn handleBranch(ctx: *Context, request: *std.http.Server.Request, session_id: []
 }
 
 /// POST /api/session/:id/compact — LLM-summarize older messages, keep the recent
-/// tail (tool-boundary safe), persist as a compaction system message. Blocking
-/// (the summarization request round-trips); guarded against streaming sessions.
+/// tail (token-budget + MIN_KEEP, tool-boundary safe), persist as a compaction
+/// system message. Thin wrapper over `compact_mod.compactSession`. Blocking (the
+/// summarization request round-trips); guarded against streaming sessions.
 fn handleCompact(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8, a: std.mem.Allocator) !void {
     if (!isValidSessionId(session_id)) return err_mod.respondError(request, .bad_request, "invalid session id", a);
     if (isSessionStreaming(ctx, session_id)) return err_mod.respondError(request, .agent_busy, "session is busy", a);
@@ -744,18 +763,6 @@ fn handleCompact(ctx: *Context, request: *std.http.Server.Request, session_id: [
     };
     defer session.deinit();
 
-    const msgs = session.messages();
-    // Keep the last K messages (system prompt excluded from summary), pushing the
-    // cut back over tool messages so an assistant's tool run is never split.
-    const keep_count: usize = 20;
-    var keep_start: usize = if (msgs.len > keep_count + 1) msgs.len - keep_count else 1;
-    while (keep_start > 1 and msgs[keep_start].role == .tool) keep_start -= 1;
-    if (keep_start <= 1) return respondJson(request, "{\"status\":\"ok\",\"data\":{\"compacted\":0}}");
-
-    var arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
     const agent: *agent_mod.AgentLoop = @ptrCast(@alignCast(ctx.agent));
     if (session.model.len > 0) {
         applySessionModel(ctx, agent, session.model, ctx.allocator) catch |err| {
@@ -764,35 +771,14 @@ fn handleCompact(ctx: *Context, request: *std.http.Server.Request, session_id: [
         };
     }
 
-    const summary_prompt =
-        \\Summarize the conversation history before the most recent messages. Preserve:
-        \\- the user's goals and any explicit constraints or preferences
-        \\- key decisions and their rationale
-        \\- exact file paths, function names, and error messages
-        \\- open questions and next steps
-        \\Keep it concise. This summary will replace the summarized messages.
-    ;
-    var sum_msgs: std.ArrayListAligned(types.Message, null) = .empty;
-    defer sum_msgs.deinit(arena);
-    for (msgs[1..keep_start]) |m| try sum_msgs.append(arena, m);
-    try sum_msgs.append(arena, .{ .role = .user, .content = summary_prompt });
-
-    const resp = agent.provider_ref.chatCompletionStreaming(&arena_state, ctx.io, sum_msgs.items, null, null) catch |err| {
+    const compacted = compact_mod.compactSession(agent.provider_ref, &session, ctx.allocator, ctx.io, compact_mod.DEFAULT_KEEP_RECENT_TOKENS) catch |err| {
         log.biz_error(ctx.thread_id, ctx.request_id, "compact_llm_failed", "err={s}", .{@errorName(err)});
         return err_mod.respondError(request, .internal_error, "summarization failed", a);
     };
-    const summary = resp.content orelse "";
 
-    var new_msgs: std.ArrayListAligned(types.Message, null) = .empty;
-    defer new_msgs.deinit(arena);
-    try new_msgs.append(arena, msgs[0]); // system prompt stays
-    const compact_content = try std.fmt.allocPrint(arena, "[Compaction] {s}", .{summary});
-    try new_msgs.append(arena, .{ .id = session.allocateMessageId(), .role = .system, .content = compact_content });
-    for (msgs[keep_start..]) |m| try new_msgs.append(arena, m);
-
-    try session.replaceMessages(new_msgs.items);
-    try session.flush();
-    try respondJson(request, "{\"status\":\"ok\",\"data\":{\"compacted\":1}}");
+    var buf: [64]u8 = undefined;
+    const body = std.fmt.bufPrint(&buf, "{{\"status\":\"ok\",\"data\":{{\"compacted\":{d}}}}}", .{@as(u32, @intFromBool(compacted))}) catch "{}";
+    try respondJson(request, body);
 }
 
 /// POST /api/session/:id/undo — reverse the most recent recorded operation
@@ -943,6 +929,9 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
 
     var is_new: bool = false;
     var session = loadSession(ctx, session_id) catch |err| blk: {
+        var tbuf: [256]u8 = undefined;
+        const tdata = std.fmt.bufPrint(&tbuf, "{{\"method\":\"prompt\",\"session\":\"{s}\"}}", .{session_id}) catch "";
+        trace.write("request", ctx.thread_id, ctx.request_id, tdata);
         if (err == error.InvalidSessionId) return err_mod.respondError(request, .bad_request, "invalid session id", ctx.allocator);
         if (err != error.FileNotFound) return err_mod.respondError(request, .internal_error, "failed to load session", ctx.allocator);
 
@@ -969,11 +958,14 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
         break :blk try session_mod.Session.load(ctx.allocator, ctx.io, path2);
     };
     defer session.deinit();
+    log.dbg(ctx.thread_id, ctx.request_id, "sse_load", "session={s} msgs={d}", .{ session_id, session.messages().len });
+    timing.mark("sse_load", ctx.thread_id, ctx.request_id);
 
     if (!is_new) {
         if (session.messages().len == 0) is_new = true; // 空会话标记为新（session_ready 用）；不 rename（rename 会改文件名破坏 UUID 映射）
         try session.append(.{ .role = .user, .content = prompt });
     }
+    log.dbg(ctx.thread_id, ctx.request_id, "sse_append", "msgs={d}", .{session.messages().len});
 
     const agent: *agent_mod.AgentLoop = @ptrCast(@alignCast(ctx.agent));
     agent.setSession(&session);
@@ -983,10 +975,12 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
             log.biz_error(ctx.thread_id, ctx.request_id, "model_apply_failed", "model={s}", .{session.model});
         };
     }
+    log.dbg(ctx.thread_id, ctx.request_id, "sse_apply_model", "model={s}", .{session.model});
 
     const sw: *sse.SseWriter = @ptrCast(@alignCast(ctx.sse_writer orelse return err_mod.respondError(request, .internal_error, "SSE writer not available", ctx.allocator)));
     try sw.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\nCache-Control: no-cache\r\n\r\n");
     try sw.flush();
+    log.dbg(ctx.thread_id, ctx.request_id, "sse_header", "session={s}", .{session_id});
 
     log.biz_info(ctx.thread_id, ctx.request_id, "sse_stream_start", "session={s}", .{session_id});
 
@@ -1002,12 +996,14 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
     ctx.abort_map.put(session_id, agent) catch {};
     ctx.current_abort_session = session_id;
     ctx.abort_mutex.unlock(ctx.io);
+    log.dbg(ctx.thread_id, ctx.request_id, "sse_abort_reg", "session={s}", .{session_id});
 
     defer {
         ctx.abort_mutex.lock(ctx.io) catch unreachable;
         defer ctx.abort_mutex.unlock(ctx.io);
         _ = ctx.abort_map.remove(session_id);
         ctx.current_abort_session = null;
+        log.dbg(ctx.thread_id, ctx.request_id, "sse_abort_remove", "session={s}", .{session_id});
     }
 
     {
@@ -1020,8 +1016,14 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
         var sid_buf: [320]u8 = undefined;
         const sid_payload = try std.fmt.bufPrint(&sid_buf, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"message_id\":{d}}}", .{ session_id, esc_name, user_msg_id });
         try sse_state.writeFrame("session_ready", sid_payload);
+        log.dbg(ctx.thread_id, ctx.request_id, "sse_session_ready", "message_id={d}", .{user_msg_id});
     }
 
+    const compacted = agent.maybeAutoCompact();
+    log.biz_info(ctx.thread_id, ctx.request_id, "sse_compact", "compacted={d}", .{@as(u32, @intFromBool(compacted))});
+
+    log.biz_info(ctx.thread_id, ctx.request_id, "sse_run_turn_start", "session={s}", .{session_id});
+    timing.mark("sse_run_turn", ctx.thread_id, ctx.request_id);
     const result = agent.runTurn(tool_cb, phase_cb) catch |err| {
         log.biz_error(ctx.thread_id, ctx.request_id, "sse_runTurn_error", "err={s}", .{@errorName(err)});
 
@@ -1058,6 +1060,7 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
     try sse_state.writeFrame("done", msg);
 
     log.biz_info(ctx.thread_id, ctx.request_id, "sse_done", "msgs={d}", .{result.new_message_count});
+    timing.mark("sse_done", ctx.thread_id, ctx.request_id);
 }
 
 fn buildDonePayload(allocator: std.mem.Allocator, buf: []u8, new_msgs: u32, msgs: []const types.Message, model: []const u8, session_id: []const u8) ![]const u8 {

@@ -2,8 +2,11 @@ const std = @import("std");
 const init_mod = @import("../init.zig");
 const config_mod = @import("../../config.zig");
 const agent_mod = @import("../../core/agent.zig");
+const session_mod = @import("../../core/session.zig");
 const signal = @import("../../util/signal.zig");
 const log = @import("../../util/log.zig");
+const trace = @import("../../util/trace.zig");
+const timing = @import("../../util/timing.zig");
 const handler = @import("handler.zig");
 const sse = @import("sse.zig");
 
@@ -129,13 +132,15 @@ pub fn main(process: std.process.Init) !void {
         return;
     };
 
-    const sessions_dir = try std.fs.path.join(gpa, &.{ state.project_root, ".zagent", "sessions" });
+    const sessions_dir = try std.fs.path.join(gpa, &.{ state.project_root, session_mod.sessions_subdir });
 
     const addr = try Io.net.IpAddress.resolve(io, bind_address, bind_port);
     var tcp_server = try addr.listen(io, .{ .reuse_address = true });
 
-    log.init(io, .debug);
-    log.info("event=server_start", "address=http://{s}:{d} root={s}", .{ bind_address, bind_port, state.project_root });
+    log.init(gpa, io, state.project_root);
+    trace.init(gpa, io, state.project_root);
+    timing.init(io);
+    log.info("server_start", "address=http://{s}:{d} root={s}", .{ bind_address, bind_port, state.project_root });
 
     if (std.mem.eql(u8, bind_address, "0.0.0.0")) {
         if (resolveLocalIp(io, bind_port)) |lan_url| {

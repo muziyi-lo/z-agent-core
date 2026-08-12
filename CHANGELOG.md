@@ -33,6 +33,16 @@
   - `UndoOp`（delete/truncate/branch）per-session LIFO 栈（cap 20，服务器持久分配器）
   - `POST /undo` 逆操作（消息恢复原位/重新追加/删 fork）+ `GET /history`
   - 前端 topbar `↶` undo 按钮；守卫 busy + 空栈 400
+- **会话系统二期（`docs/0.2.7/PLAN-SESSION-SYSTEM-OPT2.md`）**:
+  - **自动压缩触发（P1）**：`core/compact.zig` 摘要逻辑抽取（token 预算 20k + 最小 20 条 + tool 边界 + 结构化摘要 + 迭代更新 + `last_compact_id` 防 stale）；`AgentLoop.maybeAutoCompact` 回合边界触发（最后一条 assistant usage 取数修正）；CLI/Web 双前端调用；`handleCompact` 改薄封装
+  - **CLI `/delete`（P2）**：`command.zig` 注册 + `session_ops.deleteById`（isValidId 校验）+ y/N 二次确认 + `resolve` 规范化当前会话保护
+  - **会话路径常量化**：`sessions_subdir` 常量替换 `session.zig`/`init.zig:100`/`server.zig:132` 三处硬编码
+  - **删除级联清理**：`handleSessionDelete` 删除后清 `undo_map`；compact 成功后清空该会话 undo 栈（index 失效）
+- **日志系统补完（`docs/0.2.7/PLAN-LOGGING-SYSTEM.md`）**:
+  - **关键路径日志**：handleSSE 全阶段 `sse_*` 生命周期事件（load/append/apply_model/header/abort_reg/session_ready/compact/run_turn_start/done/abort_remove）+ agent（tool round/StormBreaker）+ provider（流开始/retry）+ compact（start/end）
+  - **落盘 + 轮转**：`log.zig` 双写（stderr + `.zagent/log/z-agent-core.log`，ANSI 剥离）、`ZAGENT_LOG_LEVEL` env 级别、5MB 大小轮转（保留 3 份）、写互斥、磁盘满降级
+  - **JSONL 事件 trace（P3）**：`util/trace.zig`，`ZAGENT_TRACE=1` 写 `.zagent/log/trace/<ts>-<pid>.jsonl` + `latest.json` 原子写（tmp+rename）；双策略清理（7 天 / 100 个）
+  - **计时插桩（P4）**：`util/timing.zig`，timing 事件入 trace + `ZAGENT_TIMING=1` stderr 输出
 
 ### Fixed
 - **用户消息 delete 索引漂移**：按钮 index 用 DOM 计数，与服务端消息数组下标漂移（工具回合 N+2 条 vs N+1 元素）→ 删错/静默 400；改为按消息 id 操作根治
@@ -42,6 +52,8 @@
 - **`/api/session/active` 空态 404**：无会话时返回 `200 {id:null}`——前端初始化自动恢复不再报错
 - **`/session/:id?limit=50` 大系统提示词 500**：分页 header 原用 `[1024]u8` 栈缓冲 bufPrint，系统提示词 >1KB（实测 1063B）溢出；改堆 `allocPrint`
 - **highlight.js 重复高亮警告**：三处 `hljs.highlightAll()` 对全文档重复处理已高亮元素；改为 `highlightNewCode` 只高亮 `:not([data-highlighted])` 新元素
+- **CLI 模式日志静默**：`log.init` 只在 Web 入口调用，CLI 从不调用 → `_io` null 全静默；CLI `main.zig`/`App.init` 补调用
+- **`server_start` 日志双前缀**：event 参数带 `"event="` 前缀导致输出 `event=event=server_start`；去掉前缀
 
 ## [0.2.6] — 2026-08-11
 

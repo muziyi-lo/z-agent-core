@@ -108,6 +108,20 @@ pub fn forkAt(allocator: std.mem.Allocator, io: Io, source: *session_mod.Session
     return session_mod.Session.load(allocator, io, target_path);
 }
 
+/// Delete a session file by id. Validates the id (rejects path traversal),
+/// returns the deleted file path — callers compare it (after resolve) against
+/// the active session before/after deletion. FileNotFound propagates so callers
+/// can distinguish "session not found".
+pub fn deleteById(allocator: std.mem.Allocator, io: Io, session_dir: []const u8, id: []const u8) ![]const u8 {
+    if (!session_mod.Session.isValidId(id)) return error.InvalidSessionId;
+    const path = try std.fs.path.join(allocator, &.{ session_dir, id });
+    defer allocator.free(path);
+    const file_path = try std.fmt.allocPrint(allocator, "{s}.jsonl", .{path});
+    errdefer allocator.free(file_path);
+    try session_mod.Session.deleteFile(io, file_path);
+    return file_path;
+}
+
 pub fn rollbackTurn(session: *session_mod.Session, pre_count: usize) void {
     session.truncateTo(pre_count);
 }
@@ -141,6 +155,48 @@ test "session_ops: reset empty session stays empty" {
     defer sess.deinit();
     reset(&sess);
     try std.testing.expectEqual(@as(usize, 0), sess.messages().len);
+}
+
+test "session_ops: deleteById deletes session file" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const dir = ".zig-test-deletebyid";
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try Io.Dir.cwd().createDirPath(io, dir);
+
+    const path = try std.fs.path.join(allocator, &.{ dir, "sess.jsonl" });
+    defer allocator.free(path);
+    const f = try Io.Dir.cwd().createFile(io, path, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, "x");
+
+    const deleted = try deleteById(allocator, io, dir, "sess");
+    defer allocator.free(deleted);
+    try std.testing.expect(std.mem.endsWith(u8, deleted, "sess.jsonl"));
+    try std.testing.expectError(error.FileNotFound, Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only }));
+}
+
+test "session_ops: deleteById rejects invalid ids" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const dir = ".zig-test-deletebyid-invalid";
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try Io.Dir.cwd().createDirPath(io, dir);
+
+    for ([_][]const u8{ "", "..", ".", "a/b", "a\\b", "sess.jsonl" }) |id| {
+        try std.testing.expectError(error.InvalidSessionId, deleteById(allocator, io, dir, id));
+    }
+}
+
+test "session_ops: deleteById missing file propagates FileNotFound" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const dir = ".zig-test-deletebyid-missing";
+    defer Io.Dir.cwd().deleteTree(io, dir) catch {};
+    try Io.Dir.cwd().createDirPath(io, dir);
+
+    const deleted = deleteById(allocator, io, dir, "ghost");
+    try std.testing.expectError(error.FileNotFound, deleted);
 }
 
 test "session_ops: sanitizeForkName URL-safe" {
