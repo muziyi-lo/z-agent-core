@@ -54,6 +54,7 @@
 - **highlight.js 重复高亮警告**：三处 `hljs.highlightAll()` 对全文档重复处理已高亮元素；改为 `highlightNewCode` 只高亮 `:not([data-highlighted])` 新元素
 - **CLI 模式日志静默**：`log.init` 只在 Web 入口调用，CLI 从不调用 → `_io` null 全静默；CLI `main.zig`/`App.init` 补调用
 - **`server_start` 日志双前缀**：event 参数带 `"event="` 前缀导致输出 `event=event=server_start`；去掉前缀
+- **服务器被裸 POST 打崩**：std.http `discardBody`/`bodyReader` 对无 Content-Length 的 POST（curl 裸请求）assert panic（`Server.zig:631`）——`respondError`/`respondJson` 响应时触发。修复：错误/JSON 响应设 `transfer_encoding = .none`（单请求连接关闭 keep-alive，`server_keep_alive=false` 跳过 body assert）+ 新增 `readRequestBody`（无 body 声明时跳过读 body）替换 4 处 `readerExpectNone`（create/commandExec/rename/readMessageIdBody）
 
 ## [0.2.6] — 2026-08-11
 

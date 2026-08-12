@@ -33,7 +33,12 @@ pub fn statusCode(c: ErrorCode) std.http.Status {
 
 pub fn respondError(request: *std.http.Server.Request, code: ErrorCode, message: []const u8, allocator: std.mem.Allocator) !void {
     const body = try std.fmt.allocPrint(allocator, "{{\"error\":{{\"code\":\"{s}\",\"message\":\"{s}\"}}}}", .{ codeString(code), message });
-    try request.respond(body, .{ .status = statusCode(code) });
+    // transfer_encoding = .none forces server_keep_alive = false (Server.zig:349),
+    // so respond's discardBody skips the body-consuming assert. Without this, a
+    // bare POST (no Content-Length, e.g. curl `POST /.../prompt`) hits
+    // `assert(request.head.transfer_encoding != .none or content_length != null)`
+    // at Server.zig:631 and panics the whole server instead of returning 4xx.
+    try request.respond(body, .{ .status = statusCode(code), .transfer_encoding = .none });
 }
 
 test "error: codeString returns snake_case" {

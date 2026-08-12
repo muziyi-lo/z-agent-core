@@ -263,6 +263,7 @@ fn handleConnection(
         log.errorLog("event=request_error", "tid={d} rid={d} method={s} path={s} err={s}", .{ tid, rid, @tagName(method), path, @errorName(err) });
         _ = request.respond("{\"error\":{\"code\":\"internal_error\",\"message\":\"internal server error\"}}", .{
             .status = .internal_server_error,
+            .transfer_encoding = .none,
             .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
         }) catch {};
     };

@@ -204,9 +204,25 @@ fn base64Encode(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
 }
 
 fn respondJson(request: *std.http.Server.Request, body: []const u8) !void {
+    // transfer_encoding = .none: single-request-per-connection server, no
+    // keep-alive reuse; avoids discardBody's body-consuming assert for bodyless
+    // POSTs (see error.zig respondError).
     try request.respond(body, .{
+        .transfer_encoding = .none,
         .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
     });
+}
+
+/// Read the request body if one is declared (Content-Length or chunked).
+/// Returns null for bodyless requests — std.http's bodyReader asserts when a
+/// POST/PATCH has no Content-Length and no transfer-encoding (curl bare POST),
+/// so readerExpectNone must not be called for them.
+fn readRequestBody(a: std.mem.Allocator, request: *std.http.Server.Request, max: usize) ?[]const u8 {
+    if (!request.head.method.requestHasBody()) return null;
+    if (request.head.content_length == null and request.head.transfer_encoding == .none) return null;
+    var buf: [2048]u8 = undefined;
+    var body_reader = request.readerExpectNone(&buf);
+    return body_reader.allocRemaining(a, @enumFromInt(max)) catch null;
 }
 
 fn handleFavicon(_: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
@@ -479,11 +495,8 @@ fn respondModelUnavailable(request: *std.http.Server.Request, ctx: *Context, spe
 fn handleSessionCreate(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
     var body_model: ?[]const u8 = null;
     if (request.head.method == .POST) {
-        var transfer_buf: [512]u8 = undefined;
-        var body_reader = request.readerExpectNone(&transfer_buf);
-        const body = body_reader.allocRemaining(a, @enumFromInt(1024)) catch null;
-        if (body) |b| {
-            const parsed = std.json.parseFromSlice(std.json.Value, a, b, .{ .ignore_unknown_fields = true }) catch null;
+        if (readRequestBody(a, request, 1024)) |body| {
+            const parsed = std.json.parseFromSlice(std.json.Value, a, body, .{ .ignore_unknown_fields = true }) catch null;
             if (parsed) |p| {
                 if (p.value.object.get("model")) |mv| {
                     if (mv == .string and mv.string.len > 0) body_model = mv.string;
@@ -516,9 +529,8 @@ fn handleCommandList(ctx: *Context, request: *std.http.Server.Request, a: std.me
 /// POST /api/command — execute a core action command. Non-streaming JSON
 /// envelope {status:ok|error, data?}. Session-bound commands require session_id.
 fn handleCommandExec(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
-    var transfer_buf: [512]u8 = undefined;
-    var body_reader = request.readerExpectNone(&transfer_buf);
-    const body = try body_reader.allocRemaining(a, @enumFromInt(2048));
+    const body = readRequestBody(a, request, 2048) orelse
+        return err_mod.respondError(request, .bad_request, "invalid JSON body", a);
     const parsed = std.json.parseFromSlice(std.json.Value, a, body, .{ .ignore_unknown_fields = true }) catch
         return err_mod.respondError(request, .bad_request, "invalid JSON body", a);
     const obj = parsed.value.object;
@@ -606,9 +618,8 @@ fn handleSessionRename(ctx: *Context, request: *std.http.Server.Request, id: []c
     };
     defer session.deinit();
 
-    var transfer_buf: [512]u8 = undefined;
-    var body_reader = request.readerExpectNone(&transfer_buf);
-    const body = try body_reader.allocRemaining(a, @enumFromInt(1024));
+    const body = readRequestBody(a, request, 1024) orelse
+        return err_mod.respondError(request, .bad_request, "invalid JSON body", a);
     const parsed = std.json.parseFromSlice(std.json.Value, a, body, .{}) catch
         return err_mod.respondError(request, .bad_request, "invalid JSON body", a);
     const new_name = if (parsed.value.object.get("name")) |nv| nv.string
@@ -857,9 +868,7 @@ fn handleHistory(ctx: *Context, request: *std.http.Server.Request, session_id: [
 /// Parse {"message_id":N} from a JSON request body. Returns a plain error set;
 /// callers map to HTTP responses.
 fn readMessageIdBody(request: *std.http.Server.Request, a: std.mem.Allocator) !u64 {
-    var transfer_buf: [512]u8 = undefined;
-    var body_reader = request.readerExpectNone(&transfer_buf);
-    const body = body_reader.allocRemaining(a, @enumFromInt(2048)) catch return error.InvalidBody;
+    const body = readRequestBody(a, request, 2048) orelse return error.InvalidBody;
     const parsed = std.json.parseFromSlice(std.json.Value, a, body, .{ .ignore_unknown_fields = true }) catch
         return error.InvalidBody;
     const obj = parsed.value.object;
