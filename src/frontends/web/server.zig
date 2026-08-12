@@ -247,8 +247,8 @@ fn handleConnection(
         }
     }
 
-    handler.handleRequest(&ctx, method, path, &request) catch {
-        log.errorLog("event=request_error", "tid={d} rid={d} method={s} path={s}", .{ tid, rid, @tagName(method), path });
+    handler.handleRequest(&ctx, method, path, &request) catch |err| {
+        log.errorLog("event=request_error", "tid={d} rid={d} method={s} path={s} err={s}", .{ tid, rid, @tagName(method), path, @errorName(err) });
         _ = request.respond("{\"error\":{\"code\":\"internal_error\",\"message\":\"internal server error\"}}", .{
             .status = .internal_server_error,
             .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},

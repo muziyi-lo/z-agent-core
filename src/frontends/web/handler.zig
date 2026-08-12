@@ -350,14 +350,18 @@ fn respondPagedSession(request: *std.http.Server.Request, a: std.mem.Allocator, 
     const display_name = if (uuid_mod.isUuid(session.name)) "New Session" else session.name;
     const msgs = session.messages();
     var buf: AlignedU8 = .empty;
+    // system content can be a large system prompt — use heap allocPrint, never a
+    // fixed stack buffer (bufPrint overflows → 500).
     const sys = if (msgs.len > 0) try escapeJsonDynamic(a, msgs[0].content) else null;
     defer if (sys) |s| a.free(s);
-    var hdr: [1024]u8 = undefined;
+    const sys_str = if (sys) |s| s else "";
     if (session.parent_id) |pid| {
-        const h = try std.fmt.bufPrint(&hdr, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"parent_id\":\"{s}\",\"system\":\"{s}\",\"messages\":[", .{ display_name, session.model, pid, if (sys) |s| s else "" });
+        const h = try std.fmt.allocPrint(a, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"parent_id\":\"{s}\",\"system\":\"{s}\",\"messages\":[", .{ display_name, session.model, pid, sys_str });
+        defer a.free(h);
         try buf.appendSlice(a, h);
     } else {
-        const h = try std.fmt.bufPrint(&hdr, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"system\":\"{s}\",\"messages\":[", .{ display_name, session.model, if (sys) |s| s else "" });
+        const h = try std.fmt.allocPrint(a, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"system\":\"{s}\",\"messages\":[", .{ display_name, session.model, sys_str });
+        defer a.free(h);
         try buf.appendSlice(a, h);
     }
     try writeMessagesRange(a, &buf, msgs, page.start, page.end);
