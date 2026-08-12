@@ -41,7 +41,8 @@ function makeEl(tag) {
 globalThis.document = { createElement: (t) => makeEl(t) }
 globalThis.renderMd = (s) => "[md:" + (s ?? "") + "]"
 globalThis.esc = (s) => String(s)
-globalThis.hljs = { highlightAll() {} }
+globalThis.hljs = { highlightAll() {}, highlightElement() {} }
+globalThis.highlightNewCode = () => {}
 
 const buildSegment = eval(`(${extract("buildSegment")})`)
 globalThis.isContextTool = eval(`(${extract("isContextTool")})`)

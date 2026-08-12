@@ -89,7 +89,8 @@ globalThis.setTopbarTitle = () => {}
 globalThis.setStreaming = () => {}
 globalThis.biIcon = (name, size) => '<svg data-icon="' + name + '"></svg>'
 globalThis.addCopyButton = () => {}
-globalThis.hljs = { highlightAll() {} }
+globalThis.hljs = { highlightAll() {}, highlightElement() {} }
+globalThis.highlightNewCode = () => {}
 globalThis.isStreaming = false
 globalThis.currentId = null
 globalThis.currentName = null

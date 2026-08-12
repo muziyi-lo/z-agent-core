@@ -77,7 +77,8 @@ globalThis.wrapContextToolGroups = () => {}
 globalThis.updateMarkdownBlocks = (container, content) => { container.innerHTML = "[md:" + content + "]" }
 globalThis.renderMd = (s) => "[md:" + (s ?? "") + "]"
 globalThis.esc = (s) => String(s)
-globalThis.hljs = { highlightAll() {} }
+globalThis.hljs = { highlightAll() {}, highlightElement() {} }
+globalThis.highlightNewCode = () => {}
 globalThis.renderMdBlocks = () => ""
 globalThis.addCopyButton = () => {}
 globalThis.loadModels = () => {}

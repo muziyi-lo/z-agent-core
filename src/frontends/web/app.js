@@ -145,6 +145,15 @@ document.getElementById('undo-btn').onclick = async function() {
   } catch(err) { showStatus('undo failed', true); }
 };
 
+// Highlight only code blocks not yet highlighted (hljs.highlightAll warns when
+// re-highlighting an element carrying data-highlighted="yes").
+function highlightNewCode(root) {
+  if (typeof hljs === 'undefined') return;
+  var codes = (root || document).querySelectorAll('pre code:not([data-highlighted])');
+  for (var i = 0; i < codes.length; i++) {
+    try { hljs.highlightElement(codes[i]); } catch(e) {}
+  }
+}
 // --- auto-scroll helper (opencode-style follow state machine) ---
 var autoScrollPaused = false;
 var autoScrollMark = { top: -1, time: 0 };
@@ -743,7 +752,7 @@ function addMessage(m, index, toolName, noScroll) {
     setTimeout(function() {
       var pres = div.querySelectorAll('pre');
       for (var i = 0; i < pres.length; i++) addCopyButton(pres[i]);
-      if (typeof hljs !== 'undefined') hljs.highlightAll();
+      highlightNewCode(div);
     }, 0);
   } else {
     div.style.whiteSpace = 'pre-wrap';
@@ -1076,7 +1085,7 @@ function sendPrompt(prompt) {
       };
       asst.insertBefore(toggleAll, tools[0]);
     }
-    if (typeof hljs !== 'undefined') hljs.highlightAll();
+    highlightNewCode(asst);
     // apply typed tool views
     tools.forEach(function(tc) {
       if (tc._toolName) applyToolType(tc, tc._toolName, tc._toolData || {});
@@ -1500,7 +1509,7 @@ function wrapContextToolGroups(container) {
       if (el === group.to) break;
       el = next;
     }
-    hljs.highlightAll();
+    highlightNewCode();
   }
 }
 
