@@ -24,6 +24,8 @@ body{font-family:var(--font-ui);background:var(--bg-base);color:var(--text-base)
 #sidebar-header .subtitle{font-size:var(--text-xs);color:var(--text-faint);margin-top:2px}
 #theme-btn{width:30px;height:30px;padding:0;display:flex;align-items:center;justify-content:center;background:var(--bg-layer-01);border:1px solid var(--border-base);border-radius:50%;color:var(--text-muted);cursor:pointer;font-size:14px;flex-shrink:0;transition:color var(--transition-fast),background var(--transition-fast)}
 #theme-btn:hover{color:var(--text-strong);background:var(--bg-layer-02)}
+#undo-btn{width:30px;height:30px;padding:0;display:flex;align-items:center;justify-content:center;background:var(--bg-layer-01);border:1px solid var(--border-base);border-radius:50%;color:var(--text-muted);cursor:pointer;font-size:14px;flex-shrink:0;transition:color var(--transition-fast),background var(--transition-fast)}
+#undo-btn:hover{color:var(--text-strong);background:var(--bg-layer-02)}
 #session-list{flex:1;overflow-y:auto;padding:4px}
 #session-list .session{padding:8px 50px 8px 12px;cursor:pointer;border-radius:var(--radius-sm);margin:2px 0;font-size:var(--text-sm);position:relative}
 #session-list .session:hover{background:var(--bg-layer-02)}

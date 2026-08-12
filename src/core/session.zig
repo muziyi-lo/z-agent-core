@@ -314,6 +314,30 @@ pub const Session = struct {
         return id;
     }
 
+    /// Insert a message at an array position preserving its id (undo of delete /
+    /// truncate). Strings deep-copied into the session arena. Caller flushes.
+    pub fn insertMessageAt(self: *Session, index: usize, msg: types.Message) !void {
+        const arena = self._arena.allocator();
+        var duped = msg;
+        duped.content = try arena.dupe(u8, msg.content);
+        if (msg.reasoning_content) |rc| duped.reasoning_content = try arena.dupe(u8, rc);
+        if (msg.model) |m| duped.model = try arena.dupe(u8, m);
+        if (msg.tool_call_id) |tci| duped.tool_call_id = try arena.dupe(u8, tci);
+        if (msg.tool_calls) |tcs| {
+            const duped_tcs = try arena.alloc(types.ToolCall, tcs.len);
+            for (tcs, duped_tcs) |s, *dst| {
+                dst.* = .{
+                    .id = try arena.dupe(u8, s.id),
+                    .name = try arena.dupe(u8, s.name),
+                    .arguments = try arena.dupe(u8, s.arguments),
+                };
+            }
+            duped.tool_calls = duped_tcs;
+        }
+        try self._messages.insert(arena, @min(index, self._messages.items.len), duped);
+        self.modified = true;
+    }
+
     /// Replace all messages with a new list (compaction). Preserves each message's
     /// id (frontend caches ids across reloads); strings are deep-copied into the
     /// session arena. Caller must flush to persist.

@@ -14,6 +14,9 @@ const default_port: u16 = 8090;
 
 var abort_map: std.StringHashMap(*agent_mod.AgentLoop) = undefined;
 var abort_mutex: std.Io.Mutex = .init;
+var undo_map: std.StringHashMap(*std.ArrayListAligned(handler.UndoOp, null)) = undefined;
+/// Long-lived allocator for undo ops (survives per-request arenas).
+var persistent_alloc: std.mem.Allocator = undefined;
 var active_threads: u32 = 0;
 var next_thread_id: u32 = 0;
 var next_request_id: u32 = 0;
@@ -92,6 +95,8 @@ pub fn main(process: std.process.Init) !void {
     const gpa = gpa_alloc.allocator();
 
     abort_map = std.StringHashMap(*agent_mod.AgentLoop).init(gpa);
+    undo_map = std.StringHashMap(*std.ArrayListAligned(handler.UndoOp, null)).init(gpa);
+    persistent_alloc = gpa;
 
     var arg_iter = try std.process.Args.Iterator.initAllocator(process.minimal.args, process.gpa);
     defer arg_iter.deinit();
@@ -234,6 +239,8 @@ fn handleConnection(
         .abort_map = &abort_map,
         .abort_mutex = &abort_mutex,
         .current_abort_session = null,
+        .undo_allocator = persistent_alloc,
+        .undo_map = &undo_map,
         .thread_id = tid,
         .request_id = rid,
     };

@@ -113,7 +113,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | N8 | 增量上下文更新（chronogical system 消息 + baseline 持久化） | 对齐 opencode D1，需 DB/会话格式扩展（CONTEXT-ASSEMBLY F3） |
 | N9 | 系统 prompt 缓存 breakpoint | 依赖 provider 缓存 hint 协议（CONTEXT-ASSEMBLY F4） |
 | N10 | 多 skill 目录数组（`skills_dir = ["...", "..."]`） | 索引与 tool 按顺序查找同名 skill，前者优先（CONTEXT-ASSEMBLY F5） |
-| N11 | 会话系统优化（消息 ID 模型 + 按 ID 操作 + 分页/compact/history） | **P1+P2 已实施（2026-08-12）**：消息 id 模型 + 迁移 + 按 id 的 delete/truncate/branch + `(fork #N)` 命名 + 操作栏 4 按钮 + 滚动状态机 + 三层流式防护 + branch 自动重答（方案 B）+ `parent_id` 分支树 + `/active` + `message_not_found`。P3 分页/P4 compact/P5 history 见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT.md` |
+| N11 | 会话系统优化（消息 ID 模型 + 按 ID 操作 + 分页/compact/history） | **P1-P5 已实施（2026-08-12）**：消息 id 模型 + 按 id 操作 + `(fork #N)` 分支（自动重答 + parent_id 分支树）+ 滚动状态机 + 三层流式防护 + `/active` + 游标分页 + `POST /compact` LLM 压缩 + undo 栈（delete/truncate/branch）。见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT.md` |
 
 ## Deferred (explicitly skipped)
 

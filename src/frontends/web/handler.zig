@@ -27,6 +27,14 @@ const STYLE_MARKER = "<!-- STYLES -->";
 const FONT_MARKER = "/* FONTS */";
 const SCRIPT_MARKER = "<!-- SCRIPTS -->";
 
+/// Session operation undo entries. Stored per-session (LIFO, cap 20) in the
+/// server's persistent allocator. Each entry carries enough to reverse the op.
+pub const UndoOp = union(enum) {
+    delete: struct { index: usize, message: types.Message },
+    truncate: struct { removed: []const types.Message },
+    branch: struct { fork_id: []const u8 },
+};
+
 pub const Context = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -42,6 +50,9 @@ pub const Context = struct {
     abort_map: *std.StringHashMap(*agent_mod.AgentLoop),
     abort_mutex: *std.Io.Mutex,
     current_abort_session: ?[]const u8 = null,
+    /// Persistent allocator for the undo stack (survives per-request arenas).
+    undo_allocator: std.mem.Allocator,
+    undo_map: *std.StringHashMap(*std.ArrayListAligned(UndoOp, null)),
     thread_id: u32,
     request_id: u32,
 };
@@ -74,6 +85,7 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
                 const sub_path = if (std.mem.indexOfScalar(u8, sub, '?')) |qm| sub[0..qm] else sub;
                 if (std.mem.eql(u8, sub_path, "message")) return handleSessionMessages(ctx, request, id, a);
                 if (std.mem.eql(u8, sub_path, "prompt")) return handlePrompt(ctx, request, id);
+                if (std.mem.eql(u8, sub_path, "history")) return handleHistory(ctx, request, id, a);
             } else {
                 const id = if (std.mem.indexOfScalar(u8, rest, '?')) |qm| rest[0..qm] else rest;
                 return handleSessionGet(ctx, request, id, a);
@@ -92,6 +104,7 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
                 if (std.mem.eql(u8, sub_path, "truncate")) return handleTruncate(ctx, request, id, a);
                 if (std.mem.eql(u8, sub_path, "branch")) return handleBranch(ctx, request, id, a);
                 if (std.mem.eql(u8, sub_path, "compact")) return handleCompact(ctx, request, id, a);
+                if (std.mem.eql(u8, sub_path, "undo")) return handleUndo(ctx, request, id, a);
             }
         }
     } else if (method == .PATCH) {
@@ -634,6 +647,8 @@ fn handleMessageDelete(ctx: *Context, request: *std.http.Server.Request, session
         return err_mod.respondError(request, .message_not_found, "message not found", a);
     if (index == 0) return err_mod.respondError(request, .bad_request, "cannot delete system message", a);
 
+    try pushUndo(ctx, session_id, .{ .delete = .{ .index = index, .message = try dupMessage(ctx.undo_allocator, session.messages()[index]) } });
+
     session.removeMessage(index) catch |err| {
         if (err == error.IndexOutOfBounds) return err_mod.respondError(request, .bad_request, "message index out of bounds", a);
         return err_mod.respondError(request, .internal_error, "failed to remove message", a);
@@ -663,6 +678,14 @@ fn handleTruncate(ctx: *Context, request: *std.http.Server.Request, session_id: 
     const index = session.indexOfId(msg_id) orelse
         return err_mod.respondError(request, .message_not_found, "message not found", a);
     if (index == 0) return err_mod.respondError(request, .bad_request, "cannot truncate at system message", a);
+
+    // Record the removed messages (deep-copied) for undo.
+    {
+        const removed_msgs = session.messages()[index..];
+        const removed = try ctx.undo_allocator.alloc(types.Message, removed_msgs.len);
+        for (removed_msgs, 0..) |m, i| removed[i] = try dupMessage(ctx.undo_allocator, m);
+        try pushUndo(ctx, session_id, .{ .truncate = .{ .removed = removed } });
+    }
 
     session.truncateTo(index);
     try session.flush();
@@ -700,6 +723,7 @@ fn handleBranch(ctx: *Context, request: *std.http.Server.Request, session_id: []
     defer fork_sess.deinit();
     const fork_path = fork_sess.path orelse return err_mod.respondError(request, .internal_error, "fork session has no path", a);
     const fork_id = try sessionIdFromPath(a, fork_path);
+    try pushUndo(ctx, session_id, .{ .branch = .{ .fork_id = try ctx.undo_allocator.dupe(u8, fork_id) } });
     const esc_content = try escapeJsonDynamic(a, boundary_content);
     defer a.free(esc_content);
     const response = try std.fmt.allocPrint(a, "{{\"status\":\"ok\",\"data\":{{\"session_id\":\"{s}\",\"name\":\"{s}\",\"boundary_content\":\"{s}\"}}}}", .{ fork_id, fork_sess.name, esc_content });
@@ -771,6 +795,79 @@ fn handleCompact(ctx: *Context, request: *std.http.Server.Request, session_id: [
     try respondJson(request, "{\"status\":\"ok\",\"data\":{\"compacted\":1}}");
 }
 
+/// POST /api/session/:id/undo — reverse the most recent recorded operation
+/// (delete → re-insert message; truncate → re-append removed messages; branch →
+/// delete the created fork). LIFO, in-memory (lost on server restart).
+fn handleUndo(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8, a: std.mem.Allocator) !void {
+    if (!isValidSessionId(session_id)) return err_mod.respondError(request, .bad_request, "invalid session id", a);
+    if (isSessionStreaming(ctx, session_id)) return err_mod.respondError(request, .agent_busy, "session is busy", a);
+
+    const op = popUndo(ctx, session_id) orelse
+        return err_mod.respondError(request, .bad_request, "nothing to undo", a);
+
+    switch (op) {
+        .delete => |d| {
+            var session = loadSession(ctx, session_id) catch |err| {
+                if (err == error.FileNotFound) return err_mod.respondError(request, .session_not_found, "session not found", a);
+                return err_mod.respondError(request, .internal_error, "failed to load session", a);
+            };
+            defer session.deinit();
+            try session.insertMessageAt(d.index, d.message);
+            try session.flush();
+        },
+        .truncate => |t| {
+            var session = loadSession(ctx, session_id) catch |err| {
+                if (err == error.FileNotFound) return err_mod.respondError(request, .session_not_found, "session not found", a);
+                return err_mod.respondError(request, .internal_error, "failed to load session", a);
+            };
+            defer session.deinit();
+            for (t.removed) |m| try session.insertMessageAt(session.messages().len, m);
+            try session.flush();
+        },
+        .branch => |b| {
+            const filename = try std.fmt.allocPrint(a, "{s}.jsonl", .{b.fork_id});
+            defer a.free(filename);
+            const path = try std.fs.path.join(a, &.{ ctx.sessions_dir, filename });
+            defer a.free(path);
+            session_mod.Session.deleteFile(ctx.io, path) catch {};
+        },
+    }
+    try respondJson(request, "{\"status\":\"ok\"}");
+}
+
+/// GET /api/session/:id/history — recent undoable operations (kind + detail).
+fn handleHistory(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8, a: std.mem.Allocator) !void {
+    var buf: AlignedU8 = .empty;
+    try buf.appendSlice(a, "[");
+    const list = ctx.undo_map.get(session_id);
+    var first = true;
+    if (list) |l| {
+        for (l.items) |op| {
+            if (!first) try buf.appendSlice(a, ",");
+            first = false;
+            switch (op) {
+                .delete => |d| {
+                    const s = try std.fmt.allocPrint(a, "{{\"kind\":\"delete\",\"index\":{d},\"id\":{d}}}", .{ d.index, d.message.id });
+                    defer a.free(s);
+                    try buf.appendSlice(a, s);
+                },
+                .truncate => |t| {
+                    const s = try std.fmt.allocPrint(a, "{{\"kind\":\"truncate\",\"removed\":{d}}}", .{t.removed.len});
+                    defer a.free(s);
+                    try buf.appendSlice(a, s);
+                },
+                .branch => |b| {
+                    const s = try std.fmt.allocPrint(a, "{{\"kind\":\"branch\",\"fork_id\":\"{s}\"}}", .{b.fork_id});
+                    defer a.free(s);
+                    try buf.appendSlice(a, s);
+                },
+            }
+        }
+    }
+    try buf.appendSlice(a, "]");
+    try respondJson(request, buf.items);
+}
+
 /// Parse {"message_id":N} from a JSON request body. Returns a plain error set;
 /// callers map to HTTP responses.
 fn readMessageIdBody(request: *std.http.Server.Request, a: std.mem.Allocator) !u64 {
@@ -789,6 +886,47 @@ fn readMessageIdBody(request: *std.http.Server.Request, a: std.mem.Allocator) !u
 /// cleared on stream end). Session-mutating endpoints must reject busy sessions.
 fn isSessionStreaming(ctx: *Context, session_id: []const u8) bool {
     return ctx.abort_map.contains(session_id);
+}
+
+/// Deep-copy a message into `al` (persistent allocator) for the undo stack.
+fn dupMessage(al: std.mem.Allocator, src: types.Message) !types.Message {
+    var d = src;
+    d.content = try al.dupe(u8, src.content);
+    if (src.reasoning_content) |rc| d.reasoning_content = try al.dupe(u8, rc);
+    if (src.model) |m| d.model = try al.dupe(u8, m);
+    if (src.tool_call_id) |tci| d.tool_call_id = try al.dupe(u8, tci);
+    if (src.tool_calls) |tcs| {
+        const dtcs = try al.alloc(types.ToolCall, tcs.len);
+        for (tcs, dtcs) |s, *dst| {
+            dst.* = .{
+                .id = try al.dupe(u8, s.id),
+                .name = try al.dupe(u8, s.name),
+                .arguments = try al.dupe(u8, s.arguments),
+            };
+        }
+        d.tool_calls = dtcs;
+    }
+    return d;
+}
+
+/// Record a session operation for undo (LIFO, cap 20 per session).
+fn pushUndo(ctx: *Context, session_id: []const u8, op: UndoOp) !void {
+    const al = ctx.undo_allocator;
+    var list = ctx.undo_map.get(session_id);
+    if (list == null) {
+        const new_list = try al.create(std.ArrayListAligned(UndoOp, null));
+        new_list.* = .empty;
+        try ctx.undo_map.put(try al.dupe(u8, session_id), new_list);
+        list = new_list;
+    }
+    try list.?.append(al, op);
+    if (list.?.items.len > 20) _ = list.?.orderedRemove(0);
+}
+
+fn popUndo(ctx: *Context, session_id: []const u8) ?UndoOp {
+    const list = ctx.undo_map.get(session_id) orelse return null;
+    if (list.items.len == 0) return null;
+    return list.pop();
 }
 
 fn applySessionModel(ctx: *Context, agent: *agent_mod.AgentLoop, spec: []const u8, a: std.mem.Allocator) !void {

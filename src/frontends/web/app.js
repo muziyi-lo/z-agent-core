@@ -135,6 +135,16 @@ themeBtn.onclick = function() {
   themeBtn.innerHTML = saved === 'light' ? '&#9790;' : '&#9728;';
 })();
 
+// --- undo last session operation (delete/truncate/branch) ---
+document.getElementById('undo-btn').onclick = async function() {
+  if (!currentId || isStreaming) return;
+  try {
+    await api('/session/' + currentId + '/undo', { method: 'POST' });
+    await loadSession(currentId);
+    showStatus('undone', false);
+  } catch(err) { showStatus('undo failed', true); }
+};
+
 // --- auto-scroll helper (opencode-style follow state machine) ---
 var autoScrollPaused = false;
 var autoScrollMark = { top: -1, time: 0 };

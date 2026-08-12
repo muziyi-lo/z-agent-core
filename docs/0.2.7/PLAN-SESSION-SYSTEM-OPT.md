@@ -1,6 +1,6 @@
 # Plan SESSION-SYSTEM-OPT: 会话系统优化（升级自 N11）
 
-## 状态: ✅ P1 + P2 + P3 + P4 已实施（2026-08-12，后端 e2e + Node 测试通过，待浏览器 L2 双路径验证）；P5 待实施
+## 状态: ✅ P1-P5 已实施（2026-08-12，后端 e2e + Node 测试通过，待浏览器 L2 双路径验证）
 
 ## 背景
 
@@ -168,8 +168,13 @@ pi-repos（`packages/agent/src/harness/session/session.ts` + `compaction/branch-
 
 ## P5: 可撤销（轻量 history）
 
-- 会话操作事件栈（delete/truncate/branch/revert），最近 N 步，`GET /history` + `POST /undo`。
-- 简化版：不引入快照系统，undo = 逆操作（如 delete 撤销 = 恢复消息 JSONL 行、truncate 撤销 = 重新 append 被删消息）。内存 + 独立 JSONL 事件文件。
+- **会话操作撤销栈（已实施）**：
+  - `UndoOp` union（delete/truncate/branch），per-session LIFO，cap 20，存于服务器持久分配器（`undo_allocator`），`GET /history` + `POST /undo`
+  - undo = 逆操作：delete 恢复原位（`insertMessageAt` 保留 id）、truncate 重新追加被删消息、branch 删除 fork 文件
+  - 守卫：流式中 `agent_busy`；无 op 返回 400 `nothing to undo`
+  - 前端 topbar `↶` undo 按钮，成功后 reload
+  - e2e 验证：三条路径全部恢复正确
+- **内存栈**：服务器重启后清空（未做 JSONL 事件文件持久化——`"内存 + JSONL"` 中内存部分已落，持久化后续可加）
 - **不做**：opencode 三阶段 revert + 文件快照恢复（代码级回退，超出范围）。
 
 ## 明确不做（对照 opencode）

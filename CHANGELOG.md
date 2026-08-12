@@ -29,6 +29,10 @@
   - `POST /api/session/:id/compact`：LLM 摘要历史 + 保留最近 20 条（页边界不切工具序列），写回 `[Compaction]` system 消息，系统提示词保留
   - `Session.replaceMessages` 保留 kept 消息 id；守卫 busy + 幂等（≤2 条返回 compacted:0）
   - 自动触发（agent 阈值监控）待后续
+- **会话操作撤销（P5）**:
+  - `UndoOp`（delete/truncate/branch）per-session LIFO 栈（cap 20，服务器持久分配器）
+  - `POST /undo` 逆操作（消息恢复原位/重新追加/删 fork）+ `GET /history`
+  - 前端 topbar `↶` undo 按钮；守卫 busy + 空栈 400
 
 ### Fixed
 - **用户消息 delete 索引漂移**：按钮 index 用 DOM 计数，与服务端消息数组下标漂移（工具回合 N+2 条 vs N+1 元素）→ 删错/静默 400；改为按消息 id 操作根治
