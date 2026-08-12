@@ -91,6 +91,7 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
                 if (std.mem.eql(u8, sub_path, "abort")) return handleAbort(ctx, request, id, a);
                 if (std.mem.eql(u8, sub_path, "truncate")) return handleTruncate(ctx, request, id, a);
                 if (std.mem.eql(u8, sub_path, "branch")) return handleBranch(ctx, request, id, a);
+                if (std.mem.eql(u8, sub_path, "compact")) return handleCompact(ctx, request, id, a);
             }
         }
     } else if (method == .PATCH) {
@@ -265,14 +266,15 @@ fn handleSessionList(ctx: *Context, request: *std.http.Server.Request, a: std.me
 
 /// GET /api/session/active — most recently updated session (list is sorted by
 /// timestamp desc). Lets the frontend resume where the user left off after a
-/// refresh. 404 when no sessions exist.
+/// refresh. Returns 200 with null id when no sessions exist (empty state is not
+/// an error — the frontend init calls this unconditionally).
 fn handleSessionActive(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
     const list = session_mod.list(a, ctx.io, ctx.sessions_dir) catch |err| {
-        if (err == error.FileNotFound or err == error.NotDir) return err_mod.respondError(request, .not_found, "no sessions", a);
+        if (err == error.FileNotFound or err == error.NotDir) return respondJson(request, "{\"id\":null}");
         return err_mod.respondError(request, .internal_error, "failed to list sessions", a);
     };
     defer session_mod.freeSessionInfoList(a, list);
-    if (list.len == 0) return err_mod.respondError(request, .not_found, "no sessions", a);
+    if (list.len == 0) return respondJson(request, "{\"id\":null}");
 
     const s = list[0];
     const display_name = if (uuid_mod.isUuid(s.name)) "New Session" else s.name;
@@ -698,6 +700,71 @@ fn handleBranch(ctx: *Context, request: *std.http.Server.Request, session_id: []
     defer a.free(esc_content);
     const response = try std.fmt.allocPrint(a, "{{\"status\":\"ok\",\"data\":{{\"session_id\":\"{s}\",\"name\":\"{s}\",\"boundary_content\":\"{s}\"}}}}", .{ fork_id, fork_sess.name, esc_content });
     return respondJson(request, response);
+}
+
+/// POST /api/session/:id/compact — LLM-summarize older messages, keep the recent
+/// tail (tool-boundary safe), persist as a compaction system message. Blocking
+/// (the summarization request round-trips); guarded against streaming sessions.
+fn handleCompact(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8, a: std.mem.Allocator) !void {
+    if (!isValidSessionId(session_id)) return err_mod.respondError(request, .bad_request, "invalid session id", a);
+    if (isSessionStreaming(ctx, session_id)) return err_mod.respondError(request, .agent_busy, "session is busy", a);
+
+    var session = loadSession(ctx, session_id) catch |err| {
+        if (err == error.InvalidSessionId) return err_mod.respondError(request, .bad_request, "invalid session id", a);
+        if (err == error.FileNotFound) return err_mod.respondError(request, .session_not_found, "session not found", a);
+        return err_mod.respondError(request, .internal_error, "failed to load session", a);
+    };
+    defer session.deinit();
+
+    const msgs = session.messages();
+    // Keep the last K messages (system prompt excluded from summary), pushing the
+    // cut back over tool messages so an assistant's tool run is never split.
+    const keep_count: usize = 20;
+    var keep_start: usize = if (msgs.len > keep_count + 1) msgs.len - keep_count else 1;
+    while (keep_start > 1 and msgs[keep_start].role == .tool) keep_start -= 1;
+    if (keep_start <= 1) return respondJson(request, "{\"status\":\"ok\",\"data\":{\"compacted\":0}}");
+
+    var arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const agent: *agent_mod.AgentLoop = @ptrCast(@alignCast(ctx.agent));
+    if (session.model.len > 0) {
+        applySessionModel(ctx, agent, session.model, ctx.allocator) catch |err| {
+            log.biz_error(ctx.thread_id, ctx.request_id, "compact_model_apply_failed", "err={s}", .{@errorName(err)});
+            return err_mod.respondError(request, .internal_error, "failed to configure model", a);
+        };
+    }
+
+    const summary_prompt =
+        \\Summarize the conversation history before the most recent messages. Preserve:
+        \\- the user's goals and any explicit constraints or preferences
+        \\- key decisions and their rationale
+        \\- exact file paths, function names, and error messages
+        \\- open questions and next steps
+        \\Keep it concise. This summary will replace the summarized messages.
+    ;
+    var sum_msgs: std.ArrayListAligned(types.Message, null) = .empty;
+    defer sum_msgs.deinit(arena);
+    for (msgs[1..keep_start]) |m| try sum_msgs.append(arena, m);
+    try sum_msgs.append(arena, .{ .role = .user, .content = summary_prompt });
+
+    const resp = agent.provider_ref.chatCompletionStreaming(&arena_state, ctx.io, sum_msgs.items, null, null) catch |err| {
+        log.biz_error(ctx.thread_id, ctx.request_id, "compact_llm_failed", "err={s}", .{@errorName(err)});
+        return err_mod.respondError(request, .internal_error, "summarization failed", a);
+    };
+    const summary = resp.content orelse "";
+
+    var new_msgs: std.ArrayListAligned(types.Message, null) = .empty;
+    defer new_msgs.deinit(arena);
+    try new_msgs.append(arena, msgs[0]); // system prompt stays
+    const compact_content = try std.fmt.allocPrint(arena, "[Compaction] {s}", .{summary});
+    try new_msgs.append(arena, .{ .id = session.allocateMessageId(), .role = .system, .content = compact_content });
+    for (msgs[keep_start..]) |m| try new_msgs.append(arena, m);
+
+    try session.replaceMessages(new_msgs.items);
+    try session.flush();
+    try respondJson(request, "{\"status\":\"ok\",\"data\":{\"compacted\":1}}");
 }
 
 /// Parse {"message_id":N} from a JSON request body. Returns a plain error set;

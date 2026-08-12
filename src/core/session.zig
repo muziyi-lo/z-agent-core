@@ -307,6 +307,43 @@ pub const Session = struct {
         return null;
     }
 
+    /// Allocate a fresh monotonic message id (e.g. for a compaction summary).
+    pub fn allocateMessageId(self: *Session) u64 {
+        const id = self._next_id;
+        self._next_id += 1;
+        return id;
+    }
+
+    /// Replace all messages with a new list (compaction). Preserves each message's
+    /// id (frontend caches ids across reloads); strings are deep-copied into the
+    /// session arena. Caller must flush to persist.
+    pub fn replaceMessages(self: *Session, new_list: []const types.Message) !void {
+        const arena = self._arena.allocator();
+        var next: std.ArrayListAligned(types.Message, null) = .empty;
+        errdefer next.deinit(arena);
+        for (new_list) |src| {
+            var duped = src;
+            duped.content = try arena.dupe(u8, src.content);
+            if (src.reasoning_content) |rc| duped.reasoning_content = try arena.dupe(u8, rc);
+            if (src.model) |m| duped.model = try arena.dupe(u8, m);
+            if (src.tool_call_id) |tci| duped.tool_call_id = try arena.dupe(u8, tci);
+            if (src.tool_calls) |tcs| {
+                const duped_tcs = try arena.alloc(types.ToolCall, tcs.len);
+                for (tcs, duped_tcs) |s, *dst| {
+                    dst.* = .{
+                        .id = try arena.dupe(u8, s.id),
+                        .name = try arena.dupe(u8, s.name),
+                        .arguments = try arena.dupe(u8, s.arguments),
+                    };
+                }
+                duped.tool_calls = duped_tcs;
+            }
+            try next.append(arena, duped);
+        }
+        self._messages = next;
+        self.modified = true;
+    }
+
     /// Write all messages to JSONL file. Creates .zagent/sessions/ if needed.
     pub fn flush(self: *Session) !void {
         const arena = self._arena.allocator();

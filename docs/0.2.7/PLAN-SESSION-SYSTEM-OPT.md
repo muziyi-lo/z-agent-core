@@ -1,6 +1,6 @@
 # Plan SESSION-SYSTEM-OPT: 会话系统优化（升级自 N11）
 
-## 状态: ✅ P1 + P2 + P3 已实施（2026-08-12，后端 e2e + Node 测试通过，待浏览器 L2 双路径验证）；P4-P5 待实施
+## 状态: ✅ P1 + P2 + P3 + P4 已实施（2026-08-12，后端 e2e + Node 测试通过，待浏览器 L2 双路径验证）；P5 待实施
 
 ## 背景
 
@@ -158,9 +158,13 @@ pi-repos（`packages/agent/src/harness/session/session.ts` + `compaction/branch-
 
 ## P4: 上下文压缩（P0 差距）
 
-- **`POST /api/session/:id/compact`**：LLM 摘要历史（head）+ 保留最近 K 条 → 写回一条 `compaction` 消息（吸收 opencode compaction 流程）。
-- 复用 provider + `agent.zig` 现有 `context_window` 阈值监控，触发阈值时自动 compact。
-- 依赖：P1 消息 id（compaction 边界用 id 标记）。
+- **`POST /api/session/:id/compact`（已实施）**：
+  - LLM 摘要历史（`provider.chatCompletionStreaming`，null tools/phase_writer）+ 保留最近 K 条（默认 20，起点回溯非 tool 消息防切工具序列）
+  - 写回一条 `[Compaction]` system 消息（`allocateMessageId` 分配真实 id），系统提示词原样保留
+  - `Session.replaceMessages` 保留 kept 消息 id（前端缓存不失效）
+  - 守卫：流式中 `agent_busy`；消息 ≤2 时 `compacted:0` 幂等
+  - e2e 验证：30 条 → 22 条，DeepSeek 摘要 6.2s，`compacted:1`
+- **自动触发（待后续）**：`agent.zig` 现有 `context_window` 阈值监控目前只注入警告；自动 compact 需在 agent 循环外安全触发（流式中不可中断会话），列入后续。前端触发按钮可选。
 
 ## P5: 可撤销（轻量 history）
 
