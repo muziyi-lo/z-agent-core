@@ -39,6 +39,9 @@
 - **删除按钮流式会话不可见**：删除按钮创建被 `_msgId` 门控，改为总是创建 + 点击时守卫
 - **fork 命名 `#` 进文件名**：`sanitizeForkName` 白名单化，`#` 被 URL 片段截断导致 session not found
 - **Node 前端测试适配**：`test-loadsession-segments.mjs` 补滚动状态机全局 stub
+- **`/api/session/active` 空态 404**：无会话时返回 `200 {id:null}`——前端初始化自动恢复不再报错
+- **`/session/:id?limit=50` 大系统提示词 500**：分页 header 原用 `[1024]u8` 栈缓冲 bufPrint，系统提示词 >1KB（实测 1063B）溢出；改堆 `allocPrint`
+- **highlight.js 重复高亮警告**：三处 `hljs.highlightAll()` 对全文档重复处理已高亮元素；改为 `highlightNewCode` 只高亮 `:not([data-highlighted])` 新元素
 
 ## [0.2.6] — 2026-08-11
 
