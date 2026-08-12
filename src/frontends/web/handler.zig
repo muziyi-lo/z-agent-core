@@ -292,6 +292,14 @@ fn handleSessionGet(ctx: *Context, request: *std.http.Server.Request, id: []cons
     };
     defer session.deinit();
 
+    const target = request.head.target;
+    const limit_opt = extractQueryValue(target, "limit", a);
+    defer if (limit_opt) |v| a.free(v);
+    if (limit_opt) |lim_str| {
+        const limit = std.fmt.parseUnsigned(usize, lim_str, 10) catch 50;
+        return respondPagedSession(request, a, &session, computePage(session.messages(), null, limit));
+    }
+
     var buf: AlignedU8 = .empty;
     var hdr: [512]u8 = undefined;
     const display_name = if (uuid_mod.isUuid(session.name)) "New Session" else session.name;
@@ -303,13 +311,58 @@ fn handleSessionGet(ctx: *Context, request: *std.http.Server.Request, id: []cons
         try buf.appendSlice(a, h);
     }
     const msgs = session.messages();
+    try writeMessagesRange(a, &buf, msgs, 0, msgs.len);
+    try buf.appendSlice(a, "]}");
+    try respondJson(request, buf.items);
+}
+
+/// Page of messages: `before_id` null → the last `limit` messages; otherwise the
+/// `limit` messages immediately before the one with id `before_id`. The page
+/// start is pushed back over any leading tool messages so an assistant's tool
+/// run (assistant + its tool results) is never split across the boundary.
+fn computePage(msgs: []const types.Message, before_id: ?u64, limit: usize) struct { start: usize, end: usize, has_more: bool } {
+    var end: usize = msgs.len;
+    if (before_id) |bid| {
+        var found = false;
+        for (msgs, 0..) |m, i| {
+            if (m.id == bid) { end = i; found = true; break; }
+        }
+        if (!found) end = 0;
+    }
+    var start = if (end > limit) end - limit else 0;
+    while (start > 0 and start < end and msgs[start].role == .tool) start -= 1;
+    return .{ .start = start, .end = end, .has_more = start > 0 };
+}
+
+fn writeMessagesRange(a: std.mem.Allocator, buf: *AlignedU8, msgs: []const types.Message, start: usize, end: usize) !void {
     var first = true;
-    for (msgs) |m| {
+    for (msgs[start..end]) |m| {
         if (!first) try buf.appendSlice(a, ",");
         first = false;
-        try formatMessageJson(a, &buf, m);
+        try formatMessageJson(a, buf, m);
     }
-    try buf.appendSlice(a, "]}");
+}
+
+/// Emit {name, model, parent_id, system, messages:[page], has_more}.
+fn respondPagedSession(request: *std.http.Server.Request, a: std.mem.Allocator, session: *session_mod.Session, page: anytype) !void {
+    const display_name = if (uuid_mod.isUuid(session.name)) "New Session" else session.name;
+    const msgs = session.messages();
+    var buf: AlignedU8 = .empty;
+    const sys = if (msgs.len > 0) try escapeJsonDynamic(a, msgs[0].content) else null;
+    defer if (sys) |s| a.free(s);
+    var hdr: [1024]u8 = undefined;
+    if (session.parent_id) |pid| {
+        const h = try std.fmt.bufPrint(&hdr, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"parent_id\":\"{s}\",\"system\":\"{s}\",\"messages\":[", .{ display_name, session.model, pid, if (sys) |s| s else "" });
+        try buf.appendSlice(a, h);
+    } else {
+        const h = try std.fmt.bufPrint(&hdr, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"system\":\"{s}\",\"messages\":[", .{ display_name, session.model, if (sys) |s| s else "" });
+        try buf.appendSlice(a, h);
+    }
+    try writeMessagesRange(a, &buf, msgs, page.start, page.end);
+    const more_str = if (page.has_more) "true" else "false";
+    const tail = try std.fmt.allocPrint(a, "],\"has_more\":{s}}}", .{more_str});
+    defer a.free(tail);
+    try buf.appendSlice(a, tail);
     try respondJson(request, buf.items);
 }
 
@@ -321,17 +374,15 @@ fn handleSessionMessages(ctx: *Context, request: *std.http.Server.Request, id: [
     };
     defer session.deinit();
 
-    var buf: AlignedU8 = .empty;
-    try buf.appendSlice(a, "[");
-    const msgs = session.messages();
-    var first = true;
-    for (msgs) |m| {
-        if (!first) try buf.appendSlice(a, ",");
-        first = false;
-        try formatMessageJson(a, &buf, m);
-    }
-    try buf.appendSlice(a, "]");
-    try respondJson(request, buf.items);
+    const target = request.head.target;
+    const limit_opt = extractQueryValue(target, "limit", a);
+    defer if (limit_opt) |v| a.free(v);
+    const before_opt = extractQueryValue(target, "before", a);
+    defer if (before_opt) |v| a.free(v);
+
+    const limit = if (limit_opt) |ls| std.fmt.parseUnsigned(usize, ls, 10) catch 50 else 50;
+    const before_id: ?u64 = if (before_opt) |bs| std.fmt.parseUnsigned(u64, bs, 10) catch null else null;
+    return respondPagedSession(request, a, &session, computePage(session.messages(), before_id, limit));
 }
 
 fn resolveModelSpec(config: *const config_mod.Config, opt: ?[]const u8) []const u8 {

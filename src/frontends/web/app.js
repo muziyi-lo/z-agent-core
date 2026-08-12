@@ -166,6 +166,7 @@ document.getElementById('messages').addEventListener('scroll', function(e) {
   } else {
     autoScrollPaused = true;
   }
+  if (el.scrollTop < 60 && currentHasMore && !historyLoading && !isStreaming) loadOlder();
 }, true);
 function confirmModal(msg) {
   return new Promise(function(resolve) {
@@ -416,7 +417,7 @@ async function loadSessions() {
 
 async function loadSession(id) {
   var sess;
-  try { sess = await api('/session/' + id); }
+  try { sess = await api('/session/' + id + '?limit=50'); }
   catch(e) { console.error('loadSession error', e); return; }
   currentId = id;
   currentName = sess.name;
@@ -429,14 +430,32 @@ async function loadSession(id) {
   var prevScrollTop = msgs.scrollTop;
   var prevScrollHeight = msgs.scrollHeight;
   msgs.innerHTML = '';
-  var start = 0;
-  if (sess.messages.length > 0) {
-    renderSystemPrompt(sess.messages[0].content);
-    start = 1;
+  renderSystemPrompt(sess.system || null);
+  renderMessages(sess.messages || [], null);
+  currentHasMore = !!sess.has_more;
+  currentOldestId = (sess.messages && sess.messages.length > 0) ? sess.messages[0].id : null;
+  if (keepScroll && prevScrollHeight > 0) {
+    msgs.scrollTop = Math.round(prevScrollTop / prevScrollHeight * msgs.scrollHeight);
+  } else {
+    autoScrollPaused = false;
+    scrollToBottom(msgs, true);
   }
+  await loadSessions();
+}
+
+// --- message-list pagination (load newest first, scroll up for older pages) ---
+var currentHasMore = false;
+var currentOldestId = null;
+var historyLoading = false;
+
+// Render a message list. `insertBeforeNode` non-null prepends (older page);
+// otherwise messages are appended in order (initial load). Tool results are
+// matched into the preceding assistant's tool segments (never split across a
+// page boundary by the server).
+function renderMessages(msgs, insertBeforeNode) {
+  var container = document.getElementById('messages');
   var lastAsst = null;
-  for (var i = start; i < sess.messages.length; i++) {
-    var m = sess.messages[i];
+  msgs.forEach(function(m) {
     if (m.role === 'tool') {
       if (lastAsst && lastAsst._toolSegments) {
         var outHtml = renderMd(m.content || '');
@@ -450,18 +469,41 @@ async function loadSession(id) {
           }
         }
       }
-      continue;
+      return;
     }
-    lastAsst = addMessage(m, i, null);
-    if (m.role === 'assistant') wrapContextToolGroups(lastAsst);
+    var div = addMessage(m, 0, null, true);
+    if (insertBeforeNode) container.insertBefore(div, insertBeforeNode);
+    if (m.role === 'assistant') wrapContextToolGroups(div);
+    lastAsst = div;
+  });
+}
+
+// The first rendered message element (skips the #system-prompt banner).
+function firstMessageEl() {
+  var msgs = document.getElementById('messages');
+  for (var i = 0; i < msgs.children.length; i++) {
+    var c = msgs.children[i];
+    if (c.id !== 'system-prompt' && c.className.indexOf('msg') === 0) return c;
   }
-  if (keepScroll && prevScrollHeight > 0) {
-    msgs.scrollTop = Math.round(prevScrollTop / prevScrollHeight * msgs.scrollHeight);
-  } else {
-    autoScrollPaused = false;
-    scrollToBottom(msgs, true);
-  }
-  await loadSessions();
+  return null;
+}
+
+async function loadOlder() {
+  var msgs = document.getElementById('messages');
+  if (!currentId || historyLoading || !currentHasMore || isStreaming) return;
+  historyLoading = true;
+  try {
+    var d = await api('/session/' + currentId + '/message?before=' + currentOldestId + '&limit=50');
+    if (!d || !d.messages || d.messages.length === 0) { currentHasMore = false; return; }
+    // Anchor preservation: prepending shifts content down, restore the viewport.
+    var prevH = msgs.scrollHeight;
+    var prevT = msgs.scrollTop;
+    renderMessages(d.messages, firstMessageEl());
+    msgs.scrollTop = prevT + (msgs.scrollHeight - prevH);
+    currentOldestId = d.messages[0].id;
+    currentHasMore = !!d.has_more;
+  } catch(e) { console.error('loadOlder error', e); }
+  finally { historyLoading = false; }
 }
 
 function renderSystemPrompt(content) {
@@ -649,7 +691,7 @@ function renderAssistantMessage(container, msg) {
   });
 }
 
-function addMessage(m, index, toolName) {
+function addMessage(m, index, toolName, noScroll) {
   var msgs = document.getElementById('messages');
   var role = m.role;
   var content = m.content || '';
@@ -784,7 +826,7 @@ function addMessage(m, index, toolName) {
   }
 
   msgs.appendChild(div);
-  scrollToBottom(msgs);
+  if (!noScroll) scrollToBottom(msgs);
   return div;
 }
 

@@ -72,7 +72,13 @@ const session = {
     { role: "assistant", reasoning_content: "", content: "现在是 2026年8月7日 13:08（下午 1 点过 8 分）。", model: "deepseek-v4-flash", timestamp: 2 },
   ],
 }
-globalThis.api = async () => session
+globalThis.api = async () => ({
+  name: session.name,
+  model: session.model,
+  system: session.messages[0].content,
+  messages: session.messages.slice(1),
+  has_more: false,
+})
 
 globalThis.renderSystemPrompt = () => {}
 globalThis.wrapContextToolGroups = () => {}
@@ -90,10 +96,13 @@ globalThis.currentName = null
 globalThis.autoScrollPaused = false
 globalThis.scrollToBottom = () => {}
 globalThis.showStatus = () => {}
+globalThis.currentHasMore = false
+globalThis.currentOldestId = null
 
 globalThis.buildSegment = eval(`(${extract("buildSegment")})`)
 globalThis.renderAssistantMessage = eval(`(${extract("renderAssistantMessage")})`)
 globalThis.addMessage = eval(`(${extract("addMessage")})`)
+globalThis.renderMessages = eval(`(${extract("renderMessages")})`)
 globalThis.loadSession = eval(`(${extract("loadSession")})`)
 
 let pass = 0, fail = 0

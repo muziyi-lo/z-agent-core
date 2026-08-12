@@ -18,7 +18,13 @@
   - **侧边栏分支树**：子会话按 parent_id 缩进渲染在父会话下 + 分支图标（`bi-git-branch`），**多代嵌套按层级递进缩进（28+14px/代）**；孤儿分支（父已删除）自动提升到顶层保证可达
   - **branch 自动重答（方案 B，对齐 pi-repos）**：fork 到边界消息之前，`branch` 响应回传 `boundary_content`，前端切换后自动重发 → 立即生成新答案，消除悬空/连续 user 消息
   - `GET /api/session/active`：返回最近更新会话，前端刷新后自动恢复
+- **消息游标分页（P3）**:
+  - `GET /api/session/:id?limit=N`：首屏最近 N 条 + `system` + `has_more`
+  - `GET /api/session/:id/message?before=<msg_id>&limit=N`：向上翻页（按 id 定位位置）
+  - **页边界不切工具序列**：分页起点回溯到非 tool 消息，assistant+tool 结果永不跨页拆分
+  - 前端首屏最近 50 条 + 接近顶部滚动自动加载更早 + 滚动锚点恢复（顶部插入不跳位）
 - **结构化错误**: `err_mod` 增 `message_not_found`（消息不存在返回 404 区分）
+- **msg_count 精确化**：header 存真实消息数，list 优先读 header，缺字段数行兜底（替代 size/150 估算）
 
 ### Fixed
 - **用户消息 delete 索引漂移**：按钮 index 用 DOM 计数，与服务端消息数组下标漂移（工具回合 N+2 条 vs N+1 元素）→ 删错/静默 400；改为按消息 id 操作根治
