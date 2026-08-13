@@ -69,6 +69,23 @@
 
 > **为什么收起状态必须持久化**：`loadSessions` 在每次 prompt done、rename、delete 后触发（app.js 多处）。若收起状态不持久化，任何刷新/操作都回到全展开，用户折叠选择丢失。
 
+**分组层 diff（评论者确认，防 header 重复/错位）**：
+
+侧边栏按 `groupSessions`（app.js:8-23）分 5 组（pinned/today/yesterday/week/older），每组前插 `.section-header`。**分页追加（D3）与 diff 的交互核心在分组边界**：追加更早会话可能跨组（如 today 组满 → 新会话落 yesterday 组），若 diff 只对比 session 节点会漏建/错建 header。
+
+**正确设计：diff 两层结构，分组为第一层**：
+
+1. **分组层**：重算 `groupSessions` 得各组 → 对比当前 DOM 的 header 序列（header 加 `data-group` 属性）
+   - 新分组出现（如追加后出现 yesterday）→ 创建 header + 空组容器
+   - 分组消失 → 移除 header
+   - 顺序变化 → 移动 header
+2. **会话层**（组内）：只对存在的组做 id 级 diff——新增插入组内 **timestamp desc 正确位置**、删除移除、更新文本
+3. **追加路径**：分页加载的新会话先经分组层判定归属组 → 组存在则插组内正确位置；组不存在（更早时间段首次出现）则先建 header 再插
+
+**防重复插入**：分组 header 用 `data-group="today"` 等作为唯一键——追加/全量重建都按"DOM 是否已有该 data-group"判断创建，天然不重复。**禁止**用文本匹配（"Today" 文本可能被翻译/改动）。
+
+> **评论者边界确认**：纯"新增节点 + 插最近位置"的 diff 会把追加会话插到错误分组（today 末尾而非 yesterday）。**分组层 diff 是必要结构**，非可选优化——分页（D3）依赖它保证 header 不重复、会话落对组。
+
 **边界**：孤儿分支（父已删）提升到顶层（现有逻辑 `app.js:324-334` 保留）；收起父时其下所有深度后代一并收起（`renderChildren` 递归判断）。
 
 ### UI 设计（新增，对齐现有视觉语言）
@@ -206,7 +223,7 @@ function toggleCollapse(id) {
 }
 ```
 
-**注意**: diff 必须处理分组（Pinned/Today/Yesterday/...）变化——分组 header 与条目一起增量；收起父时子树隐藏
+**注意**: diff 分两层——先分组层（`data-group` header 增删移），再组内会话层（id 级 diff）；分组 header 用 `data-group` 唯一键防重复（见 D2 分组层 diff）；收起父时子树隐藏；分页追加与分组边界交互按分组层设计处理
 
 ### 步骤 4: 会话列表分页
 
@@ -266,6 +283,9 @@ node ..\.opencode\skills\zig-dev\scripts\check-catch-silent.mjs . --audit
 | fork 命名冲突 | `error.SessionAlreadyExists` → 400 提示 |
 | **日志覆盖（D5）** | fork/reset/delete/rename/truncate/branch/undo 成功路径均打 `session_*` 事件；`session_list_paged` 分页、`session_tmp_cleanup` 清理有日志 |
 | **分页与收起共存** | 追加加载更早会话时，已收起父的子树保持收起 |
+| **分组 header 不重复（评论者场景）** | 追加跨组（today 满 → yesterday）→ yesterday header 只创建一次，会话落对组；全量重建/追加均按 `data-group` 判定，无重复 header |
+| **分组消失** | 会话全删/移组后，空组 header 被移除 |
+| **追加会话落组正确** | 更早会话插入对应组 timestamp desc 位置，非"最近节点后" |
 | reduced-motion | 收起/加载无动画（全局已处理） |
 
 ## 波及
