@@ -34,6 +34,21 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
         break :blk null;
     } else null;
 
+    // Optional execution timeout (seconds). Not provided → .none (keep existing
+    // blocking behavior — do not break long-running commands). When provided,
+    // clamp to [1, 3600] to keep @intCast safe. On timeout the child is killed
+    // and the model is told the command timed out (tool honesty, D6).
+    const timeout_opt: Io.Timeout = if (args.object.get("timeout")) |tv| blk: {
+        if (tv == .integer and tv.integer > 0) {
+            const secs: u32 = @intCast(@min(tv.integer, 3600));
+            break :blk Io.Timeout{ .duration = .{
+                .raw = Io.Duration.fromSeconds(secs),
+                .clock = Io.Clock.real,
+            } };
+        }
+        break :blk .none;
+    } else .none;
+
     const shell_cmd = if (builtin.os.tag == .windows)
         try std.fmt.allocPrint(ctx.allocator, "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false);$OutputEncoding=[System.Text.UTF8Encoding]::new($false);{s}", .{cmd_val.string})
     else
@@ -58,6 +73,7 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
             .stdout_limit = limit,
             .stderr_limit = limit,
             .cwd = .{ .path = cwd_str },
+            .timeout = timeout_opt,
         })
     else
         std.process.run(ctx.allocator, ctx.io, .{
@@ -65,7 +81,26 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
             .stdout_limit = limit,
             .stderr_limit = limit,
             .cwd = .{ .path = cwd_str },
+            .timeout = timeout_opt,
         })) catch |err| {
+        // Interrupt takes priority over auto-timeout (user intent > timeout).
+        if (signal.isInterrupted()) {
+            signal.reset();
+            const content = try std.fmt.allocPrint(ctx.allocator, "Command aborted by user.", .{});
+            return types.ToolResult{ .session_content = content };
+        }
+        // Timeout is distinct from a generic exec failure — the model must know
+        // the command did NOT complete (tool honesty, D6).
+        if (err == error.Timeout) {
+            const content = try std.fmt.allocPrint(ctx.allocator, "Command timed out after {d}s.", .{timeoutSecs(timeout_opt)});
+            return types.ToolResult{ .session_content = content, .meta = .{ .bash = .{
+                .command = cmd_val.string,
+                .exit_code = -1,
+                .byte_count = 0,
+                .truncated = false,
+                .timed_out = true,
+            } } };
+        }
         const content = try std.fmt.allocPrint(ctx.allocator, "Error: execution failed: {s}", .{@errorName(err)});
         return types.ToolResult{ .session_content = content };
     };
@@ -138,6 +173,14 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
             .truncated = stdout_truncated,
             .timed_out = false,
         }},
+    };
+}
+
+/// Extract the seconds from a Io.Timeout for reporting (0 for .none/.deadline).
+fn timeoutSecs(t: Io.Timeout) u32 {
+    return switch (t) {
+        .duration => |d| @intCast(@max(d.raw.toSeconds(), 1)),
+        else => 0,
     };
 }
 
@@ -235,4 +278,27 @@ test "bash: workdir parameter" {
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "workdir_test") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "exited with code") == null);
+}
+
+test "bash: timeout kills long command and reports timed_out" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const ctx = types.ToolContext{ .allocator = allocator, .io = io, .project_root = "." };
+    const cmd = if (builtin.os.tag == .windows) "Start-Sleep -Seconds 5" else "sleep 5";
+    const args_json = try std.fmt.allocPrint(allocator, "{{\"command\":\"{s}\",\"timeout\":1}}", .{cmd});
+    defer allocator.free(args_json);
+    var result = try testExec(ctx, args_json);
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "timed out after 1s") != null);
+    try std.testing.expect(result.meta.bash.timed_out);
+}
+
+test "bash: no timeout keeps blocking (no timed_out)" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const ctx = types.ToolContext{ .allocator = allocator, .io = io, .project_root = "." };
+    var result = try testExec(ctx, "{\"command\":\"echo ok\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(!result.meta.bash.timed_out);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "ok") != null);
 }

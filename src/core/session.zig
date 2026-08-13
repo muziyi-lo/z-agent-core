@@ -873,6 +873,37 @@ pub fn list(allocator: std.mem.Allocator, io: Io, session_dir: []const u8) ![]Se
     return sorted;
 }
 
+/// Paged session list: the most recent `limit` sessions with timestamp strictly
+/// before `after_ts` (when provided). Delegates to list() for the full snapshot
+/// then filters — session counts are small, so simplicity wins over an early-exit
+/// traversal. Sorted timestamp desc (same as list()). Deep-copies the kept
+/// SessionInfo (id/file_path/name dup'd) so the intermediate list() snapshot can
+/// be freed. Caller owns the returned slice (freeSessionInfoList).
+pub fn listPage(allocator: std.mem.Allocator, io: Io, session_dir: []const u8, limit: usize, after_ts: ?i64) ![]SessionInfo {
+    const all = try list(allocator, io, session_dir);
+    defer freeSessionInfoList(allocator, all);
+    if (all.len == 0) return &.{};
+
+    var kept: std.ArrayListAligned(SessionInfo, null) = .empty;
+    defer kept.deinit(allocator);
+    for (all) |s| {
+        if (after_ts) |at| {
+            if (s.timestamp >= at) continue;
+        }
+        if (kept.items.len >= limit) break; // newest-first, stop at limit
+        try kept.append(allocator, .{
+            .id = try allocator.dupe(u8, s.id),
+            .name = try allocator.dupe(u8, s.name),
+            .file_path = try allocator.dupe(u8, s.file_path),
+            .timestamp = s.timestamp,
+            .model = try allocator.dupe(u8, s.model),
+            .msg_count = s.msg_count,
+            .parent_id = if (s.parent_id) |pid| try allocator.dupe(u8, pid) else null,
+        });
+    }
+    return kept.toOwnedSlice(allocator);
+}
+
 fn parseISO8601Epoch(ts: []const u8) i64 {
     if (ts.len < 19) return 0;
     const year = std.fmt.parseInt(i32, ts[0..4], 10) catch return 0;
@@ -1182,6 +1213,48 @@ test "session: empty list" {
     const result = list(allocator, io, ".zig-test-nonexistent-sessions") catch &.{};
     defer allocator.free(result);
     try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "session: listPage limit and after filter" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-session-listpage";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    const sessions_dir = try std.fs.path.join(allocator, &.{ test_root, sessions_subdir });
+    defer allocator.free(sessions_dir);
+    try Io.Dir.cwd().createDirPath(io, sessions_dir);
+
+    // Three sessions: newest (13:00) → mid (12:30) → oldest (12:00).
+    const specs = [_]struct { file: []const u8, ts: []const u8, name: []const u8 }{
+        .{ .file = "old.jsonl", .ts = "2026-07-09T12:00:00Z", .name = "Old" },
+        .{ .file = "mid.jsonl", .ts = "2026-07-09T12:30:00Z", .name = "Mid" },
+        .{ .file = "new.jsonl", .ts = "2026-07-09T13:00:00Z", .name = "New" },
+    };
+    for (specs) |sp| {
+        const file_path = try std.fs.path.join(allocator, &.{ sessions_dir, sp.file });
+        defer allocator.free(file_path);
+        const file = try Io.Dir.cwd().createFile(io, file_path, .{});
+        defer file.close(io);
+        const content = try std.fmt.allocPrint(allocator, "{{\"type\":\"header\",\"timestamp\":\"{s}\",\"model\":\"m\",\"name\":\"{s}\"}}\n", .{ sp.ts, sp.name });
+        defer allocator.free(content);
+        try file.writeStreamingAll(io, content);
+    }
+
+    // limit=2 → newest two (New, Mid), newest first.
+    const p1 = try listPage(allocator, io, sessions_dir, 2, null);
+    defer freeSessionInfoList(allocator, p1);
+    try std.testing.expectEqual(@as(usize, 2), p1.len);
+    try std.testing.expectEqualStrings("New", p1[0].name);
+    try std.testing.expectEqualStrings("Mid", p1[1].name);
+
+    // after = mid timestamp → only sessions strictly older than it (Old).
+    const after_ts = parseISO8601Epoch("2026-07-09T12:30:00Z");
+    const p2 = try listPage(allocator, io, sessions_dir, 10, after_ts);
+    defer freeSessionInfoList(allocator, p2);
+    try std.testing.expectEqual(@as(usize, 1), p2.len);
+    try std.testing.expectEqualStrings("Old", p2[0].name);
 }
 
 test "session: load invalid file returns error" {

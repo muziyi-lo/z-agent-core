@@ -308,21 +308,179 @@ document.addEventListener('click', function(e) {
 });
 
 // --- session list (branch tree: top-level grouped by time, children under parent) ---
+// --- session list pagination (load newest first, scroll up for older) ---
+var sessionsAllLoaded = false;   // true when no more older sessions to fetch
+var sessionsEarliestTs = null;   // after-cursor: oldest timestamp loaded
+var sessionsLoading = false;
+var SESSIONS_PAGE = 50;
+var lastGroups = null;
+var lastChildrenMap = null;
+var lastPinnedIds = null;
+
+async function loadSessionsOlder() {
+  if (sessionsLoading || sessionsAllLoaded) return;
+  sessionsLoading = true;
+  try {
+    var url = '/session?limit=' + SESSIONS_PAGE;
+    if (sessionsEarliestTs !== null) url += '&after=' + sessionsEarliestTs;
+    var resp = await api(url); // {sessions:[...], has_more}
+    var older = resp.sessions || [];
+    if (older.length > 0) {
+      sessionsEarliestTs = older[older.length - 1].timestamp;
+      appendSessionsOlder(older);
+    }
+    sessionsAllLoaded = !resp.has_more;
+  } catch(e) { console.error('loadSessionsOlder error', e); }
+  sessionsLoading = false;
+}
+
+// Insert older sessions into the correct group container (group-layer diff).
+// New sessions are older → they belong to a same-or-earlier group; create the
+// group header if missing, then insert each session node at the right position.
+function appendSessionsOlder(older) {
+  var el = document.getElementById('session-list');
+  var known = {};
+  older.forEach(function(s) { known[s.id] = true; });
+  // Merge into lastGroups so group membership stays correct for later appends.
+  var groups = lastGroups || { pinned: [], today: [], yesterday: [], week: [], older: [] };
+  older.forEach(function(s) {
+    var pinned = lastPinnedIds && lastPinnedIds.indexOf(s.id) !== -1;
+    var g = pinned ? 'pinned'
+      : (s.timestamp >= dayStart(0) ? 'today'
+        : (s.timestamp >= dayStart(-1) ? 'yesterday'
+          : (s.timestamp >= dayStart(-7) ? 'week' : 'older')));
+    groups[g] = groups[g] || [];
+    if (!groups[g].some(function(x) { return x.id === s.id; })) groups[g].push(s);
+    groups[g].sort(function(a, b) { return b.timestamp - a.timestamp; });
+  });
+  lastGroups = groups;
+
+  // Ensure group headers/containers exist for groups that got older items.
+  var GROUP_KEYS = ['pinned', 'today', 'yesterday', 'week', 'older'];
+  var GROUP_LABELS = { pinned: 'Pinned', today: 'Today', yesterday: 'Yesterday', week: 'This Week', older: 'Older' };
+  GROUP_KEYS.forEach(function(key) {
+    if (!groups[key] || groups[key].length === 0) return;
+    if (el.querySelector('.section-header[data-group="' + key + '"]')) return;
+    var hdr = document.createElement('div');
+    hdr.className = 'section-header';
+    hdr.setAttribute('data-group', key);
+    hdr.textContent = GROUP_LABELS[key];
+    var cont = document.createElement('div');
+    cont.className = 'session-group';
+    // Insert before the next existing group header (keeps order).
+    var nextHeader = null;
+    [].slice.call(el.querySelectorAll('.section-header[data-group]')).forEach(function(h) {
+      if (!nextHeader && h.getAttribute('data-group') !== key) nextHeader = h;
+    });
+    if (nextHeader) el.insertBefore(hdr, nextHeader);
+    else el.appendChild(hdr);
+    if (nextHeader) el.insertBefore(cont, nextHeader);
+    else el.appendChild(cont);
+  });
+
+  // Insert each older session into its group container at the right position.
+  older.forEach(function(s) {
+    var g = lastPinnedIds && lastPinnedIds.indexOf(s.id) !== -1 ? 'pinned'
+      : (s.timestamp >= dayStart(0) ? 'today'
+        : (s.timestamp >= dayStart(-1) ? 'yesterday'
+          : (s.timestamp >= dayStart(-7) ? 'week' : 'older')));
+    var cont = el.querySelector('.section-header[data-group="' + g + '"] + .session-group');
+    if (!cont) return;
+    if (cont.querySelector('.session[data-session-id="' + s.id + '"]')) return; // already present
+    var div = makeSessionNode(s, g === 'pinned');
+    // Insert before the first session in the container that is newer.
+    var before = null;
+    [].slice.call(cont.querySelectorAll('.session[data-session-id]')).forEach(function(node) {
+      if (!before && parseInt(node.getAttribute('data-ts') || '0', 10) < s.timestamp) before = node;
+    });
+    if (before) cont.insertBefore(div, before);
+    else cont.appendChild(div);
+    var collapsed = loadCollapsed();
+    if (collapsed.indexOf(s.id) !== -1 && lastChildrenMap && lastChildrenMap[s.id]) {
+      var wrap = document.createElement('div');
+      wrap.className = 'branch-children';
+      wrap.style.display = 'none';
+      div.appendChild(wrap);
+    }
+  });
+}
+
+function dayStart(offsetDays) {
+  var now = new Date();
+  var d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays);
+  return Math.floor(d.getTime() / 1000);
+}
+
+// Build a session node for pagination append (no group-diff, just render item).
+function makeSessionNode(s, isPinned) {
+  var div = document.createElement('div');
+  div.className = 'session' + (s.id === currentId ? ' active' : '');
+  div.setAttribute('data-session-id', s.id);
+  div.setAttribute('data-ts', s.timestamp);
+  div.innerHTML = (lastChildrenMap && lastChildrenMap[s.id] && lastChildrenMap[s.id].length > 0 ? '<button class="collapse-btn">&#9662;</button>' : '')
+    + '<div class="name">' + esc(s.name) + '</div><div class="meta">' + esc(s.model) + ' &middot; ' + s.msg_count + ' msgs</div>'
+    + '<button class="pin-btn' + (isPinned ? ' pinned' : '') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>'
+    + '<button class="more-btn" title="More actions">&#8942;</button>'
+    + '<span class="delete-btn">&times;</span>'
+    + '<div class="more-menu"><div class="more-item" data-act="rename">Rename</div><div class="more-item" data-act="fork">Fork</div><div class="more-item danger" data-act="reset">Reset</div><div class="more-item" data-act="pin">' + (isPinned ? 'Unpin' : 'Pin') + '</div><div class="more-item danger" data-act="delete">Delete</div></div>';
+  div.querySelector('.pin-btn').onclick = function(e) { e.stopPropagation(); togglePin(s.id); loadSessions(); };
+  div.querySelector('.delete-btn').onclick = function(e) { e.stopPropagation(); deleteSession(s.id); };
+  div.querySelector('.more-btn').onclick = function(e) { e.stopPropagation(); closeAllMoreMenus(); div.querySelector('.more-menu').classList.toggle('open'); };
+  div.querySelectorAll('.more-item').forEach(function(item) {
+    item.onclick = function(e) {
+      e.stopPropagation();
+      div.querySelector('.more-menu').classList.remove('open');
+      var act = item.getAttribute('data-act');
+      if (act === 'rename') { var ns = div.querySelector('.name'); ns.dispatchEvent(new MouseEvent('dblclick')); }
+      else if (act === 'fork') { forkSession(s); }
+      else if (act === 'reset') { resetSession(s); }
+      else if (act === 'pin') { togglePin(s.id); loadSessions(); }
+      else if (act === 'delete') { deleteSession(s.id); }
+    };
+  });
+  div.querySelector('.name').ondblclick = function() { renameInline(div.querySelector('.name'), s.id); };
+  div.onclick = function() { loadSession(s.id); };
+  return div;
+}
+
+function renameInline(nameSpan, sessionId) {
+  var input = document.createElement('input');
+  input.value = nameSpan.textContent;
+  input.className = 'rename-input';
+  var finish = async function() {
+    var newName = input.value.trim();
+    nameSpan.style.display = '';
+    input.remove();
+    if (newName && newName !== nameSpan.textContent) {
+      try {
+        await fetch(A + '/session/' + sessionId, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: newName }) });
+        if (currentId === sessionId) { currentName = newName; setTopbarTitle(newName); }
+        await loadSessions();
+      } catch(err) { console.error(err); }
+    }
+  };
+  input.onblur = finish;
+  input.onkeydown = function(e) { if (e.key === 'Enter') finish(); };
+  nameSpan.style.display = 'none';
+  nameSpan.parentNode.insertBefore(input, nameSpan.nextSibling);
+  input.focus();
+  input.select();
+}
+
 async function loadSessions() {
   var list; try { list = await api('/session'); } catch(e) { console.error('loadSessions error', e); return; }
+  sessionsAllLoaded = false;
+  sessionsEarliestTs = list.length > 0 ? list[list.length - 1].timestamp : null;
   var el = document.getElementById('session-list');
-  el.innerHTML = '';
-  if (list.length === 0) {
-    el.innerHTML = '<div class="empty-hint">No sessions yet</div>';
-    return;
-  }
 
+  // Incremental patch: compare against existing DOM by session id, then by group
+  // header (data-group). Never full-rebuild — avoids flicker on every refresh.
+  // Group layer first (header create/remove/move), then per-group session diff.
   var pinnedIds = getPinnedIds();
-  // Branch tree: sessions with parent_id render under their parent (depth-based
-  // indent); orphans whose parent no longer exists are promoted to top-level so
-  // they never become unreachable.
   var knownIds = {};
   list.forEach(function(s) { knownIds[s.id] = true; });
+
+  // Build branch tree; orphans (parent deleted) promoted to top level.
   var childrenMap = {};
   var topLevel = [];
   list.forEach(function(s) {
@@ -336,20 +494,45 @@ async function loadSessions() {
     childrenMap[k].sort(function(a, b) { return b.timestamp - a.timestamp; });
   });
   var groups = groupSessions(topLevel, pinnedIds);
+  // Persist for pagination append (loadSessionsOlder needs the tree).
+  lastGroups = groups;
+  lastChildrenMap = childrenMap;
+  lastPinnedIds = pinnedIds;
+
+  // Collapse state (persisted). Orphan ids (deleted sessions) are filtered out
+  // here so the array does not grow forever.
+  var collapsed = loadCollapsed();
+  var cleaned = collapsed.filter(function(id) { return knownIds[id]; });
+  if (cleaned.length !== collapsed.length) saveCollapsed(cleaned);
+  collapsed = cleaned;
 
   function renderItem(s, depth) {
     var isChild = depth > 0;
     var isPinned = pinnedIds && pinnedIds.indexOf(s.id) !== -1;
     var div = document.createElement('div');
     div.className = 'session' + (isChild ? ' child' : '') + (s.id === currentId ? ' active' : '');
-    // Depth-based indent so multi-generation branches stay visually distinct.
+    div.setAttribute('data-session-id', s.id);
     if (isChild) div.style.paddingLeft = (28 + (depth - 1) * 14) + 'px';
-    div.innerHTML = (isChild ? '<span class="branch-icon" title="Branch">' + biIcon('branch', 11) + '</span>' : '')
+    var hasKids = (childrenMap[s.id] && childrenMap[s.id].length > 0);
+    var collapseBtn = hasKids ? '<button class="collapse-btn" title="' + (isCollapsedId(s.id, collapsed) ? 'Expand' : 'Collapse') + '">' + (isCollapsedId(s.id, collapsed) ? '&#9656;' : '&#9662;') + '</button>' : '';
+    div.innerHTML = collapseBtn
+      + (isChild ? '<span class="branch-icon" title="Branch">' + biIcon('branch', 11) + '</span>' : '')
       + '<div class="name">' + esc(s.name) + '</div><div class="meta">' + esc(s.model) + ' &middot; ' + s.msg_count + ' msgs</div>'
       + '<button class="pin-btn' + (isPinned ? ' pinned' : '') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>'
       + '<button class="more-btn" title="More actions">&#8942;</button>'
       + '<span class="delete-btn">&times;</span>'
-      + '<div class="more-menu"><div class="more-item" data-act="rename">Rename</div><div class="more-item" data-act="pin">' + (isPinned ? 'Unpin' : 'Pin') + '</div><div class="more-item danger" data-act="delete">Delete</div></div>';
+      + '<div class="more-menu"><div class="more-item" data-act="rename">Rename</div><div class="more-item" data-act="fork">Fork</div><div class="more-item danger" data-act="reset">Reset</div><div class="more-item" data-act="pin">' + (isPinned ? 'Unpin' : 'Pin') + '</div><div class="more-item danger" data-act="delete">Delete</div></div>';
+
+    var collapseBtnEl = div.querySelector('.collapse-btn');
+    if (collapseBtnEl) {
+      collapseBtnEl.onclick = function(e) {
+        e.stopPropagation();
+        var nowCollapsed = toggleCollapse(s.id);
+        collapseBtnEl.innerHTML = nowCollapsed ? '&#9656;' : '&#9662;';
+        var kidsEl = div.querySelector('.branch-children');
+        if (kidsEl) kidsEl.style.display = nowCollapsed ? 'none' : '';
+      };
+    }
 
     div.querySelector('.pin-btn').onclick = function(e) {
       e.stopPropagation();
@@ -371,6 +554,8 @@ async function loadSessions() {
         moreMenu.classList.remove('open');
         var act = item.getAttribute('data-act');
         if (act === 'rename') { nameSpan.dispatchEvent(new MouseEvent('dblclick')); }
+        else if (act === 'fork') { forkSession(s); }
+        else if (act === 'reset') { resetSession(s); }
         else if (act === 'pin') { togglePin(s.id); loadSessions(); }
         else if (act === 'delete') { deleteSession(s.id); }
       };
@@ -405,33 +590,136 @@ async function loadSessions() {
     return div;
   }
 
-  function renderChildren(parentId, depth) {
+  function renderChildren(parentDiv, parentId, depth) {
     var kids = childrenMap[parentId];
     if (!kids) return;
+    var wrap = document.createElement('div');
+    wrap.className = 'branch-children';
+    if (isCollapsedId(parentId, collapsed)) wrap.style.display = 'none';
     kids.forEach(function(k) {
-      el.appendChild(renderItem(k, depth));
-      if (depth < 6) renderChildren(k.id, depth + 1);
+      wrap.appendChild(renderItem(k, depth));
+      if (depth < 6) renderChildren(wrap, k.id, depth + 1);
     });
+    parentDiv.appendChild(wrap);
   }
 
-  function renderGroup(label, items) {
-    if (items.length === 0) return;
+  // --- group layer diff ---
+  var GROUP_KEYS = ['pinned', 'today', 'yesterday', 'week', 'older'];
+  var GROUP_LABELS = { pinned: 'Pinned', today: 'Today', yesterday: 'Yesterday', week: 'This Week', older: 'Older' };
+
+  function findGroupHeader(groupKey) {
+    var headers = el.querySelectorAll('.section-header[data-group]');
+    for (var i = 0; i < headers.length; i++) {
+      if (headers[i].getAttribute('data-group') === groupKey) return headers[i];
+    }
+    return null;
+  }
+
+  function groupContainer(groupKey) {
+    var header = findGroupHeader(groupKey);
+    return header ? header.nextElementSibling : null;
+  }
+
+  function makeGroupHeader(groupKey) {
     var hdr = document.createElement('div');
     hdr.className = 'section-header';
-    hdr.textContent = label;
-    el.appendChild(hdr);
-    items.forEach(function(s) {
-      el.appendChild(renderItem(s, 0));
-      renderChildren(s.id, 1);
-    });
+    hdr.setAttribute('data-group', groupKey);
+    hdr.textContent = GROUP_LABELS[groupKey];
+    return hdr;
   }
 
-  renderGroup('Pinned', groups.pinned);
-  var labels = { today: 'Today', yesterday: 'Yesterday', week: 'This Week', older: 'Older' };
-  for (var i = 0; i < ['today','yesterday','week','older'].length; i++) {
-    var key = ['today','yesterday','week','older'][i];
-    renderGroup(labels[key], groups[key]);
+  function makeGroupContainer() {
+    var c = document.createElement('div');
+    c.className = 'session-group';
+    return c;
   }
+
+  // Remove groups that no longer have items; drop empty containers.
+  [].slice.call(el.querySelectorAll('.section-header[data-group]')).forEach(function(h) {
+    var key = h.getAttribute('data-group');
+    if (!groups[key] || groups[key].length === 0) {
+      var cont = h.nextElementSibling;
+      if (cont && cont.classList.contains('session-group')) cont.remove();
+      h.remove();
+    }
+  });
+
+  // Ensure all non-empty groups exist in order (create missing, keep order).
+  var lastNode = null;
+  GROUP_KEYS.forEach(function(key) {
+    if (!groups[key] || groups[key].length === 0) return;
+    var header = findGroupHeader(key);
+    if (!header) {
+      header = makeGroupHeader(key);
+      var cont = makeGroupContainer();
+      if (lastNode) {
+        lastNode.after(header, cont);
+      } else {
+        el.appendChild(header);
+        el.appendChild(cont);
+      }
+    }
+    lastNode = header ? header.nextElementSibling : null;
+    if (lastNode) lastNode = lastNode.nextElementSibling; // after container
+  });
+
+  // --- per-group session diff ---
+  GROUP_KEYS.forEach(function(key) {
+    var items = groups[key] || [];
+    var cont = groupContainer(key);
+    if (!cont) return;
+    var existing = {};
+    [].slice.call(cont.querySelectorAll('.session[data-session-id]')).forEach(function(node) {
+      existing[node.getAttribute('data-session-id')] = node;
+    });
+    // Remove sessions no longer in this group.
+    Object.keys(existing).forEach(function(id) {
+      if (!items.some(function(s) { return s.id === id; })) existing[id].remove();
+    });
+    // Insert/update in timestamp-desc order.
+    var insertBefore = cont.firstChild;
+    items.forEach(function(s) {
+      var node = existing[s.id];
+      if (!node) {
+        node = renderItem(s, 0);
+        renderChildren(node, s.id, 1);
+        existing[s.id] = node;
+      } else {
+        // Update text fields in place (no rebuild).
+        var nm = node.querySelector('.name');
+        if (nm && nm.textContent !== s.name) nm.textContent = s.name;
+        var mt = node.querySelector('.meta');
+        if (mt && mt.textContent !== (s.model + ' · ' + s.msg_count + ' msgs')) mt.textContent = s.model + ' · ' + s.msg_count + ' msgs';
+      }
+      // Position: keep timestamp-desc. Move node if needed.
+      if (insertBefore && insertBefore !== node) cont.insertBefore(node, insertBefore);
+      insertBefore = node ? node.nextElementSibling : null;
+      while (insertBefore && insertBefore.classList.contains('branch-children')) insertBefore = insertBefore.nextElementSibling;
+    });
+  });
+
+  if (list.length === 0) {
+    el.innerHTML = '<div class="empty-hint">No sessions yet</div>';
+  }
+}
+
+// --- collapse state (localStorage) ---
+function loadCollapsed() {
+  try { var raw = localStorage.getItem('zagent-collapsed'); return raw ? JSON.parse(raw) : []; }
+  catch(e) { return []; }
+}
+function saveCollapsed(ids) {
+  try { localStorage.setItem('zagent-collapsed', JSON.stringify(ids)); } catch(e) {}
+}
+function isCollapsedId(id, collapsed) {
+  return collapsed.indexOf(id) !== -1;
+}
+function toggleCollapse(id) {
+  var collapsed = loadCollapsed();
+  var i = collapsed.indexOf(id);
+  if (i === -1) collapsed.push(id); else collapsed.splice(i, 1);
+  saveCollapsed(collapsed);
+  return i === -1;
 }
 
 async function loadSession(id) {
@@ -1309,6 +1597,38 @@ document.getElementById('new-session-btn').onclick = async function() {
   } catch(e) { console.error(e); }
 };
 
+async function forkSession(s) {
+  // Empty name → server auto-generates `(fork #N)` via forkTitle.
+  var name = prompt('Fork name (leave empty for auto (fork #N)):', '');
+  if (name === null) return;
+  var forkName = name.trim();
+  try {
+    var body = forkName ? { name: forkName } : {};
+    var r = await api('/session/' + s.id + '/fork', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r && r.data && r.data.session_id) {
+      switchToSession(r.data.session_id, r.data.name);
+    }
+    await loadSessions();
+  } catch(e) { showStatus('fork failed', true); console.error(e); }
+}
+
+async function resetSession(s) {
+  if (!(await confirmModal('Reset this session? All messages will be cleared. (System prompt is kept.)'))) return;
+  try {
+    await api('/session/' + s.id + '/reset', { method: 'PATCH' });
+    if (currentId === s.id) {
+      // Reload current view to reflect the cleared messages.
+      await loadSession(s.id);
+    } else {
+      await loadSessions();
+    }
+  } catch(e) { showStatus('reset failed', true); console.error(e); }
+}
+
 async function deleteSession(id) {
   if (!(await confirmModal('Delete this session?'))) return;
   try {
@@ -1521,6 +1841,15 @@ function applyToolType(toolDiv, toolName, toolData) {
 }
 
 loadSessions();
+// Paged session list: load older sessions when scrolled near the bottom.
+var sessionListEl = document.getElementById('session-list');
+if (sessionListEl) {
+  sessionListEl.addEventListener('scroll', function() {
+    if (sessionListEl.scrollTop + sessionListEl.clientHeight >= sessionListEl.scrollHeight - 100) {
+      loadSessionsOlder();
+    }
+  });
+}
 loadModels();
 loadSlashCommands();
 loadCwd();

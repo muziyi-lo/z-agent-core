@@ -5,6 +5,7 @@ const session_mod = @import("../core/session.zig");
 const agent_mod = @import("../core/agent.zig");
 const provider_mod = @import("../io/provider.zig");
 const registry_mod = @import("../tool/registry.zig");
+const log = @import("../util/log.zig");
 
 const Io = std.Io;
 
@@ -98,6 +99,30 @@ pub fn init(
     errdefer session.deinit();
 
     const session_dir = try std.fs.path.join(allocator, &.{ project_root, session_mod.sessions_subdir });
+
+    // Crash recovery (F5/D4): delete leftover `*.jsonl.tmp` orphans from an
+    // interrupted session.flush (tmp+rename atomic write). Best-effort; a missing
+    // directory (first run) is fine. Cleanup runs for both CLI and Web (shared init).
+    var removed_tmp: usize = 0;
+    {
+        var dir = Io.Dir.cwd().openDir(io, session_dir, .{ .iterate = true }) catch null;
+        if (dir) |*d| {
+            defer d.close(io);
+            var it = d.iterate();
+            while (it.next(io) catch null) |e| {
+                if (e.kind != .file) continue;
+                if (!std.mem.endsWith(u8, e.name, ".jsonl.tmp")) continue;
+                const tmp_path = std.fs.path.join(allocator, &.{ session_dir, e.name }) catch continue;
+                defer allocator.free(tmp_path);
+                if (Io.Dir.cwd().deleteFile(io, tmp_path) catch null) |_| {
+                    removed_tmp += 1;
+                }
+            }
+        }
+    }
+    if (removed_tmp > 0) {
+        log.dbg(0, 0, "session_tmp_cleanup", "removed={d}", .{removed_tmp});
+    }
 
     return FrontendState{
         .allocator = allocator,

@@ -1,6 +1,16 @@
 # Plan SESSION-UI-FINAL: 会话系统收尾（前端操作 + 侧边栏性能 + 崩溃恢复）
 
-## 状态: 计划中
+## 状态: ✅ 已实施（2026-08-13，build + 263 测试 + 前端 9 文件全过；仅余既有 bash 基线失败）
+
+## 实施差异记录
+
+- **PATCH 路由**：fork/reset 扩展现有 PATCH 分支（handler.zig:117 已有 rename），加 sub-path 解析；`handleFork` 支持 `name_arg`（command 通道）/ body `{name}` / 空名自动 `forkTitle` 生成 `(fork #N)`
+- **`listPage`**：独立函数（不动 `list`），复用 list 全量快照 + after/limit 过滤 + 深拷贝（防与 list 内存冲突）；handler `?limit=N[&after=ts]` → `{sessions, has_more}`
+- **前端收起**：`renderChildren` 改为包 `.branch-children` 容器（非直挂 el），折叠用 `wrap.style.display` 控制 + localStorage 持久化 + 孤儿 ID 清理
+- **分页追加**：`appendSessionsOlder` 独立节点构建（`makeSessionNode`），按 group 归属插入；滚动监听 `#session-list` 底部 100px 触发
+- **Reset UI**：用现有 `confirmModal`（非自定义 modal）
+- **bash 超时**：未传 timeout → `.none` 保持阻塞；传了 clamp [1,3600]；中断优先于超时；`meta.timed_out` 仅超时路径 true
+- 测试 263 通过 + 1 既有失败（`tool.bash.test.bash: echo hello`，stash 基线复现，与本次改动无关）
 
 ## 问题
 

@@ -117,8 +117,13 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
     } else if (method == .PATCH) {
         if (std.mem.startsWith(u8, path, "/api/session/")) {
             const rest = path["/api/session/".len..];
-            const id = if (std.mem.indexOfScalar(u8, rest, '?')) |qm| rest[0..qm] else rest;
-            if (std.mem.indexOfScalar(u8, id, '/') == null) {
+            if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+                const id = rest[0..slash];
+                const sub = rest[slash + 1 ..];
+                if (std.mem.eql(u8, sub, "fork")) return handleFork(ctx, request, id, a, null);
+                if (std.mem.eql(u8, sub, "reset")) return handleReset(ctx, request, id, a);
+            } else {
+                const id = if (std.mem.indexOfScalar(u8, rest, '?')) |qm| rest[0..qm] else rest;
                 return handleSessionRename(ctx, request, id, a);
             }
         }
@@ -269,6 +274,49 @@ fn handleProviderList(ctx: *Context, request: *std.http.Server.Request, a: std.m
 }
 
 fn handleSessionList(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
+    // Paged mode: ?limit=N[&after=<ts>] → {sessions:[...], has_more:bool}.
+    // Plain mode (no limit) → legacy `[...]` array (existing frontend + CLI compat).
+    const limit_opt = extractQueryValue(request.head.target, "limit", a);
+    defer if (limit_opt) |v| a.free(v);
+    if (limit_opt) |lim_str| {
+        const limit = std.fmt.parseUnsigned(usize, lim_str, 10) catch 50;
+        const after_opt = extractQueryValue(request.head.target, "after", a);
+        defer if (after_opt) |v| a.free(v);
+        const after_ts: ?i64 = if (after_opt) |ats| std.fmt.parseInt(i64, ats, 10) catch null else null;
+
+        const page = session_mod.listPage(a, ctx.io, ctx.sessions_dir, limit, after_ts) catch
+            return err_mod.respondError(request, .internal_error, "failed to list sessions", a);
+        defer session_mod.freeSessionInfoList(a, page);
+
+        // has_more: a full page was returned AND there are still older sessions.
+        const full_list: []session_mod.SessionInfo = session_mod.list(a, ctx.io, ctx.sessions_dir) catch &.{};
+        defer if (full_list.len > 0) session_mod.freeSessionInfoList(a, full_list);
+        const has_more = page.len >= limit and full_list.len > page.len;
+
+        var buf: AlignedU8 = .empty;
+        try buf.appendSlice(a, "{\"sessions\":[");
+        var first = true;
+        for (page) |s| {
+            if (!first) try buf.appendSlice(a, ",");
+            first = false;
+            const display_name = if (uuid_mod.isUuid(s.name)) "New Session" else s.name;
+            var pid_owned: ?[]const u8 = null;
+            defer if (pid_owned) |p| a.free(p);
+            const pid_json = if (s.parent_id) |pid| blk: {
+                const owned = try std.fmt.allocPrint(a, "\"{s}\"", .{pid});
+                pid_owned = owned;
+                break :blk owned;
+            } else "null";
+            const ss = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":{s}}}", .{ s.id, display_name, s.model, s.msg_count, s.timestamp, pid_json });
+            defer a.free(ss);
+            try buf.appendSlice(a, ss);
+        }
+        try buf.appendSlice(a, if (has_more) ",\"has_more\":true" else ",\"has_more\":false");
+        try buf.appendSlice(a, "]}");
+        log.req_info(ctx.thread_id, ctx.request_id, "session_list_paged", "dir={s} limit={d} has_more={d}", .{ ctx.sessions_dir, limit, @as(u32, @intFromBool(has_more)) });
+        return respondJson(request, buf.items);
+    }
+
     log.req_info(ctx.thread_id, ctx.request_id, "session_list", "dir={s}", .{ctx.sessions_dir});
 
     const list = session_mod.list(a, ctx.io, ctx.sessions_dir) catch |err| {
@@ -562,22 +610,15 @@ fn handleCommandExec(ctx: *Context, request: *std.http.Server.Request, a: std.me
     defer session.deinit();
 
     if (std.mem.eql(u8, name, "fork")) {
-        var fork_sess = session_ops.fork(ctx.allocator, ctx.io, &session, ctx.sessions_dir, args) catch
-            return err_mod.respondError(request, .bad_request, "fork failed", a);
-        defer fork_sess.deinit();
-        const fork_path = fork_sess.path orelse return err_mod.respondError(request, .internal_error, "fork session has no path", a);
-        const fork_id = try sessionIdFromPath(a, fork_path);
-        const response = try std.fmt.allocPrint(a, "{{\"status\":\"ok\",\"data\":{{\"session_id\":\"{s}\",\"name\":\"{s}\"}}}}", .{ fork_id, fork_sess.name });
-        return respondJson(request, response);
+        return handleFork(ctx, request, sid, a, args);
     }
     if (std.mem.eql(u8, name, "reset")) {
-        session_ops.reset(&session);
-        try session.flush();
-        return respondJson(request, "{\"status\":\"ok\"}");
+        return handleReset(ctx, request, sid, a);
     }
     if (std.mem.eql(u8, name, "name")) {
         try session.rename(args);
         try session.flush();
+        log.biz_info(ctx.thread_id, ctx.request_id, "session_rename", "session={s} name={s}", .{ sid, args });
         return respondJson(request, "{\"status\":\"ok\"}");
     }
     return respondJson(request, "{\"status\":\"error\",\"message\":\"unknown command\"}");
@@ -614,6 +655,60 @@ fn handleAbort(ctx: *Context, request: *std.http.Server.Request, session_id: []c
     try respondJson(request, "{\"status\":\"aborted\"}");
 }
 
+/// PATCH /api/session/:id/fork — fork the session into a new one (shared with
+/// the /fork command). Returns {session_id, name} for the frontend to switch to.
+/// `name_arg` is the command-path fork name ("" when REST body carries it).
+fn handleFork(ctx: *Context, request: *std.http.Server.Request, id: []const u8, a: std.mem.Allocator, name_arg: ?[]const u8) !void {
+    if (isSessionStreaming(ctx, id)) return err_mod.respondError(request, .agent_busy, "session is busy", a);
+    var session = loadSession(ctx, id) catch |err| return respondCmdLoadError(request, err, a);
+    defer session.deinit();
+
+    var fork_name: []const u8 = "";
+    if (name_arg) |na| {
+        fork_name = na;
+    } else if (readRequestBody(a, request, 1024)) |body| {
+        const parsed = std.json.parseFromSlice(std.json.Value, a, body, .{ .ignore_unknown_fields = true }) catch null;
+        if (parsed) |p| {
+            if (p.value.object.get("name")) |nv| {
+                if (nv == .string) fork_name = nv.string;
+            }
+        }
+    }
+
+    // Empty name → auto-generate `(fork #N)` via forkTitle (base-title scan).
+    if (fork_name.len == 0) {
+        const gen = session_ops.forkTitle(ctx.allocator, ctx.io, ctx.sessions_dir, session.name) catch
+            return err_mod.respondError(request, .internal_error, "fork failed", a);
+        defer ctx.allocator.free(gen);
+        fork_name = gen;
+    }
+
+    var fork_sess = session_ops.fork(ctx.allocator, ctx.io, &session, ctx.sessions_dir, fork_name) catch |err| switch (err) {
+        error.InvalidForkName, error.PathSeparatorInName, error.SessionAlreadyExists => return err_mod.respondError(request, .bad_request, "fork failed", a),
+        else => return err_mod.respondError(request, .internal_error, "fork failed", a),
+    };
+    defer fork_sess.deinit();
+    const fork_path = fork_sess.path orelse return err_mod.respondError(request, .internal_error, "fork session has no path", a);
+    const fork_id = try sessionIdFromPath(a, fork_path);
+    log.biz_info(ctx.thread_id, ctx.request_id, "session_fork", "session={s} fork={s} name={s}", .{ id, fork_id, fork_sess.name });
+    const response = try std.fmt.allocPrint(a, "{{\"status\":\"ok\",\"data\":{{\"session_id\":\"{s}\",\"name\":\"{s}\"}}}}", .{ fork_id, fork_sess.name });
+    return respondJson(request, response);
+}
+
+/// PATCH /api/session/:id/reset — clear conversation messages, keep system
+/// prompt (session_ops.reset), preserve session id/name. Shared with /reset.
+fn handleReset(ctx: *Context, request: *std.http.Server.Request, id: []const u8, a: std.mem.Allocator) !void {
+    if (isSessionStreaming(ctx, id)) return err_mod.respondError(request, .agent_busy, "session is busy", a);
+    var session = loadSession(ctx, id) catch |err| return respondCmdLoadError(request, err, a);
+    defer session.deinit();
+
+    const pre_count = session.messages().len;
+    session_ops.reset(&session);
+    try session.flush();
+    log.biz_info(ctx.thread_id, ctx.request_id, "session_reset", "session={s} msgs_cleared={d}", .{ id, pre_count });
+    try respondJson(request, "{\"status\":\"ok\"}");
+}
+
 fn handleSessionRename(ctx: *Context, request: *std.http.Server.Request, id: []const u8, a: std.mem.Allocator) !void {
     var session = loadSession(ctx, id) catch |err| {
         if (err == error.InvalidSessionId) return err_mod.respondError(request, .bad_request, "invalid session id", a);
@@ -631,6 +726,7 @@ fn handleSessionRename(ctx: *Context, request: *std.http.Server.Request, id: []c
 
     try session.rename(new_name);
     try session.flush();
+    log.biz_info(ctx.thread_id, ctx.request_id, "session_rename", "session={s} name={s}", .{ id, new_name });
     try respondJson(request, "{\"status\":\"renamed\"}");
 }
 
@@ -659,6 +755,7 @@ fn handleSessionDelete(ctx: *Context, request: *std.http.Server.Request, id: []c
         if (err == error.FileNotFound) return err_mod.respondError(request, .session_not_found, "session not found", a);
         return err_mod.respondError(request, .internal_error, "failed to delete session", a);
     };
+    log.biz_info(ctx.thread_id, ctx.request_id, "session_delete", "session={s}", .{id});
     try respondJson(request, "{\"status\":\"deleted\"}");
 }
 
@@ -722,6 +819,7 @@ fn handleTruncate(ctx: *Context, request: *std.http.Server.Request, session_id: 
 
     session.truncateTo(index);
     try session.flush();
+    log.biz_info(ctx.thread_id, ctx.request_id, "session_truncate", "session={s} kept={d}", .{ session_id, index });
     try respondJson(request, "{\"status\":\"ok\"}");
 }
 
@@ -759,6 +857,7 @@ fn handleBranch(ctx: *Context, request: *std.http.Server.Request, session_id: []
     try pushUndo(ctx, session_id, .{ .branch = .{ .fork_id = try ctx.undo_allocator.dupe(u8, fork_id) } });
     const esc_content = try escapeJsonDynamic(a, boundary_content);
     defer a.free(esc_content);
+    log.biz_info(ctx.thread_id, ctx.request_id, "session_branch", "session={s} fork={s}", .{ session_id, fork_id });
     const response = try std.fmt.allocPrint(a, "{{\"status\":\"ok\",\"data\":{{\"session_id\":\"{s}\",\"name\":\"{s}\",\"boundary_content\":\"{s}\"}}}}", .{ fork_id, fork_sess.name, esc_content });
     return respondJson(request, response);
 }
@@ -833,6 +932,7 @@ fn handleUndo(ctx: *Context, request: *std.http.Server.Request, session_id: []co
             session_mod.Session.deleteFile(ctx.io, path) catch {};
         },
     }
+    log.biz_info(ctx.thread_id, ctx.request_id, "session_undo", "session={s} kind={s}", .{ session_id, @tagName(op) });
     try respondJson(request, "{\"status\":\"ok\"}");
 }
 
