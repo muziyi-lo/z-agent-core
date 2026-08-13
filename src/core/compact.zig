@@ -135,6 +135,15 @@ pub fn compactSession(
     io: Io,
     keep_recent_tokens: u32,
 ) !bool {
+    // Summarization is a content-comprehension task, not a deep-reasoning one.
+    // Disable thinking for this call: measured 61% fewer completion tokens with
+    // ~identical summary length (reasoning 727/1174 = 62% was pure overhead).
+    // Save/restore because compactSession shares the main provider (unlike the
+    // title sub-call which holds an independent copy).
+    const saved_thinking = provider.config.compat.thinking_level;
+    provider.config.compat.thinking_level = .none;
+    defer provider.config.compat.thinking_level = saved_thinking;
+
     const msgs = session.messages();
     const keep_start = computeKeepStart(msgs, keep_recent_tokens);
     if (keep_start <= 1) return false;
