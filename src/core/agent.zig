@@ -214,6 +214,11 @@ pub const AgentLoop = struct {
         if (finish == .interrupted) {
             self._aborted.store(false, .release);
             self._aborted_bool = false;
+            // Clear the global interrupt flag too: abort() set it to kill the
+            // provider's curl subprocess, and every interrupted exit path must
+            // consume it. Otherwise a stale flag makes later bash tool calls
+            // report "Command aborted by user." (leak between turns/tests).
+            signal.reset();
         }
         if (self.lifecycle) |lc| {
             if (lc.on_turn_end) |cb| cb(lc.context, finish);

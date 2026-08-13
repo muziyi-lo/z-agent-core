@@ -1013,7 +1013,9 @@ test "session: flush writes JSONL" {
     const test_root = ".zig-test-session-flush";
     defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
     try Io.Dir.cwd().createDirPath(io, test_root);
-    try Io.Dir.cwd().createDirPath(io, try std.fs.path.join(allocator, &.{ test_root, sessions_subdir }));
+    const flush_sessions_dir = try std.fs.path.join(allocator, &.{ test_root, sessions_subdir });
+    defer allocator.free(flush_sessions_dir);
+    try Io.Dir.cwd().createDirPath(io, flush_sessions_dir);
 
     var orig_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const orig_len = Io.Dir.cwd().realPath(io, &orig_cwd_buf) catch unreachable;
@@ -1088,7 +1090,9 @@ test "session: flush then load roundtrip" {
     const test_root = ".zig-test-session-roundtrip";
     defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
     try Io.Dir.cwd().createDirPath(io, test_root);
-    try Io.Dir.cwd().createDirPath(io, try std.fs.path.join(allocator, &.{ test_root, sessions_subdir }));
+    const rt_sessions_dir = try std.fs.path.join(allocator, &.{ test_root, sessions_subdir });
+    defer allocator.free(rt_sessions_dir);
+    try Io.Dir.cwd().createDirPath(io, rt_sessions_dir);
 
     var orig_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const orig_len = Io.Dir.cwd().realPath(io, &orig_cwd_buf) catch unreachable;
