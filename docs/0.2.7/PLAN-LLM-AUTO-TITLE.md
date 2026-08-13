@@ -53,28 +53,33 @@ LLM 自动标题需要一次**独立的、轻量的 LLM 调用**，与主 agent 
 
 ### 决策
 
-**D1 — 触发时机：回合边界同步触发（首回合完成后）**
+**D1 — 触发时机：回合边界同步触发（第二轮回合完成后）**
 
 | 方案 | 说明 | 决策 |
 |------|------|------|
 | 回合前（append user 后、runTurn 前） | 标题立即就绪，但阻塞首答（同步模型无 forkIn） | ❌ 首答延迟不可接受 |
-| **回合后（runTurn 完成后）** | 首答结束后触发，不阻塞主回复；标题在列表刷新时可见 | ✅ **采用**（对齐"标题出现在回答之后"的自然体验，opencode 也是回答期间异步生成） |
+| 首回合后（runTurn 完成后） | 首答结束后触发，不阻塞主回复 | ❌ 首条消息意图不可靠（greeting/元操作如"恢复上下文"/试探），标题质量差；且产生一次无效请求 + 错误的持久标题 |
+| **第二轮回合后（runTurn 完成后）** | 第二轮用户已表达真实任务，标题命中率高；首轮保持占位 | ✅ **采用**（对齐 ChatGPT/Claude"新对话"占位 + 延迟后台生成范式） |
 
-- CLI：`processLine`/`singleTurn` 在 `runTurn` 返回后、`session.flush()` 前调用（首回合 + 标题为默认 + 恰 1 条 user 时触发）。
+- CLI：`processLine`/`singleTurn` 在 `runTurn` 返回后、`session.flush()` 前调用（恰 2 条真实 user 时触发）。
 - Web：`handleSSE` 在 `runTurn` 返回后、`sse_done` 帧前调用（`handler.zig:1055` 附近）。
-- 因触发条件含"恰 1 条真实用户消息"，**天然只在首回合触发一次**——第二回合起消息数 >1，判定返回 false，无需额外去重标志（对齐 opencode step===1）。
+- 因触发条件含"恰 2 条真实用户消息"，**天然只在第二轮回合后触发一次**——第三回合起消息数 >2，判定返回 false，无需额外去重标志。
+- **首轮占位**：Web 保持 `prompt[0..30]` 截断（`handler.zig:958`），CLI 保持 "New Session"——即成熟系统的 "New chat" 占位，零新增成本。
+
+> **为什么不用首轮（区别于 opencode）**：opencode 首轮触发（step===1）是因为其标题 agent 假设首条已是任务（`firstUser`）且对会话性消息给意图标题兜底。本项目的用户场景存在元操作消息（如"恢复上下文"），首轮触发会污染会话元数据。第二轮意图显著清晰后命名，命中率与标题质量都更高。参照：ChatGPT/Claude 均以"新对话"占位、等待 2-3 轮交互后由后台生成器命名。
 
 **D2 — 模型：用会话当前模型（不引入 small model）**
 
-opencode 用 `getSmallModel`（title agent 默认）。z-agent-core 的 config 无 small model 概念（`config.zig` 只有 `default_model`），引入需配置模型解析、校验、回退多套逻辑。首条用户消息通常很短，标题请求 token 成本可忽略，**用会话当前模型（`provider` 已配置）**。small model 列入后续可选（`title_model` 配置项，REMAINING Future）。
+opencode 用 `getSmallModel`（title agent 默认）。z-agent-core 的 config 无 small model 概念（`config.zig` 只有 `default_model`），引入需配置模型解析、校验、回退多套逻辑。标题请求喂前两条用户消息、token 成本可忽略，**用会话当前模型（`provider` 已配置）**。small model 列入后续可选（`title_model` 配置项，REMAINING Future）。
 
 **D3 — 子代理实现形态：`core/title.zig` + `generateTitle()`，复用 `chatCompletionStreaming`**
 
 新增 `src/core/title.zig`，与 `compactSession` 同构：
 
 ```zig
-/// LLM 生成会话标题（子代理调用）。仅当标题为默认且会话恰有 1 条真实
-/// 用户消息时有效；调用方（frontend）先做守卫判定再调用。
+/// LLM 生成会话标题（子代理调用）。仅当标题为默认且会话恰有 2 条真实
+/// 用户消息时有效（第二轮后触发，对齐 ChatGPT/Claude 延迟命名范式）；
+/// 调用方（frontend）先做守卫判定再调用。
 /// 不写消息记录、不注入系统提示词。
 /// LLM 成功 → rename 为 LLM 标题；LLM 失败/空结果 → 回退到首条用户消息的
 /// 30 字符截断（D4），保证至少有一个有意义的标题。都 flush。
@@ -86,7 +91,7 @@ pub fn ensureTitle(
 ) bool;
 ```
 
-- 请求构造：`[system: TITLE_PROMPT, user: 首条真实用户消息 content]`。
+- 请求构造：`[system: TITLE_PROMPT, user: 前两条真实用户消息的拼接]`（跳过系统提示词 index 0；`[Compaction]` 是 system 不计入）。两轮 user 消息足以覆盖"元操作 + 真实任务"模式（如"恢复上下文" + "帮我修 X"→ 标题反映 X）。
 - 内部 `provider.chatCompletionStreaming(&arena_state, io, msgs, null, null)`（无工具、无 phase_writer → 静默）。
 - 清洗结果（对齐 opencode）：剥 `<think>` 块 → 按行 split/trim → 取首个非空行 → `len > 100` 截断为 `[0..97] + "..."`。
 - 空结果/失败 → **回退静态截断标题**（见 D4），不失败回合。
@@ -97,12 +102,12 @@ pub fn ensureTitle(
 
 LLM 调用可能失败（网络/限流/模型拒绝）。原方案失败后保持 "New Session"/UUID 名——对 Web is_new 是回退（`handler.zig:958` 已设 `prompt[0..30]`），但对 CLI 是保持通用名，会话无有意义标题。
 
-**改为：LLM 失败或空结果时，回退到首条真实用户消息的 30 字符截断**（对齐现有 Web 启发式），保证 CLI 与 Web 一致地至少有一个有意义的标题：
+**改为：LLM 失败或空结果时，回退到最近一条真实用户消息的 30 字符截断**（对齐现有 Web 启发式），保证 CLI 与 Web 一致地至少有一个有意义的标题：
 
-- 回退值 = `prompt[0..min(30)]`（首条真实用户消息），与 Web is_new 现状（`handler.zig:958`）完全一致
+- 回退值 = `最近一条真实用户消息[0..min(30)]`（第二轮触发时即第二条 user 消息）——比首条更贴近用户当前意图（首条可能是"恢复上下文"等元操作）
 - 回退也做基本清洗（trim、剥换行）——对齐 `cleanTitle` 的宽松规则，避免标题夹带首尾空白/换行
 - 回退不失败回合、不重试（best-effort）
-- CLI 新会话若 LLM 失败 → 标题为截断文本，而非 "New Session"；Web is_new 本就截断 → LLM 成功则覆盖、失败则保留截断（行为不变）
+- CLI 新会话若 LLM 失败 → 标题为截断文本，而非 "New Session"；Web is_new 本就截断 → LLM 成功则覆盖、失败则更新为最近消息截断（首条截断被替换为第二条截断，更贴近当前任务）
 - 空会话（无用户消息）无 prompt 可截断 → 保持 "New Session"/UUID 名（无内容可命名，符合预期）
 
 **D5 — 配置开关：`auto_title`（默认开启，可关闭）**
@@ -136,7 +141,7 @@ Generate a brief title that would help the user find this conversation later.
 - NEVER respond to questions, just generate a title
 ```
 
-> 注：z-agent-core 首回合标题生成在 runTurn **之后**，此时 session 里已含首条 assistant 回复。取用户消息时**只看首条 `role == .user` 消息**（跳过系统提示词 index 0），不把 assistant 回复喂给 title（避免标题偏向后半段）。
+> 注：z-agent-core 第二轮回合后触发标题生成，此时 session 里已含前两轮 assistant 回复。取用户消息时**只看 `role == .user` 的前两条**（跳过系统提示词 index 0），不把 assistant 回复喂给 title（避免标题偏向后半段）。
 
 ## 触发条件（对齐 opencode ensureTitle）
 
@@ -144,14 +149,14 @@ Generate a brief title that would help the user find this conversation later.
 
 0. **开关启用**：`auto_title == true`（D5，`config.zig` 顶层布尔，默认 true）。关闭 → 直接返回，不改名。
 1. **无 parent_id**：fork 子会话已有 `(fork #N)` 命名，不触发（对齐 opencode `if (input.session.parentID) return`）。
-2. **标题为默认**：`name == "New Session"`（CLI/新会话默认）**或** `uuid.isUuid(name)`（Web 空会话）**或** `name` 等于首条用户消息的 30 字符截断（Web is_new 启发式）——判定为"尚未命名"。
-3. **恰 1 条真实用户消息**：`msgs` 中 `role == .user` 的数量 == 1（排除 index 0 系统提示词；`[Compaction]` 是 system 不计入）。
+2. **标题为默认**：`name == "New Session"`（CLI/新会话默认）**或** `uuid.isUuid(name)`（Web 空会话）**或** `name` 等于某条真实用户消息的 30 字符截断（Web is_new 启发式）——判定为"尚未命名"。
+3. **恰 2 条真实用户消息**：`msgs` 中 `role == .user` 的数量 == 2（排除 index 0 系统提示词；`[Compaction]` 是 system 不计入）。第二轮后命名（D1，对齐 ChatGPT/Claude 延迟范式）。
 
 四项全满足才调用 `ensureTitle`。任一失败 → 保留现状，静默。
 
 ## 实施步骤
 
-**步骤 1**: 新增 `src/core/title.zig`——`TITLE_PROMPT` 常量、`shouldAutoTitle(session, auto_title) bool`、`cleanTitle(raw) !?[]const u8`（剥 think/首行/截断）、`fallbackTitle(user_msg) ![]const u8`（30 字符截断 + trim/剥换行）、`ensureTitle(provider, session, allocator, io) bool`（LLM 成功 → LLM 标题；失败/空 → `fallbackTitle`；均 rename + flush）。
+**步骤 1**: 新增 `src/core/title.zig`——`TITLE_PROMPT` 常量、`shouldAutoTitle(session, auto_title) bool`、`cleanTitle(raw) !?[]const u8`（剥 think/首行/截断）、`fallbackTitle(msgs) ![]const u8`（最近一条 user 消息 30 字符截断 + trim/剥换行）、`ensureTitle(provider, session, allocator, io) bool`（LLM 成功 → LLM 标题，取前两条 user 消息；失败/空 → `fallbackTitle`；均 rename + flush）。
 **步骤 2**: `config.zig`——`Config` 增 `auto_title: bool = true`，`parseConfigContent` 读 `getBool("auto_title") orelse true`，`DEFAULT_TEMPLATE` 加注释行。
 **步骤 3**: `cli/App.zig`——`processLine`（`App.zig:399` runTurn 后）与 `singleTurn`（`App.zig:240` runTurn 后）传 `self.cfg.auto_title` 调 `shouldAutoTitle` + `ensureTitle`（在 `session.flush()` 前）。
 **步骤 4**: `web/handler.zig`——`handleSSE` 在 `runTurn` 返回后（`handler.zig:1055` `session.flush()` 前）传 `ctx.config.auto_title` 调 `shouldAutoTitle` + `ensureTitle`（复用 `agent.provider_ref` 与当前 `session`）。
@@ -167,14 +172,16 @@ node tests/frontend/run-tests.mjs
 
 | 测试场景 | 预期结果 |
 |----------|----------|
-| `auto_title = true`（默认） | 首回合后生成 LLM 标题 |
-| `auto_title = false` | 首回合不触发、不改名；Web 保持 `prompt[0..30]` 截断，CLI 保持 "New Session" |
-| CLI 首回合（`--prompt "帮我修 src/app.js 的 500 错误"`） | 回合结束后面板无新输出（静默），`/list` 显示自然语言标题（如 "App.js 500 错误排查"） |
-| CLI 第二回合 | 不再触发（消息数 >1），标题保持首回合生成值 |
-| Web 新会话首条消息 | `sse_done` 后 `loadSessions` 列表显示 LLM 标题，替换 30 字符截断 |
+| `auto_title = true`（默认） | 第二轮回合后生成 LLM 标题 |
+| `auto_title = false` | 不触发、不改名；Web 保持 `prompt[0..30]` 截断，CLI 保持 "New Session" |
+| CLI 首回合（`--prompt "恢复上下文"`） | 不触发，标题保持 "New Session"（占位） |
+| CLI 第二回合（`--prompt "帮我修 src/app.js 的 500 错误"`） | 回合结束后静默生成，`/list` 显示自然语言标题（如 "App.js 500 错误排查"）——覆盖首轮元操作 |
+| CLI 第三回合 | 不再触发（消息数 >2），标题保持第二轮生成值 |
+| Web 新会话前两条消息 | 首条不命名（保持截断），第二条后 `sse_done` → `loadSessions` 显示 LLM 标题 |
+| 第二轮为元操作（如 "继续"）+ 第三条任务 | 标题基于前两条生成（元操作+任务 → 反映任务主题） |
 | fork 子会话 | 不触发（有 parent_id，保持 `(fork #N)`） |
 | 已重命名会话（非默认标题） | 不触发 |
-| title LLM 调用失败 / 空结果 | 回合正常完成，标题回退为首条用户消息 30 字符截断（CLI 不再是 "New Session"，Web 保持截断），无报错 |
+| title LLM 调用失败 / 空结果 | 回合正常完成，标题回退为最近一条用户消息 30 字符截断（CLI 不再是 "New Session"，Web 更新截断），无报错 |
 | title 输出含 `<think>` 块 / 多行 | 剥 think、取首非空行、超 100 截断 |
 | 会话重载后标题 | `rename` 不改文件名，id/路径稳定，重载后 header name 为生成标题或回退截断 |
 | 空会话（无用户消息） | 无 prompt 可截断 → 保持 "New Session"/UUID 名，不触发 title |
@@ -203,4 +210,4 @@ node tests/frontend/run-tests.mjs
 
 - 创建：2026-08-13
 - 承接：`SESSION-SYSTEM-OPT`（一期 P1-P5）+ `SESSION-SYSTEM-OPT2`（二期），会话系统主题延续；归入 v0.2.7 周期目录（用户决策）
-- REMAINING.md 索引：F2（"无 parentID + 仅 1 条真实用户消息 + 默认标题 → LLM 生成首行"，本计划将其落地）
+- REMAINING.md 索引：F2（"无 parentID + 仅 1 条真实用户消息 + 默认标题 → LLM 生成首行"，本计划将其落地——**触发条件修订为"恰 2 条真实用户消息"（第二轮后延迟命名）**）
