@@ -926,7 +926,9 @@ function renderMd(content) {
       }
     }
     var raw = marked.parse(content || '');
-    var clean = DOMPurify.sanitize(raw);
+    // 禁用 <style>/<link> 注入：DOMPurify 默认保留 <style>，恶意/误抓 HTML 中的样式会污染全局布局
+    // （实测：curl 输出 example.com 的 <style>body{width:60vw;margin:15vh auto}</style> 被保留并全局生效）。
+    var clean = DOMPurify.sanitize(raw, { FORBID_TAGS: ['style', 'link'] });
     clean = decorateCodeBlocks(clean);
     renderMd._cache.unshift({key: content, value: clean});
     if (renderMd._cache.length > 200) renderMd._cache.pop();
@@ -945,7 +947,7 @@ function hashStr(s) {
 function renderMdBlocks(content) {
   try {
     var raw = marked.parse(content || '');
-    var clean = DOMPurify.sanitize(raw, { RETURN_DOM_FRAGMENT: true });
+    var clean = DOMPurify.sanitize(raw, { RETURN_DOM_FRAGMENT: true, FORBID_TAGS: ['style', 'link'] });
     var parts = [];
     var idx = 0;
     for (var i = 0; i < clean.children.length; i++) {
