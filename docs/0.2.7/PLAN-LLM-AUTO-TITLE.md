@@ -28,7 +28,7 @@ opencode 实现（`packages/opencode/src/session/prompt.ts:193-253` + `agent/pro
 | 触发条件 | ① 无 parentID ② 标题为默认 ③ 恰 1 条真实用户消息 | 对齐（见下方「触发条件」） |
 | 请求消息 | `[{user: "Generate a title for this conversation:\n"}, ...context 转模型消息]` + 专用 system | `[system: TITLE_PROMPT, user: 首条用户消息]` |
 | 结果清洗 | 剥 `<think>` 块 → 取首个非空行 → 截断 100 字符 | 对齐（`title.txt` 要求 ≤50 字符，代码实际截断 100） |
-| 失败语义 | `Effect.catchCause` 静默，不失败回合 | 对齐（best-effort） |
+| 失败语义 | `Effect.catchCause` 静默，不失败回合 | LLM 失败回退静态截断（见 D4），不失败回合 |
 | 写入 | `sessions.setTitle`（改标题不改 id） | `session.rename(title)` + `flush`（`rename` 不改文件名，id 稳定） |
 
 ## 子代理调用机制（核心问题）
@@ -75,8 +75,9 @@ opencode 用 `getSmallModel`（title agent 默认）。z-agent-core 的 config �
 ```zig
 /// LLM 生成会话标题（子代理调用）。仅当标题为默认且会话恰有 1 条真实
 /// 用户消息时有效；调用方（frontend）先做守卫判定再调用。
-/// 不写消息记录、不注入系统提示词；成功则 rename + flush。
-/// 返回 true 表示标题已更新。任何 LLM 错误静默返回 false（best-effort）。
+/// 不写消息记录、不注入系统提示词。
+/// LLM 成功 → rename 为 LLM 标题；LLM 失败/空结果 → 回退到首条用户消息的
+/// 30 字符截断（D4），保证至少有一个有意义的标题。都 flush。
 pub fn ensureTitle(
     provider: *provider_mod.Provider,
     session: *session_mod.Session,
@@ -88,9 +89,21 @@ pub fn ensureTitle(
 - 请求构造：`[system: TITLE_PROMPT, user: 首条真实用户消息 content]`。
 - 内部 `provider.chatCompletionStreaming(&arena_state, io, msgs, null, null)`（无工具、无 phase_writer → 静默）。
 - 清洗结果（对齐 opencode）：剥 `<think>` 块 → 按行 split/trim → 取首个非空行 → `len > 100` 截断为 `[0..97] + "..."`。
-- 空结果/失败 → 返回 false，不动会话。
+- 空结果/失败 → **回退静态截断标题**（见 D4），不失败回合。
 - 成功 → `session.rename(title)` + `session.flush()`。
 - 守卫判定函数独立（`shouldAutoTitle`，供 frontend 在 runTurn 前/后自检，避免无谓请求）。
+
+**D4 — 失败回退：LLM 失败/空结果 → 静态截断 `prompt[0..30]`（评论者建议采纳）**
+
+LLM 调用可能失败（网络/限流/模型拒绝）。原方案失败后保持 "New Session"/UUID 名——对 Web is_new 是回退（`handler.zig:958` 已设 `prompt[0..30]`），但对 CLI 是保持通用名，会话无有意义标题。
+
+**改为：LLM 失败或空结果时，回退到首条真实用户消息的 30 字符截断**（对齐现有 Web 启发式），保证 CLI 与 Web 一致地至少有一个有意义的标题：
+
+- 回退值 = `prompt[0..min(30)]`（首条真实用户消息），与 Web is_new 现状（`handler.zig:958`）完全一致
+- 回退也做基本清洗（trim、剥换行）——对齐 `cleanTitle` 的宽松规则，避免标题夹带首尾空白/换行
+- 回退不失败回合、不重试（best-effort）
+- CLI 新会话若 LLM 失败 → 标题为截断文本，而非 "New Session"；Web is_new 本就截断 → LLM 成功则覆盖、失败则保留截断（行为不变）
+- 空会话（无用户消息）无 prompt 可截断 → 保持 "New Session"/UUID 名（无内容可命名，符合预期）
 
 **TITLE_PROMPT**（对齐 opencode `title.txt` 精编版）：
 
@@ -121,7 +134,7 @@ Generate a brief title that would help the user find this conversation later.
 
 ## 实施步骤
 
-**步骤 1**: 新增 `src/core/title.zig`——`TITLE_PROMPT` 常量、`shouldAutoTitle(session) bool`、`cleanTitle(raw) !?[]const u8`（剥 think/首行/截断）、`ensureTitle(provider, session, allocator, io) bool`。
+**步骤 1**: 新增 `src/core/title.zig`——`TITLE_PROMPT` 常量、`shouldAutoTitle(session) bool`、`cleanTitle(raw) !?[]const u8`（剥 think/首行/截断）、`fallbackTitle(user_msg) ![]const u8`（30 字符截断 + trim/剥换行）、`ensureTitle(provider, session, allocator, io) bool`（LLM 成功 → LLM 标题；失败/空 → `fallbackTitle`；均 rename + flush）。
 **步骤 2**: `cli/App.zig`——`processLine`（`App.zig:399` runTurn 后）与 `singleTurn`（`App.zig:240` runTurn 后）调 `title_mod.shouldAutoTitle` + `ensureTitle`（在 `session.flush()` 前）。
 **步骤 3**: `web/handler.zig`——`handleSSE` 在 `runTurn` 返回后（`handler.zig:1055` `session.flush()` 前）调 `title_mod.shouldAutoTitle` + `ensureTitle`（复用 `agent.provider_ref` 与当前 `session`）。
 **步骤 4**: 测试——`title.zig` 单测（shouldAutoTitle 三条件/cleanTitle think 剥离与截断/ensureTitle 空 LLM 结果不动会话）；`node tests/frontend/run-tests.mjs` 回归。
@@ -141,9 +154,10 @@ node tests/frontend/run-tests.mjs
 | Web 新会话首条消息 | `sse_done` 后 `loadSessions` 列表显示 LLM 标题，替换 30 字符截断 |
 | fork 子会话 | 不触发（有 parent_id，保持 `(fork #N)`） |
 | 已重命名会话（非默认标题） | 不触发 |
-| title LLM 调用失败 / 空结果 | 回合正常完成，标题保持原样，无报错 |
+| title LLM 调用失败 / 空结果 | 回合正常完成，标题回退为首条用户消息 30 字符截断（CLI 不再是 "New Session"，Web 保持截断），无报错 |
 | title 输出含 `<think>` 块 / 多行 | 剥 think、取首非空行、超 100 截断 |
-| 会话重载后标题 | `rename` 不改文件名，id/路径稳定，重载后 header name 为生成标题 |
+| 会话重载后标题 | `rename` 不改文件名，id/路径稳定，重载后 header name 为生成标题或回退截断 |
+| 空会话（无用户消息） | 无 prompt 可截断 → 保持 "New Session"/UUID 名，不触发 title |
 
 ## 涉及文件
 
@@ -161,6 +175,7 @@ node tests/frontend/run-tests.mjs
 - **CLI 实时标题刷新**：CLI 无 TUI，标题在 `/list` 可见即可（对齐现有会话管理交互）
 - **sub-agent 注册表 / 通用子代理抽象**：只有一个消费者（title），`compactSession` 已证明直接 provider 调用足够；出现第二个子代理（如 F4 分支摘要）时再评估抽象
 - **改 Web 空会话 UUID 命名逻辑**：`handleSessionCreate` 空会话仍保持 UUID 名 + 前端显示 "New Session"，由 title 生成后自然替换
+- **失败时保持 "New Session"**：已否决——LLM 失败回退静态截断（D4），保证任何有内容会话都有有意义标题
 
 ## 备注
 
