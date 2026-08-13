@@ -99,20 +99,41 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 
 ## Next (下版候选)
 
+### 实施顺序（2026-08-13 按重要性与依赖排序）
+
+| 梯队 | 项 | 理由 |
+|------|----|------|
+| **P0 紧急**（正确性/稳定性，无依赖） | N13 → N14 → N19 → N18 | glob `**` bug；meta 悬垂 UB（先于一切 meta 相关改动）；SSE 断连无法恢复；压缩后无法继续 |
+| **P1 技术债/高价值** | F7（**先 N14**）→ N16 | JSON 模块重构（N14 修复并入 JsonWriter）；工具审批+预览（审批依赖权限基建可拆，预览独立） |
+| **P2 功能增强** | N17（依赖 N6）→ N15 → F8 → N4/N10 | 虚拟滚动先统一渲染契约；Web 待实现 5 件；title_model（subcall 基建已就绪）；响应式/skill 数组小改 |
+| **P3 长期/依赖未就绪** | N8/N9 → N6 → F3/F4/F9/F10/F11/F12 | 增量上下文（格式扩展）；契约统一（结构性）；MCP/记忆/事件总线等 |
+
+**依赖链（必须遵守）**：`N14(UB) → F7(JsonWriter)` · `N6(契约统一) → N17(虚拟滚动)` · `F2(subcall 基建,已完) → F8` · `N8 → N9(同 provider 缓存域)` · `F6 长期项 → N16 审批部分`
+
+### 待办
+
 | # | Item | Notes |
 |---|------|-------|
 | N1 | Web 会话操作 UI（more-menu Fork/Reset）+ 独立 REST 端点 | **✅ 已实施（2026-08-13，SESSION-UI-FINAL）**：`PATCH /session/:id/fork`/`/reset` 端点（共享 `handleFork`/`handleReset`，command 通道转发，空名自动 `forkTitle`）+ more-menu Fork（输入框）/Reset（confirmModal）按钮 |
 | N2 | CLI `/delete <id>` 命令 + sessions 路径常量化 + 删除运行中会话保护 | **✅ 已实施（2026-08-12，OPT2 P2）**：`/delete`（y/N 二次确认 + `resolve` 规范化当前会话保护）、`sessions_subdir` 常量（替换 3 处硬编码）、`session_ops.deleteById`、删除后 `undo_map` 级联清理。见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT2.md` P2 |
 | N3 | 侧边栏 DOM diff + 会话列表分页 + 分支树收起 + Web CRUD 冒烟测试 | **✅ 已实施（2026-08-13，SESSION-UI-FINAL）**：`loadSessions` 增量 patch（分组层 `data-group` + 组内 id 级 diff）+ 分支收起（localStorage 持久化 + 孤儿 ID 清理）+ `listPage` 分页（`?limit&after` → `{sessions, has_more}`）+ 滚动增量加载。见 `docs/0.2.7/PLAN-SESSION-UI-FINAL.md` |
-| N4 | `@container` 响应式侧边栏 | docs/DESIGN-WEB-RENDER.md 待实现 高 |
+| N4 | `@container` 响应式侧边栏 | docs/DESIGN-WEB-RENDER.md 待实现 高 — **P2** |
 | N5 | 技能覆盖缺口 3 项 (SSE filter / @embedFile 预览适配 / Web 冒烟测试) | docs/PLAN-SKILL-COVERAGE.md GAP-1~3 |
-| N6 | DOM 结构契约 + 前端回归验证脚本 (contentDiv 只装 LLM 文本、工具卡片平级挂 asst；chrome-cdp 断言 done 后 tool-card 存在) | 根因已修复 (v0.2.5 parts 重构，PLAN-STREAM-ORDER-PARTS)；剩余：DOM 回归脚本浏览器级落库（Node 测试 37 断言已在 .tmp 提供逻辑级覆盖） |
-| N7 | CLI `App.zig buildPromptString` 死代码删除（含 2 条测试） | 生产零调用（CONTEXT-ASSEMBLY F1） |
-| N8 | 增量上下文更新（chronogical system 消息 + baseline 持久化） | 对齐 opencode D1，需 DB/会话格式扩展（CONTEXT-ASSEMBLY F3） |
-| N9 | 系统 prompt 缓存 breakpoint | 依赖 provider 缓存 hint 协议（CONTEXT-ASSEMBLY F4） |
-| N10 | 多 skill 目录数组（`skills_dir = ["...", "..."]`） | 索引与 tool 按顺序查找同名 skill，前者优先（CONTEXT-ASSEMBLY F5） |
+| N6 | DOM 结构契约 + 前端回归验证脚本 (contentDiv 只装 LLM 文本、工具卡片平级挂 asst；chrome-cdp 断言 done 后 tool-card 存在) | 根因已修复 (v0.2.5 parts 重构，PLAN-STREAM-ORDER-PARTS)；剩余：DOM 回归脚本浏览器级落库（Node 测试 37 断言已在 .tmp 提供逻辑级覆盖）— **P3，N17 前置** |
+| N7 | CLI `App.zig buildPromptString` 死代码删除（含 2 条测试） | 生产零调用（CONTEXT-ASSEMBLY F1）— 低价值可随时做 |
+| N8 | 增量上下文更新（chronogical system 消息 + baseline 持久化） | 对齐 opencode D1，需 DB/会话格式扩展（CONTEXT-ASSEMBLY F3）— **P3** |
+| N9 | 系统 prompt 缓存 breakpoint | 依赖 provider 缓存 hint 协议（CONTEXT-ASSEMBLY F4）— **P3，依赖 N8** |
+| N10 | 多 skill 目录数组（`skills_dir = ["...", "..."]`） | 索引与 tool 按顺序查找同名 skill，前者优先（CONTEXT-ASSEMBLY F5）— **P2 小改** |
 | N11 | 会话系统优化（消息 ID 模型 + 按 ID 操作 + 分页/compact/history） | **一期 P1-P5 + 二期 OPT2 已实施（2026-08-12）**：一期=消息 id + 按 id 操作 + `(fork #N)` 分支（自动重答 + parent_id 分支树）+ 滚动状态机 + 三层流式防护 + `/active` + 游标分页 + `POST /compact` + undo 栈；二期=自动压缩触发（token 预算/迭代摘要/`last_compact_id`）+ CLI `/delete` + `sessions_subdir` + 删除保护/级联。见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT.md` + `PLAN-SESSION-SYSTEM-OPT2.md` |
 | N12 | 前端工具渲染优化（0.2.8 周期第二项） | **✅ 已实施（2026-08-13）**：工具卡片类型化渲染（ToolRegistry 纯函数化：webfetch url/format/mime 视图 + edit diff 高亮 + bash pre/code 幂等 + fallback 兜底）+ 服务端 ToolMeta 全字段持久化（Message.meta 挂 role=tool 消息，session serialize/parse/append + handler 透出）+ reload 路径挂载 applyToolType（meta 从 API 传入）。附带修复：system prompt 重复渲染（renderMessages 滤 system）+ 侧边栏高亮失效（增量 diff 刷 active 类）。见 `docs/0.2.8/PLAN-TOOL-CARD-TYPED.md` |
+| N13 | **glob `**` 递归匹配未实现**（0.2.6 计划搁浅，2026-08-13 审计发现）— **P0** | `docs/0.2.6/PLAN-GLOB-DOUBLE-STAR.md` 状态停在"计划中"，从未同步 REMAINING。实查 `src/tool/glob.zig:119-147` globMatch 无 `**/` 前缀处理——`**/*` 对任意文件名仍 false，与工具描述"Supports recursive search with **"矛盾。**与 JSON 模块同型被埋没（审计教训）**。修复 + 补 `**` 用例测试 |
+| N14 | **ToolMeta 借用 args Value 悬垂 UB**（0.2.0 标注延后，2026-08-13 审计升级）— **P0** | `docs/0.2.0/PLAN-OPT-3.1-TECHDEBT.md` B4：`meta.bash.command = cmd_val.string` 仍为借用（bash.zig:97/170），`registry.zig:30` `defer parsed.deinit()` 先于 meta 消费 → UB 侥幸运行。**0.2.8 meta 落盘持久化后风险升级**（借用进 JSONL）。修复：meta 字符串字段改为 owned dupe 或缩短生命周期。**F7 前置** |
+| N15 | Web 待实现 5 件（DESIGN-WEB-RENDER §待实现表，2026-08-13 审计发现）— **P2** | 全部未登记：**输入历史**（上下箭头，app.js 无 inputHistory）、**导出对话**（`GET /api/session/:id/export`，handler 无端点）、**多会话标签页**、**消息编辑**（双击 inline + PATCH /message/:index）、**输入框响应式高度**（lh/vh） |
+| N16 | 工具审批 + 文件/图片预览（PARTS"高价值三件"剩余，2026-08-13 审计发现）— **P1** | PLAN-STREAM-ORDER-PARTS.md:272-275 明确"另立计划"但从未立。审批=ApprovalModal（危险命令确认，opencode 参考，依赖权限基建可拆独立做）；预览=file.tsx/file-media 内联渲染（读文件/看图，独立） |
+| N17 | 虚拟滚动（长会话卡顿）— **P2** | PLAN-STREAM-ORDER-PARTS.md:266——全量渲染，tanstack-virtual 类方案（对齐 opencode）。**依赖 N6 渲染契约统一** |
+| N18 | context overflow 自动恢复 — **P0** | PLAN-SESSION-SYSTEM-OPT2.md:231"列入后续"——压缩后模型继续正常输出 |
+| N19 | 错误边界 + SSE 重连/心跳 — **P0** | PLAN-STREAM-ORDER-PARTS.md:278-280——一个 JS 报错整页白屏；断开只能手动刷新 |
+| N20 | **grep 正则支持**（OPT-3 采纳项未落地，2026-08-13 审计发现）— **P2** | `docs/0.2.0/PLAN-OPT-3-RENDER-TOOLS.md:415` 明确"采纳 `std.regex.Regex` 替代子串匹配"（✅ 标记）但**从未落地**——grep.zig:134/208 仍是 `std.mem.indexOf`（纯子串），LLM 写 `fn.*foo` 期望正则语义得到零匹配（OPT-3:405-409 已记录该痛点）。**根因**：计划基于旧 Zig 假设 `std.regex` 可用，**0.16 已移除该模块**（AGENTS.md 陷阱表确认）→ 替代方案未定 → 计划搁浅。**方案方向**：自实现轻量正则（项目已有 htmlToMarkdown 等手写解析先例）或评估子串+通配符增强（glob 模式复用）满足 LLM 常见需求 |
 
 ## Deferred (explicitly skipped)
 
@@ -125,20 +146,41 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | R6 | read realpath 双重解析 | Windows 符号链接少，`..` 检测已覆盖 |
 | R7 | write BOM 保留 | 边界场景 |
 | R8 | write 竞争防护 (writeIfUnchanged) | 需文件 hash 基础设施，单进程无并发 |
-| R9 | grep ripgrep 外部二进制 | `std.regex` 满足需求 |
+| R9 | grep ripgrep 外部二进制 | 增加安装复杂度（注：0.16 无 std.regex，正则方案见 N20） |
 | R10 | bash 外部目录警告 | 权限系统范式不同 |
 | R12 | 证据回执系统（Evidence Ledger） | 工具间交叉验证，需独立设计 |
 | R13 | 并行调度分区 | 后期性能优化 |
+| R14 | Web 输入框响应式高度（lh/vh）+ 多会话标签页 | DESIGN-WEB-RENDER §待实现表 |
+| R15 | bash 长输出存档（超限写 `.zagent/tool-output/`） | OPT-3.1 T2-7 |
+| R16 | 回收站/软删除（`.zagent/trash`） | SESSION-SYSTEM-OPT2"列入后续评估" |
+| R17 | 输入准入 steer/queue + RunCoordinator | SESSION-SYSTEM-OPT"后续架构演进" |
+| R18 | OPT-3 延后债 6 项（ToolCard 表解耦/toTools schema 缓存/ToolLimits/write old_lines 真实值/ToolEntry.validate 注册/render error 日志） | PLAN-OPT-3-RENDER-TOOLS.md:9-16 顶部延后表，实查均未落地 |
+| R19 | S12 跟随系统（prefers-color-scheme 三态） | PLAN-DEEPSEEK-STYLE.md:342"本期不做（后续）" |
+| R20 | MG5 分享/批量/移动分组（导出部分=N15） | PLAN-DEEPSEEK-STYLE.md |
+| R21 | R4 Prism 替换 hljs | PLAN-DEEPSEEK-STYLE.md |
+| R22 | 用户自定义命令（source 字段已预留）+ 完整 init/review/skill 命令 | PLAN-SLASH-COMMANDS.md:14,141 |
+| R23 | headless browser 方案（动态页面渲染） | PLAN-WEBFETCH.md:55"动态页面留给未来" |
+| R24 | 自动根据缓存命中率调整策略 | OPT-6"高级功能，延后" |
+| R25 | generateId 毫秒碰撞重试 | OPT-4"后续可在 generateId 加 while exists" |
+| R26 | 流式 markdown worker 化（需 renderVersion 竞态防护） | PLAN-TOOL-CARD-TYPED.md:220 后续演进 |
+| R27 | 类型契约（前后端共享 schema） | PARTS:257"裸 JSON 无校验" |
+| R28 | per-session/`/title off` 粒度开关 + handler 魔法值清理（catch 50 等） | PLAN-LLM-AUTO-TITLE.md:375,384"另行评估" |
 
 ## Future (not started, not researched)
 
 | # | Item | Notes |
 |---|------|-------|
 | F2 | **LLM 自动标题**（会话命名） | **✅ 已实施（2026-08-13）**：触发时机"恰 2 条真实用户消息后"（第二轮延迟命名，对齐 ChatGPT/Claude "新对话"占位 + 后台生成范式，规避首条元操作消息如"恢复上下文"）。`core/title.zig`（TITLE_PROMPT/STOPWORDS/KEYWORD_* 常量 + shouldAutoTitle/cleanTitle/keywordTitle/fallbackTitle/ensureTitle）+ `core/subcall.zig`（SubcallRunner 后台线程 + active/waitIdle）+ `session_write_mutex` + `renameTitle` 原子事务 + `Config.auto_title`/`title_stop_words` + CLI/Web 回合边界 spawn。LLM 失败三层降级（本地关键词/静态截断）。见 `docs/0.2.7/PLAN-LLM-AUTO-TITLE.md` |
-| F3 | MCP tool discovery | `mcp_connect` tool — LLM discovers remote tools at runtime |
-| F4 | **分支摘要注入**（branch_summary） | 借鉴 pi-repos `branch-summarization.ts`：离开分支/切回主线时 LLM 摘要注入（"用户探索了另一分支..."），告知模型分支探索内容。依赖 P4 LLM 基建（SESSION-SYSTEM-OPT P2 延后项） |
+| F3 | MCP tool discovery — **P3** | `mcp_connect` tool — LLM discovers remote tools at runtime。无基础设施，需外部协议研究 |
+| F4 | **分支摘要注入**（branch_summary）— **P3** | 借鉴 pi-repos `branch-summarization.ts`：离开分支/切回主线时 LLM 摘要注入（"用户探索了另一分支..."），告知模型分支探索内容。依赖 P4 LLM 基建（SESSION-SYSTEM-OPT P2 延后项，subcall 已就绪可评估） |
 | F5 | **会话崩溃恢复（消息层容错）** | **调研决策（2026-08-13）：不做 undo 持久化**——undo 是短暂撤销窗口（cap 20），持久化收益小、成本高（事件文件 + 重放 + compact 一致性）。崩溃恢复聚焦消息层：会话消息已 JSONL 原子落盘（`session.flush` tmp+rename），崩溃最多丢当前回合尾部；**tmp 残留清理已实施（SESSION-UI-FINAL D4，`init.zig` 启动删 `*.jsonl.tmp`）**；文件损坏容错（`load` 已跳坏行）。撤销窗口重启丢失可接受（对齐 opencode 内存 undo） |
-| F6 | **dsh 架构借鉴候选**（DeepSeek Harness 对比调研 2026-08-13，非 0.2.8 主题） | 因 dsh 突然发布而做的对比研究（文档：`C:\VibeCoding\Projects\zAgentCore\docs\deepseek-harness-vs-zagent-core.md`，仓库外不占发布周期）。低成本可采纳（按成本/收益排序）：① **request/header 请求快照**——每次请求把"系统提示词+工具 schema+请求配置"落盘为只读记录，获请求级审计/调试（无需完整事件溯源）；② **chunk 级持久化**——SSE 原始 chunk 追加进会话（trace 级即可），崩溃后 UI 可重放；③ **compaction 影子记录**——压缩时记录 shadowedRange/shadowedSeqs（哪怕仅日志），保留可审计性。长期：fail-closed 审批（unavailable=拒绝）、单调守卫（只能拒绝不能放行）、per-call 沙箱策略。详见对比文档第 10 节 |
+| F6 | **dsh 架构借鉴候选**（DeepSeek Harness 对比调研 2026-08-13，非 0.2.8 主题）— **P3 长期** | 因 dsh 突然发布而做的对比研究（文档：`C:\VibeCoding\Projects\zAgentCore\docs\deepseek-harness-vs-zagent-core.md`，仓库外不占发布周期）。低成本可采纳（按成本/收益排序）：① **request/header 请求快照**——每次请求把"系统提示词+工具 schema+请求配置"落盘为只读记录，获请求级审计/调试（无需完整事件溯源）；② **chunk 级持久化**——SSE 原始 chunk 追加进会话（trace 级即可），崩溃后 UI 可重放；③ **compaction 影子记录**——压缩时记录 shadowedRange/shadowedSeqs（哪怕仅日志），保留可审计性。长期：fail-closed 审批（unavailable=拒绝）、单调守卫（只能拒绝不能放行）、per-call 沙箱策略。详见对比文档第 10 节 |
+| F7 | **JSON 序列化统一模块**（手写拼接重构，2026-08-13 触发）— **P1，依赖 N14** | **出处**：`docs/0.2.4/PLAN-WEB-FIX-STREAMING.md` 后续待办（162 行）——"JSON 模块抽取—统一 jsonEscapeBuf/escapeJsonDynamic/手写拼 JSON 为单一 API"，**一直未排期未落地**（2026-08-13 被 LRN-20260813-019 重新触发）。**现状**：165 处手写 JSON 拼接（session.zig 127 + provider.zig 38 + handler.zig 若干），3 处 ToolMeta 序列化器各写各的（session/handler/sse）。**触发**：appendMetaJson 共享函数尾假设"末字段为字符串"→ bash 布尔结尾多输出引号 → Web API 非法 JSON → 前端解析失败（曾被误判为 429 限流）。**同源未做项**：`escapeJsonDynamic` 补充完整控制字符转义（NUL、ESC 等，PLAN-WEB-FIX-STREAMING 164 行）。**方案方向**：轻量 JSON 写出器（`JsonWriter`：appendString/appendInt/appendBool/appendRaw，自动转义含控制字符 + 闭合管理，杜绝共享尾部假设）+ 每变体序列化自平衡；parse 侧已有 std.json。**约束**：不引入依赖（零外部依赖原则）；重构范围仅序列化路径，不动 JSONL 格式；**必须**加全变体 roundtrip 测试（parse→serialize→parse）。列为独立重构计划，评估成本后定周期 |
+| F8 | **small model（`title_model` 配置）**（登记声明落空，2026-08-13 审计发现）— **P2** | PLAN-LLM-AUTO-TITLE.md:86 自称"列入 REMAINING Future"但实际无条目。LLM 自动标题/压缩用低成本小模型（对齐 opencode），避免大模型开销。subcall 基建已就绪 |
+| F9 | **ToolEntry `prompt_hint` 愿景**（行为指导注入系统提示词）— **P3** | CORE-FRONTEND.md:550-569——validate 有字段但 9 工具零注册，架构愿景未实现未登记 |
+| F10 | **记忆系统 remember.zig/recall.zig 工具** — **P3** | CORE-FRONTEND.md:540-541 planned 工具——src/tool/ 无此二文件，REMAINING 无条目。注意：已有外部 memory-manager 技能（.opencode/skills），本项目内建 vs 外部技能需评估 |
+| F11 | **事件总线 EventBus** — **P3** | PLAN-LOGGING-SYSTEM.md:194"后续 UI/日志订阅扩展时再评估"+ OPT-5 流式事件系统同源未闭合 |
+| F12 | **千问自定义分组**（SB5，登记声明落空）— **P3** | PLAN-DEEPSEEK-STYLE.md:141 自称"记 REMAINING"实际未记。模型分组/说明（M5）同源 |
 
 ## Architecture wishlist
 
