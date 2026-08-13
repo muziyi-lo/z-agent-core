@@ -88,6 +88,16 @@
 
 **边界**：孤儿分支（父已删）提升到顶层（现有逻辑 `app.js:324-334` 保留）；收起父时其下所有深度后代一并收起（`renderChildren` 递归判断）。
 
+**收起状态健壮性（评论者确认）**：
+
+| 场景 | 行为 | 处理 |
+|------|------|------|
+| 父会话删除，其收起状态残留 | 子会话提升顶层（无收起钮）；`isCollapsed(父id)` 找不到 DOM 节点 | 静默忽略，无影响（评论者确认） |
+| 收起状态数组含已删会话 ID | `collapsed` 中孤儿 ID 永不清除，长期累积脏数据 | **loadSessions 时清理**：diff 完成后 `collapsed` 过滤掉不在 `knownIds` 中的 ID，写回 localStorage（对齐 pinned 的清理思路——`getPinnedIds` 无清理但 pinned 数量少；collapsed 随删除累积更多） |
+| 子会话提升后自身是顶层 | 不再有收起钮（`data-has-children` 判断 childrenMap 为空） | 子会话原收起状态若存在则清理（同上） |
+
+> **评论者边界确认**：父删后残留的收起状态**不会**影响正确性——`isCollapsed` 找不到节点即忽略。但为防 `collapsed` 数组长期增长，在 `loadSessions` 的 diff 完成后按 `knownIds` 过滤孤儿 ID 写回（一次清理，与 diff 同生命周期，零额外成本）。
+
 ### UI 设计（新增，对齐现有视觉语言）
 
 > 所有样式沿用现有 CSS 变量（`--bg-layer-01/02/03`、`--border-base`、`--accent-base`、`--text-*`），不新增色板。图标用现有 `biIcon` helper（app.js:104）或 UTF-8 符号。
@@ -276,6 +286,7 @@ node ..\.opencode\skills\zig-dev\scripts\check-catch-silent.mjs . --audit
 | 收起嵌套分支 | 收起 2 代父 → 所有后代隐藏；展开父 → 后代按各自收起状态恢复 |
 | 侧边栏会话多 | 只更新变化的条目，无全量闪烁 |
 | 孤儿分支（父已删） | 提升顶层（既有逻辑），收起状态不受影响 |
+| **收起状态孤儿 ID 清理** | 删除会话后，`collapsed` 中该 ID 在下次 loadSessions 被过滤；`isCollapsed` 对不存在节点静默忽略 |
 | 会话列表 >50 | 首屏 50 + 滚动到底显示 "Loading more…" spinner → 加载更早，`has_more` 正确 |
 | 无更多会话 | 显示一次 "No more sessions" 后移除 |
 | 无分页参数 `GET /api/session` | 全量返回（兼容） |
