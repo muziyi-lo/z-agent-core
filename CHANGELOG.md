@@ -50,6 +50,14 @@
   - **写回原子性**：`session_write_mutex`（Io.Mutex）串行化 flush/removeMessage/renameTitle；`renameTitle` 单层持锁原子事务（锁内 load 最新 → rename → flushLocked，杜绝并发覆盖丢消息）
   - **配置**：`auto_title`（顶层布尔，默认 true 可关闭）+ `title_stop_words`（追加停用词，类型错误告警降级）
   - **常量提取**：`TITLE_*`/`KEYWORD_*`/`STOPWORDS` pub const；`handler.zig:958` 与 L3 回退共享 `TITLE_PREFIX_LEN`
+- **会话系统收尾（`docs/0.2.7/PLAN-SESSION-UI-FINAL.md`，2026-08-13 追加实施）**:
+  - **Fork/Reset 双通道**：`PATCH /session/:id/fork`/`/reset` REST 端点（共享 `handleFork`/`handleReset`，command 通道转发，空名自动 `forkTitle` 生成 `(fork #N)`）+ more-menu Fork（输入框）/Reset（confirmModal，消息清空系统提示词保留）
+  - **侧边栏 DOM diff**：`loadSessions` 增量 patch——分组层（`data-group` header 增删移）+ 组内 id 级 diff，消除全量重建闪烁
+  - **分支树收起**：父会话 `▸/▾` 折叠钮 + localStorage 持久化 + 孤儿 ID 清理
+  - **会话列表分页**：`session.listPage`（不动既有 `list`）+ `GET /session?limit&after` → `{sessions, has_more}` + 滚动增量加载
+  - **tmp 残留清理（崩溃恢复）**：`init.zig` 启动删 `*.jsonl.tmp`
+  - **bash 超时**：`timeout` 参数生效（clamp 1-3600，未传保持阻塞），超时 kill + `"Command timed out after Ns."` + `meta.timed_out=true`，中断优先
+  - **日志补全**：session CRUD `session_*` 事件（fork/reset/delete/rename/truncate/branch/undo/list_paged/tmp_cleanup）
 
 ### Fixed
 - **用户消息 delete 索引漂移**：按钮 index 用 DOM 计数，与服务端消息数组下标漂移（工具回合 N+2 条 vs N+1 元素）→ 删错/静默 400；改为按消息 id 操作根治

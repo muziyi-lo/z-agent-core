@@ -103,9 +103,9 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 
 | # | Item | Notes |
 |---|------|-------|
-| N1 | Web 会话操作 UI（more-menu 增 Fork/Reset 按钮）+ 独立 REST 端点 | 承自 v0.2.3 Known Gaps。**调研（2026-08-13）**：fork/reset 已有 command 通道（`handleCommandExec:564-577`）+ slash 输入可用，但前端 `slashLocal`（app.js:1149）无显式按钮、无独立 REST 端点。真正价值 = more-menu 加 Fork/Reset（用户可见功能）+ `PATCH /session/:id/fork`/`reset`（API 一致性，对齐 `/active`）。**纯补 REST 端点价值低（重复实现），需与前端按钮一起做** |
+| N1 | Web 会话操作 UI（more-menu Fork/Reset）+ 独立 REST 端点 | **✅ 已实施（2026-08-13，SESSION-UI-FINAL）**：`PATCH /session/:id/fork`/`/reset` 端点（共享 `handleFork`/`handleReset`，command 通道转发，空名自动 `forkTitle`）+ more-menu Fork（输入框）/Reset（confirmModal）按钮 |
 | N2 | CLI `/delete <id>` 命令 + sessions 路径常量化 + 删除运行中会话保护 | **✅ 已实施（2026-08-12，OPT2 P2）**：`/delete`（y/N 二次确认 + `resolve` 规范化当前会话保护）、`sessions_subdir` 常量（替换 3 处硬编码）、`session_ops.deleteById`、删除后 `undo_map` 级联清理。见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT2.md` P2 |
-| N3 | 侧边栏 DOM diff + 会话列表分页 + **分支树收起** + Web CRUD 冒烟测试 | docs/PLAN-FUTURE-SESSION-IMPROVEMENTS.md P2。**调研补充（2026-08-13）**：现状 `loadSessions` 全量重建（app.js:311-338）无收起、`renderChildren` 递归全展开。DOM diff 必须同时实现**父节点收起 + localStorage 持久化展开状态**（会话多时分支树全展开占空间；收起状态要跨刷新保持）。分页游标基于 id（消息已 id 化） |
+| N3 | 侧边栏 DOM diff + 会话列表分页 + 分支树收起 + Web CRUD 冒烟测试 | **✅ 已实施（2026-08-13，SESSION-UI-FINAL）**：`loadSessions` 增量 patch（分组层 `data-group` + 组内 id 级 diff）+ 分支收起（localStorage 持久化 + 孤儿 ID 清理）+ `listPage` 分页（`?limit&after` → `{sessions, has_more}`）+ 滚动增量加载。见 `docs/0.2.7/PLAN-SESSION-UI-FINAL.md` |
 | N4 | `@container` 响应式侧边栏 | docs/DESIGN-WEB-RENDER.md 待实现 高 |
 | N5 | 技能覆盖缺口 3 项 (SSE filter / @embedFile 预览适配 / Web 冒烟测试) | docs/PLAN-SKILL-COVERAGE.md GAP-1~3 |
 | N6 | DOM 结构契约 + 前端回归验证脚本 (contentDiv 只装 LLM 文本、工具卡片平级挂 asst；chrome-cdp 断言 done 后 tool-card 存在) | 根因已修复 (v0.2.5 parts 重构，PLAN-STREAM-ORDER-PARTS)；剩余：DOM 回归脚本浏览器级落库（Node 测试 37 断言已在 .tmp 提供逻辑级覆盖） |
@@ -138,7 +138,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | F2 | **LLM 自动标题**（会话命名） | **✅ 已实施（2026-08-13）**：触发时机"恰 2 条真实用户消息后"（第二轮延迟命名，对齐 ChatGPT/Claude "新对话"占位 + 后台生成范式，规避首条元操作消息如"恢复上下文"）。`core/title.zig`（TITLE_PROMPT/STOPWORDS/KEYWORD_* 常量 + shouldAutoTitle/cleanTitle/keywordTitle/fallbackTitle/ensureTitle）+ `core/subcall.zig`（SubcallRunner 后台线程 + active/waitIdle）+ `session_write_mutex` + `renameTitle` 原子事务 + `Config.auto_title`/`title_stop_words` + CLI/Web 回合边界 spawn。LLM 失败三层降级（本地关键词/静态截断）。见 `docs/0.2.7/PLAN-LLM-AUTO-TITLE.md` |
 | F3 | MCP tool discovery | `mcp_connect` tool — LLM discovers remote tools at runtime |
 | F4 | **分支摘要注入**（branch_summary） | 借鉴 pi-repos `branch-summarization.ts`：离开分支/切回主线时 LLM 摘要注入（"用户探索了另一分支..."），告知模型分支探索内容。依赖 P4 LLM 基建（SESSION-SYSTEM-OPT P2 延后项） |
-| F5 | **会话崩溃恢复（消息层容错）** | **调研决策（2026-08-13）：不做 undo 持久化**——undo 是短暂撤销窗口（cap 20），持久化收益小、成本高（事件文件 + 重放 + compact 一致性）。崩溃恢复聚焦消息层：会话消息已 JSONL 原子落盘（`session.flush` tmp+rename），崩溃最多丢当前回合尾部；待补 = `.tmp` 残留清理（崩溃后 `{path}.tmp` 复用）+ 文件损坏容错（`load` 已跳坏行）。撤销窗口重启丢失可接受（对齐 opencode 内存 undo） |
+| F5 | **会话崩溃恢复（消息层容错）** | **调研决策（2026-08-13）：不做 undo 持久化**——undo 是短暂撤销窗口（cap 20），持久化收益小、成本高（事件文件 + 重放 + compact 一致性）。崩溃恢复聚焦消息层：会话消息已 JSONL 原子落盘（`session.flush` tmp+rename），崩溃最多丢当前回合尾部；**tmp 残留清理已实施（SESSION-UI-FINAL D4，`init.zig` 启动删 `*.jsonl.tmp`）**；文件损坏容错（`load` 已跳坏行）。撤销窗口重启丢失可接受（对齐 opencode 内存 undo） |
 
 ## Architecture wishlist
 
