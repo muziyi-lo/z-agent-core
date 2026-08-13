@@ -141,12 +141,34 @@
 
 > **为什么 tmp 残留值得清**：崩溃是真实场景（本次 `std.http` 裸 POST panic 已演示），残留 tmp 占用磁盘 + 混淆目录。删除 tmp 即可恢复（tmp 与正式文件原子替换，不删也不影响正确性，但堆积）。
 
+### D5 — 日志覆盖（新增，对齐 LOGGING-SYSTEM 宗旨）
+
+**现状审查（2026-08-13）**：session CRUD 操作日志覆盖稀疏——只有 `session_list`（handler.zig:272）、`session_new`（handler.zig:967）、`sse_*` 流式序列。**delete/rename/truncate/branch/undo/fork/reset 均无 `log.*` 调用**。这与 LOGGING-SYSTEM "补关键路径日志" 宗旨（可定位到功能阶段）不符。
+
+**方案**：本计划新增操作 + 既有 CRUD 顺带补日志，事件名统一 `session_*` 前缀（对齐现有 `session_list`/`session_new`）：
+
+| 操作 | 事件名 | 级别 | 字段 |
+|------|--------|------|------|
+| fork | `session_fork` | biz_info | session_id, fork_id, name |
+| reset | `session_reset` | biz_info | session_id, msgs_cleared |
+| 删除（既有补） | `session_delete` | biz_info | session_id |
+| 重命名（既有补） | `session_rename` | biz_info | session_id, old→new |
+| 截断（既有补） | `session_truncate` | biz_info | session_id, kept |
+| 分支（既有补） | `session_branch` | biz_info | session_id, fork_id |
+| undo（既有补） | `session_undo` | biz_info | session_id, kind |
+| 列表分页（D3） | `session_list_paged` | req_info | dir, limit, after, has_more |
+| tmp 清理（D4） | `session_tmp_cleanup` | dbg | removed_count |
+
+**日志落点**：`handler.zig` 各 handler 函数内（成功路径 `biz_info`，错误路径已由 `err_mod` 响应；不新增错误日志避免重复）。`tmp 清理` 在 `init.zig`（`log.dbg`，级别低——正常启动无残留时应静默，有残留才可见）。
+
+> **为什么这是本计划范围**：session CRUD 日志是会话系统收尾的一部分（LOGGING-SYSTEM P1 只覆盖了 SSE/agent/provider/compact，会话管理操作是遗漏领域）。本计划触碰这些 handler（抽 fork/reset 共享函数、加 list 分页），顺带补齐零增量成本。
+
 ## 实施
 
 ### 步骤 1: fork/reset REST 端点 + 共享逻辑
 
 **文件**: `src/frontends/web/handler.zig`
-**改动**: 抽 `handleFork`/`handleReset`（从 `handleCommandExec:564-577` 提取），新增 PATCH 路由；`handleCommandExec` 转发
+**改动**: 抽 `handleFork`/`handleReset`（从 `handleCommandExec:564-577` 提取），新增 PATCH 路由；`handleCommandExec` 转发；**补日志**（D5）：fork → `session_fork`、reset → `session_reset`；顺带补 delete/rename/truncate/branch/undo 的 `session_*` 事件
 **关键代码**:
 
 ```zig
@@ -189,13 +211,13 @@ function toggleCollapse(id) {
 ### 步骤 4: 会话列表分页
 
 **文件**: `src/core/session.zig` + `web/handler.zig` + `web/app.js`
-**改动**: `list` 增 limit/after；`GET /api/session` 增分页参数与响应；前端滚动增量加载
+**改动**: `list` 增 limit/after；`GET /api/session` 增分页参数与响应；前端滚动增量加载；**日志**（D5）：`session_list_paged` 记录 limit/after/has_more
 **注意**: 兼容无分页参数（全量返回，保持 `N2` 兼容）；`has_more` 判断；追加加载时保持收起状态
 
 ### 步骤 5: tmp 残留清理
 
 **文件**: `src/frontends/init.zig`
-**改动**: `init` 确定 `sessions_dir` 后扫描删除 `*.jsonl.tmp`
+**改动**: `init` 确定 `sessions_dir` 后扫描删除 `*.jsonl.tmp`；**日志**（D5）：清理 `session_tmp_cleanup` 记录 removed_count（`log.dbg`，无残留时静默）
 **关键代码**:
 
 ```zig
@@ -213,8 +235,8 @@ while (it.next(io) catch null) |entry| {
 ### 步骤 6: 测试
 
 **文件**: `src/core/session.zig`、`src/frontends/web/handler.zig`、`tests/frontend/`
-**改动**: `list` 分页单测（limit/after/has_more）；`handleFork`/`handleReset` 单测（复用 handler 测试模式）；`tmp 清理` 单测（造 `.jsonl.tmp` → init → 消失）；前端 Node 测试适配 `loadSessions` 新逻辑（若测试引用旧全量重建行为需更新）
-**注意**: handler 测试用 `testing.io`（无子进程）——fork/reset 无 LLM 调用，可测
+**改动**: `list` 分页单测（limit/after/has_more）；`handleFork`/`handleReset` 单测（复用 handler 测试模式）；`tmp 清理` 单测（造 `.jsonl.tmp` → init → 消失）；前端 Node 测试适配 `loadSessions` 新逻辑（若测试引用旧全量重建行为需更新）；**日志验证**（D5：fork/reset/delete/rename/truncate/branch/undo 成功路径打 `session_*` 事件，grep 日志确认）
+**注意**: handler 测试用 `testing.io`（无子进程）——fork/reset 无 LLM 调用，可测；日志验证在 e2e（真实进程）下做，单测不依赖日志
 
 ## 验证
 
@@ -242,14 +264,15 @@ node ..\.opencode\skills\zig-dev\scripts\check-catch-silent.mjs . --audit
 | 无分页参数 `GET /api/session` | 全量返回（兼容） |
 | 崩溃后残留 `.jsonl.tmp` | 启动清理删除；无 tmp 时启动正常 |
 | fork 命名冲突 | `error.SessionAlreadyExists` → 400 提示 |
-| 分页与收起共存 | 追加加载更早会话时，已收起父的子树保持收起 |
+| **日志覆盖（D5）** | fork/reset/delete/rename/truncate/branch/undo 成功路径均打 `session_*` 事件；`session_list_paged` 分页、`session_tmp_cleanup` 清理有日志 |
+| **分页与收起共存** | 追加加载更早会话时，已收起父的子树保持收起 |
 | reduced-motion | 收起/加载无动画（全局已处理） |
 
 ## 波及
 
 | 文件 | 改动 | 破坏性? |
 |------|------|----------|
-| `src/frontends/web/handler.zig` | fork/reset PATCH 端点 + 抽共享函数 | 否（command 保留） |
+| `src/frontends/web/handler.zig` | fork/reset PATCH 端点 + 抽共享函数 + **补 session CRUD 日志（D5）** | 否（command 保留） |
 | `src/frontends/web/app.js` | more-menu 按钮 + loadSessions diff + 收起 + 分页加载 | 是（loadSessions 重写，前端测试需适配） |
 | `src/frontends/web/app.css` | `.collapse-btn` / `.session.collapsed` / `.sessions-loading` 样式 | 否 |
 | `src/core/session.zig` | `list` 增 limit/after | 否（默认全量） |
