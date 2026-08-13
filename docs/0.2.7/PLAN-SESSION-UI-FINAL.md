@@ -62,7 +62,7 @@
 
 **方案**：`loadSessions` 改为**增量 patch**，核心是 `sessionKey`（id）+ 收起状态：
 
-- **DOM 定位**：会话条目 `div.session` 加 `data-session-id` 属性（`app.js:344` 追加），diff 时按 id 查找既有节点
+- **DOM 定位**：会话条目 `div.session` 加 `data-session-id` 属性（`app.js:344` div.className 处追加），diff 时按 id 查找既有节点；**更新文本用 `div.querySelector('.name')`/`.meta` 改 innerText**（`renderItem` 用 innerHTML 构建，`.name`/`.meta` 子元素可定位）
 - **增量策略**：
   - 新增：`list` 有但 DOM 无 → `renderItem` 创建并插入正确分组/位置
   - 删除：DOM 有但 `list` 无 → `remove()`
@@ -155,9 +155,11 @@
 **现状**：`session.zig:764 list()` 全量返回；`GET /api/session`（handler.zig:270 附近）无分页。
 
 **方案**：
-- `session.zig list()` 增可选参数：`list(allocator, io, session_dir, limit: ?usize, after_ts: ?i64)` → 返回最近 `limit` 条且 `timestamp < after_ts` 的会话
-- `GET /api/session?limit=N&after=<ts>` → 分页响应 `{sessions: [...], has_more}`
+- **新增 `session.zig` 独立函数 `listPage`**（**不动既有 `list`**——`list` 有 5 个调用点：`session_ops.zig:66`、`init.zig:117`、`App.zig:609`、`handler.zig:274/308`，改签名破坏全部；`listPage` 复用 `list` 内部逻辑加 limit/after 过滤）：
+  - `listPage(allocator, io, session_dir, limit: usize, after_ts: ?i64) ![]SessionInfo` → 返回最近 `limit` 条且 `timestamp < after_ts` 的会话
+- `GET /api/session?limit=N&after=<ts>` → 分页响应 `{sessions: [...], has_more}`（handler 调 `listPage`；`has_more` = listPage 返回条数 == limit 且仍有更早）
 - 前端 `loadSessions` 首次加载 `limit=50`，滚动到侧边栏底部附近 → 增量加载更早会话（`after` = 当前最早 timestamp）
+- **既有 `list` 保持**：`GET /api/session` 无参数时走 `list` 全量（兼容），有 limit/after 走 `listPage`
 
 > **游标用 timestamp 而非 id**：会话列表按 `timestamp desc` 排序（list 现状），分页游标天然是 timestamp；消息分页才用 id（已 id 化）。侧边栏加载用**追加**而非全量——与 D2 的增量 patch 兼容（追加 = 纯新增节点）。
 
@@ -209,32 +211,54 @@
 | **超时** | **无限阻塞** | **`Command timed out after Ns.` + `meta.timed_out=true`** | ✅ 超时（新增） |
 
 **实现**：
-- `bash.zig` 读 `timeout` 参数（秒，默认如 120）：`const timeout_opt = Io.Timeout{ .duration = Io.Clock.Duration.fromSeconds(secs) };`
-- `std.process.run` 传 `.timeout = timeout_opt`；超时 → `run` 返回 `error.Timeout`（`Io.Timeout.Error = error{Timeout}`，Io.zig:1137）→ catch 分支返回 `"Command timed out after Ns."`
+- `bash.zig` 读 `timeout` 参数（秒）：**未传 → `.none`（保持现状无限阻塞，不破坏既有长命令行为）**；传了 → clamp 到 `[1, 3600]`（防 `@intCast` 溢出）：
+  ```zig
+  const timeout_opt: Io.Timeout = if (args.object.get("timeout")) |tv| blk: {
+      if (tv == .integer and tv.integer > 0) {
+          const secs: u32 = @intCast(@min(tv.integer, 3600));
+          // Clock.Duration = { raw: Io.Duration, clock: Io.Clock }（Io.zig:2398 构造参考）
+          break :blk Io.Timeout{ .duration = .{
+              .raw = Io.Duration.fromSeconds(secs),
+              .clock = Io.Clock.real,
+          } };
+      }
+      break :blk .none;
+  } else .none;
+  ```
+- `std.process.run` 传 `.timeout = timeout_opt`；超时 → `run` 返回 `error.Timeout`（`AwaitConcurrentError` 含 `Timeout.Error`，Io.zig:582）→ catch 分支返回 `"Command timed out after Ns."`
 - `meta.timed_out = true`（替换当前硬编码 false，bash.zig:139）
-- 中断路径保留（`signal.isInterrupted()` 分支，bash.zig:94-96）；确认 signal.reset 时机——中断时先判断超时还是中断，避免超时路径吞掉中断状态
+- 中断路径保留（`signal.isInterrupted()` 分支，bash.zig:94-96）——**中断优先**：先查 `signal.isInterrupted()` 返回 aborted，再查超时；用户意图 > 自动超时
 
-**API 验证（G7）**：`Io.Timeout` union（Io.zig:1132，`.none`/`.duration`/`.deadline`）+ `Clock.Duration.fromSeconds`（Io.zig:986）+ `RunOptions.timeout`（process.zig:485）+ `error.Timeout`（Io.zig:1137）——全部已确认存在于 Zig 0.16 stdlib。
+**API 验证（G7）**：`Io.Timeout` union（Io.zig:1132，`.none`/`.duration: Clock.Duration`/`.deadline`）+ **`Clock.Duration` 构造 `.{ .raw = Io.Duration, .clock }`**（Io.zig:2398 参考，**非 `fromSeconds`——那是顶层 `Io.Duration` 方法** Io.zig:986）+ `Io.Duration.fromSeconds`（Io.zig:986）+ `RunOptions.timeout`（process.zig:485）+ `AwaitConcurrentError` 含 `Timeout.Error`（Io.zig:582/1137）——全部已确认存在。
 
 ## 实施
 
 ### 步骤 1: fork/reset REST 端点 + 共享逻辑
 
 **文件**: `src/frontends/web/handler.zig`
-**改动**: 抽 `handleFork`/`handleReset`（从 `handleCommandExec:564-577` 提取），新增 PATCH 路由；`handleCommandExec` 转发；**补日志**（D5）：fork → `session_fork`、reset → `session_reset`（`msgs_cleared`）；顺带补 delete/rename/truncate/branch/undo 的 `session_*` 事件；**reset 语义**：`session_ops.reset` 保留系统提示词（`session_ops.zig:131`），实现直接复用不改
+**改动**: 抽 `handleFork`/`handleReset`（从 `handleCommandExec:564-577` 提取）；**扩展现有 PATCH 分支**（`handler.zig:117-124` 已存在，目前只处理裸 id → rename）：加 `/fork`、`/reset` 子路径解析（对齐 POST 分支 handler.zig:104-115 的 sub-path 模式）；`handleCommandExec` 转发；**补日志**（D5）：fork → `session_fork`、reset → `session_reset`（`msgs_cleared`）；顺带补 delete/rename/truncate/branch/undo 的 `session_*` 事件；**reset 语义**：`session_ops.reset` 保留系统提示词（`session_ops.zig:131`），实现直接复用不改
 **关键代码**:
 
 ```zig
-// handleRequest PATCH 分支（handler.zig:113 附近）
+// handleRequest PATCH 分支（handler.zig:117 现有，扩展子路径）
 } else if (method == .PATCH) {
     if (std.mem.startsWith(u8, path, "/api/session/")) {
         const rest = path["/api/session/".len..];
-        // parse id + sub = "fork" | "reset"
+        if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
+            const id = rest[0..slash];
+            const sub = rest[slash + 1 ..];
+            if (std.mem.eql(u8, sub, "fork")) return handleFork(ctx, request, id, a);
+            if (std.mem.eql(u8, sub, "reset")) return handleReset(ctx, request, id, a);
+        } else {
+            // 无子路径 = rename（现有逻辑）
+            const id = if (std.mem.indexOfScalar(u8, rest, '?')) |qm| rest[0..qm] else rest;
+            return handleSessionRename(ctx, request, id, a);
+        }
     }
 }
 ```
 
-**注意**: PATCH 路由需处理 `/api/session/:id/fork` 与 `/reset` 两个 sub；守卫 `isSessionStreaming` 一致；fork 返回 session_id 供前端切换
+**注意**: PATCH 分支需先解析 sub-path（fork/reset），无 sub-path 才走 rename；守卫 `isSessionStreaming` 一致；fork 返回 session_id 供前端切换
 
 ### 步骤 2: 前端 more-menu Fork/Reset 按钮
 
@@ -264,8 +288,8 @@ function toggleCollapse(id) {
 ### 步骤 4: 会话列表分页
 
 **文件**: `src/core/session.zig` + `web/handler.zig` + `web/app.js`
-**改动**: `list` 增 limit/after；`GET /api/session` 增分页参数与响应；前端滚动增量加载；**日志**（D5）：`session_list_paged` 记录 limit/after/has_more
-**注意**: 兼容无分页参数（全量返回，保持 `N2` 兼容）；`has_more` 判断；追加加载时保持收起状态
+**改动**: 新增 `session.zig listPage`（复用 list 内部逻辑 + limit/after 过滤，**不动既有 list**）；`GET /api/session` 有 limit/after 时走 listPage + `has_more`；前端滚动增量加载；**日志**（D5）：`session_list_paged` 记录 limit/after/has_more
+**注意**: 无分页参数 → 走既有 `list` 全量（兼容，5 个既有调用点不变）；`has_more` 判断（返回 == limit 且仍有更早）；追加加载时保持收起状态
 
 ### 步骤 5: tmp 残留清理
 
@@ -345,8 +369,10 @@ node ..\.opencode\skills\zig-dev\scripts\check-catch-silent.mjs . --audit
 | **分组消失** | 会话全删/移组后，空组 header 被移除 |
 | **追加会话落组正确** | 更早会话插入对应组 timestamp desc 位置，非"最近节点后" |
 | **bash 阻塞命令超时（D6）** | `timeout: 2` + `sleep 10` → 约 2s 返回 `"Command timed out after 2s."`，`meta.timed_out=true`，命令被 kill |
+| **bash 未传 timeout** | 保持现状无限阻塞（`.none`），既有长命令行为不变 |
+| **bash timeout 超大值** | clamp 到 3600s（`@intCast` 无溢出 panic） |
 | **bash 正常命令** | 完成返回，`timed_out=false`，行为不变 |
-| **bash 中断** | Ctrl+C → `"Command aborted by user."`（既有），超时路径不吞中断状态 |
+| **bash 中断** | Ctrl+C → `"Command aborted by user."`（既有），中断优先于超时 |
 | reduced-motion | 收起/加载无动画（全局已处理） |
 
 ## 波及
@@ -356,7 +382,7 @@ node ..\.opencode\skills\zig-dev\scripts\check-catch-silent.mjs . --audit
 | `src/frontends/web/handler.zig` | fork/reset PATCH 端点 + 抽共享函数 + **补 session CRUD 日志（D5）** | 否（command 保留） |
 | `src/frontends/web/app.js` | more-menu 按钮 + loadSessions diff + 收起 + 分页加载 | 是（loadSessions 重写，前端测试需适配） |
 | `src/frontends/web/app.css` | `.collapse-btn` / `.session.collapsed` / `.sessions-loading` 样式 | 否 |
-| `src/core/session.zig` | `list` 增 limit/after | 否（默认全量） |
+| `src/core/session.zig` | 新增 `listPage`（limit/after，复用 list 内部逻辑；**既有 `list` 不动**，5 调用点不受影响） | 否 |
 | `src/tool/bash.zig` | bash 超时（D6）：timeout 参数生效 + timed_out 上报 | 否（默认无超时变更，仅新增能力） |
 | `src/frontends/init.zig` | tmp 残留清理 | 否 |
 | `tests/frontend/*` | loadSessions 相关测试适配 | 是 |
