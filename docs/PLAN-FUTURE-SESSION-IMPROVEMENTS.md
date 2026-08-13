@@ -34,11 +34,18 @@
 
 **方案**：基于 `s.id` 做局部 patch——新增/删除/更新条目，保留未变动的 DOM 节点。
 
+**调研补充（2026-08-13）**：DOM diff 必须同时实现**分支树收起**：
+- 现状 `renderChildren`（app.js:408）递归全展开，会话多时父节点下挂 N 个子分支占满侧边栏
+- 父节点加折叠按钮（▸/▾），**收起状态按 session id 存 localStorage**（跨刷新保持）
+- DOM diff 需对比"收起状态是否变化"——只重渲染受影响子树，避免每次 loadSessions 重建整棵树
+
 ### P2: 会话列表分页
 
 **现状**：`GET /api/session` 全量返回。会话数 >100 时带宽浪费。
 
 **方案**：核心层 `list(offset, limit)` → 游标分页。Web API 增加 `?after=<timestamp>&limit=20` 参数。
+
+**调研补充（2026-08-13）**：消息已 id 化（`Message.id: u64` 单调递增），分页游标基于 id 而非 timestamp 更稳（id 永不复用、跨操作稳定）；会话列表游标用 timestamp 排序（list 已按 timestamp desc）。侧边栏增量加载需与 DOM diff 配合（追加而非全量重建）。
 
 ### P2: 冒烟测试
 
