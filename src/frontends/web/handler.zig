@@ -1322,6 +1322,10 @@ fn formatMessageJson(allocator: std.mem.Allocator, buf: *AlignedU8, msg: types.M
         try buf.appendSlice(allocator, s);
     }
 
+    if (msg.meta) |meta| {
+        try appendMetaJson(allocator, buf, meta);
+    }
+
     if (msg.model) |m| {
         if (m.len > 0) {
             try buf.appendSlice(allocator, ",\"model\":\"");
@@ -1333,8 +1337,169 @@ fn formatMessageJson(allocator: std.mem.Allocator, buf: *AlignedU8, msg: types.M
     try buf.appendSlice(allocator, "}");
 }
 
-fn escapeJsonDynamic(allocator: std.mem.Allocator, src: []const u8) ![]const u8 {
-    var result: AlignedU8 = .empty;
+/// Serialize ToolMeta for the client API as a flat "meta" object (same JSON
+/// shape as session.zig appendToolMetaJson). Duplicated by design: session
+/// persists to JSONL, this renders to the Web API — keep the field sets in
+/// sync when adding a ToolMeta variant (session.zig + handler.zig + sse.zig).
+fn appendMetaJson(allocator: std.mem.Allocator, buf: *AlignedU8, meta: types.ToolMeta) !void {
+    try buf.appendSlice(allocator, ",\"meta\":{\"name\":\"");
+    switch (meta) {
+        .none => {
+            try buf.appendSlice(allocator, "none\"}");
+            return;
+        },
+        .write => |m| {
+            try buf.appendSlice(allocator, "write\"");
+            try buf.appendSlice(allocator, ",\"path\":\"");
+            const p = try escapeJsonDynamic(allocator, m.path);
+            defer allocator.free(p);
+            try buf.appendSlice(allocator, p);
+            try buf.appendSlice(allocator, "\",\"existed\":");
+            try buf.appendSlice(allocator, if (m.existed) "true" else "false");
+            try buf.appendSlice(allocator, ",\"new_lines\":");
+            const nl = try std.fmt.allocPrint(allocator, "{d}", .{m.new_lines});
+            defer allocator.free(nl);
+            try buf.appendSlice(allocator, nl);
+            try buf.appendSlice(allocator, ",\"byte_count\":");
+            const bc = try std.fmt.allocPrint(allocator, "{d}", .{m.byte_count});
+            defer allocator.free(bc);
+            try buf.appendSlice(allocator, bc);
+        },
+        .read => |m| {
+            try buf.appendSlice(allocator, "read\"");
+            try buf.appendSlice(allocator, ",\"path\":\"");
+            const p = try escapeJsonDynamic(allocator, m.path);
+            defer allocator.free(p);
+            try buf.appendSlice(allocator, p);
+            try buf.appendSlice(allocator, "\",\"is_directory\":");
+            try buf.appendSlice(allocator, if (m.is_directory) "true" else "false");
+            try buf.appendSlice(allocator, ",\"total_lines\":");
+            const tl = try std.fmt.allocPrint(allocator, "{d}", .{m.total_lines});
+            defer allocator.free(tl);
+            try buf.appendSlice(allocator, tl);
+            try buf.appendSlice(allocator, ",\"byte_count\":");
+            const bc = try std.fmt.allocPrint(allocator, "{d}", .{m.byte_count});
+            defer allocator.free(bc);
+            try buf.appendSlice(allocator, bc);
+            try buf.appendSlice(allocator, ",\"truncated\":");
+            try buf.appendSlice(allocator, if (m.truncated) "true" else "false");
+        },
+        .grep => |m| {
+            try buf.appendSlice(allocator, "grep\"");
+            try buf.appendSlice(allocator, ",\"pattern\":\"");
+            const pat = try escapeJsonDynamic(allocator, m.pattern);
+            defer allocator.free(pat);
+            try buf.appendSlice(allocator, pat);
+            if (m.path) |p2| {
+                try buf.appendSlice(allocator, "\",\"path\":\"");
+                const p = try escapeJsonDynamic(allocator, p2);
+                defer allocator.free(p);
+                try buf.appendSlice(allocator, p);
+            }
+            try buf.appendSlice(allocator, "\",\"match_count\":");
+            const mc = try std.fmt.allocPrint(allocator, "{d}", .{m.match_count});
+            defer allocator.free(mc);
+            try buf.appendSlice(allocator, mc);
+            try buf.appendSlice(allocator, ",\"files_scanned\":");
+            const fs = try std.fmt.allocPrint(allocator, "{d}", .{m.files_scanned});
+            defer allocator.free(fs);
+            try buf.appendSlice(allocator, fs);
+            try buf.appendSlice(allocator, ",\"truncated\":");
+            try buf.appendSlice(allocator, if (m.truncated) "true" else "false");
+        },
+        .bash => |m| {
+            try buf.appendSlice(allocator, "bash\"");
+            try buf.appendSlice(allocator, ",\"command\":\"");
+            const c = try escapeJsonDynamic(allocator, m.command);
+            defer allocator.free(c);
+            try buf.appendSlice(allocator, c);
+            try buf.appendSlice(allocator, "\",\"exit_code\":");
+            const ec = try std.fmt.allocPrint(allocator, "{d}", .{m.exit_code});
+            defer allocator.free(ec);
+            try buf.appendSlice(allocator, ec);
+            try buf.appendSlice(allocator, ",\"byte_count\":");
+            const bc = try std.fmt.allocPrint(allocator, "{d}", .{m.byte_count});
+            defer allocator.free(bc);
+            try buf.appendSlice(allocator, bc);
+            try buf.appendSlice(allocator, ",\"truncated\":");
+            try buf.appendSlice(allocator, if (m.truncated) "true" else "false");
+            try buf.appendSlice(allocator, ",\"timed_out\":");
+            try buf.appendSlice(allocator, if (m.timed_out) "true" else "false");
+        },
+        .glob => |m| {
+            try buf.appendSlice(allocator, "glob\"");
+            try buf.appendSlice(allocator, ",\"pattern\":\"");
+            const pat = try escapeJsonDynamic(allocator, m.pattern);
+            defer allocator.free(pat);
+            try buf.appendSlice(allocator, pat);
+            if (m.path) |p2| {
+                try buf.appendSlice(allocator, "\",\"path\":\"");
+                const p = try escapeJsonDynamic(allocator, p2);
+                defer allocator.free(p);
+                try buf.appendSlice(allocator, p);
+            }
+            try buf.appendSlice(allocator, "\",\"file_count\":");
+            const fc = try std.fmt.allocPrint(allocator, "{d}", .{m.file_count});
+            defer allocator.free(fc);
+            try buf.appendSlice(allocator, fc);
+            try buf.appendSlice(allocator, ",\"truncated\":");
+            try buf.appendSlice(allocator, if (m.truncated) "true" else "false");
+        },
+        .skill => |m| {
+            try buf.appendSlice(allocator, "skill\"");
+            // skill 变体的 name 字段与顶层标签键 "name" 冲突——用 "skill" 键（与 session.zig 一致）
+            try buf.appendSlice(allocator, ",\"skill\":\"");
+            const n = try escapeJsonDynamic(allocator, m.name);
+            defer allocator.free(n);
+            try buf.appendSlice(allocator, n);
+            try buf.appendSlice(allocator, "\",\"file_count\":");
+            const fc = try std.fmt.allocPrint(allocator, "{d}", .{m.file_count});
+            defer allocator.free(fc);
+            try buf.appendSlice(allocator, fc);
+        },
+        .edit => |m| {
+            try buf.appendSlice(allocator, "edit\"");
+            try buf.appendSlice(allocator, ",\"path\":\"");
+            const p = try escapeJsonDynamic(allocator, m.path);
+            defer allocator.free(p);
+            try buf.appendSlice(allocator, p);
+            try buf.appendSlice(allocator, "\",\"replacements\":");
+            const r = try std.fmt.allocPrint(allocator, "{d}", .{m.replacements});
+            defer allocator.free(r);
+            try buf.appendSlice(allocator, r);
+            try buf.appendSlice(allocator, ",\"old_lines\":");
+            const ol = try std.fmt.allocPrint(allocator, "{d}", .{m.old_lines});
+            defer allocator.free(ol);
+            try buf.appendSlice(allocator, ol);
+            try buf.appendSlice(allocator, ",\"new_lines\":");
+            const nl = try std.fmt.allocPrint(allocator, "{d}", .{m.new_lines});
+            defer allocator.free(nl);
+            try buf.appendSlice(allocator, nl);
+        },
+        .webfetch => |m| {
+            try buf.appendSlice(allocator, "webfetch\"");
+            try buf.appendSlice(allocator, ",\"url\":\"");
+            const u = try escapeJsonDynamic(allocator, m.url);
+            defer allocator.free(u);
+            try buf.appendSlice(allocator, u);
+            try buf.appendSlice(allocator, "\",\"byte_count\":");
+            const bc = try std.fmt.allocPrint(allocator, "{d}", .{m.byte_count});
+            defer allocator.free(bc);
+            try buf.appendSlice(allocator, bc);
+            try buf.appendSlice(allocator, ",\"format\":\"");
+            const f = try escapeJsonDynamic(allocator, m.format);
+            defer allocator.free(f);
+            try buf.appendSlice(allocator, f);
+            try buf.appendSlice(allocator, "\",\"mime\":\"");
+            const mi = try escapeJsonDynamic(allocator, m.mime);
+            defer allocator.free(mi);
+            try buf.appendSlice(allocator, mi);
+        },
+    }
+    try buf.appendSlice(allocator, "\"}");
+}
+
+fn escapeJsonDynamic(allocator: std.mem.Allocator, src: []const u8) ![]const u8 {    var result: AlignedU8 = .empty;
     try result.ensureTotalCapacityPrecise(allocator, src.len + 16);
     for (src) |c| {
         switch (c) {

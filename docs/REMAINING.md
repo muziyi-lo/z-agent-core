@@ -112,7 +112,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | N9 | 系统 prompt 缓存 breakpoint | 依赖 provider 缓存 hint 协议（CONTEXT-ASSEMBLY F4） |
 | N10 | 多 skill 目录数组（`skills_dir = ["...", "..."]`） | 索引与 tool 按顺序查找同名 skill，前者优先（CONTEXT-ASSEMBLY F5） |
 | N11 | 会话系统优化（消息 ID 模型 + 按 ID 操作 + 分页/compact/history） | **一期 P1-P5 + 二期 OPT2 已实施（2026-08-12）**：一期=消息 id + 按 id 操作 + `(fork #N)` 分支（自动重答 + parent_id 分支树）+ 滚动状态机 + 三层流式防护 + `/active` + 游标分页 + `POST /compact` + undo 栈；二期=自动压缩触发（token 预算/迭代摘要/`last_compact_id`）+ CLI `/delete` + `sessions_subdir` + 删除保护/级联。见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT.md` + `PLAN-SESSION-SYSTEM-OPT2.md` |
-| N12 | 前端工具渲染优化（0.2.8 周期第二项） | **已规划(2026-08-13)**:0.2.8 周期=工具优化。第一项 WebFetch 已完成（docs/0.2.8/PLAN-WEBFETCH.md）。第二项:前端工具卡片渲染优化（对齐 opencode 工具展示），进 docs/0.2.8/ 同周期。历史教训:工具卡片渲染曾多次回归（LRN-20260805-001 G4、LRN-20260806-005 innerHTML） |
+| N12 | 前端工具渲染优化（0.2.8 周期第二项） | **✅ 已实施（2026-08-13）**：工具卡片类型化渲染（ToolRegistry 纯函数化：webfetch url/format/mime 视图 + edit diff 高亮 + bash pre/code 幂等 + fallback 兜底）+ 服务端 ToolMeta 全字段持久化（Message.meta 挂 role=tool 消息，session serialize/parse/append + handler 透出）+ reload 路径挂载 applyToolType（meta 从 API 传入）。附带修复：system prompt 重复渲染（renderMessages 滤 system）+ 侧边栏高亮失效（增量 diff 刷 active 类）。见 `docs/0.2.8/PLAN-TOOL-CARD-TYPED.md` |
 
 ## Deferred (explicitly skipped)
 
@@ -138,6 +138,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | F3 | MCP tool discovery | `mcp_connect` tool — LLM discovers remote tools at runtime |
 | F4 | **分支摘要注入**（branch_summary） | 借鉴 pi-repos `branch-summarization.ts`：离开分支/切回主线时 LLM 摘要注入（"用户探索了另一分支..."），告知模型分支探索内容。依赖 P4 LLM 基建（SESSION-SYSTEM-OPT P2 延后项） |
 | F5 | **会话崩溃恢复（消息层容错）** | **调研决策（2026-08-13）：不做 undo 持久化**——undo 是短暂撤销窗口（cap 20），持久化收益小、成本高（事件文件 + 重放 + compact 一致性）。崩溃恢复聚焦消息层：会话消息已 JSONL 原子落盘（`session.flush` tmp+rename），崩溃最多丢当前回合尾部；**tmp 残留清理已实施（SESSION-UI-FINAL D4，`init.zig` 启动删 `*.jsonl.tmp`）**；文件损坏容错（`load` 已跳坏行）。撤销窗口重启丢失可接受（对齐 opencode 内存 undo） |
+| F6 | **dsh 架构借鉴候选**（DeepSeek Harness 对比调研 2026-08-13，非 0.2.8 主题） | 因 dsh 突然发布而做的对比研究（文档：`C:\VibeCoding\Projects\zAgentCore\docs\deepseek-harness-vs-zagent-core.md`，仓库外不占发布周期）。低成本可采纳（按成本/收益排序）：① **request/header 请求快照**——每次请求把"系统提示词+工具 schema+请求配置"落盘为只读记录，获请求级审计/调试（无需完整事件溯源）；② **chunk 级持久化**——SSE 原始 chunk 追加进会话（trace 级即可），崩溃后 UI 可重放；③ **compaction 影子记录**——压缩时记录 shadowedRange/shadowedSeqs（哪怕仅日志），保留可审计性。长期：fail-closed 审批（unavailable=拒绝）、单调守卫（只能拒绝不能放行）、per-call 沙箱策略。详见对比文档第 10 节 |
 
 ## Architecture wishlist
 

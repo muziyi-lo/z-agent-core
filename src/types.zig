@@ -13,6 +13,11 @@ pub const Message = struct {
     reasoning_content: ?[]const u8 = null,
     tool_calls: ?[]const ToolCall = null,
     tool_call_id: ?[]const u8 = null,
+    /// Per-tool structured metadata, persisted only on role=tool messages
+    /// (source: ToolResult.meta at agent.zig append site; matched to the
+    /// preceding assistant's tool_calls by tool_call_id on reload).
+    /// Arena-duped on append/load — never a borrow from ToolResult.
+    meta: ?ToolMeta = null,
     timestamp: i64 = 0,
     model: ?[]const u8 = null,
     usage: ?TokenUsage = null,

@@ -165,6 +165,15 @@ pub const Session = struct {
             }
 
             const tool_call_id: ?[]const u8 = if (obj.get("tool_call_id")) |v| if (v == .string) try arena.dupe(u8, v.string) else null else null;
+
+            // ToolMeta: parse the flat "meta" object persisted by appendToolMetaJson.
+            // Missing/invalid meta degrades to null (legacy files, forward compat).
+            const msg_meta: ?types.ToolMeta = if (obj.get("meta")) |mv| blk: {
+                if (mv == .object) {
+                    if (parseToolMeta(arena, mv.object)) |meta| break :blk meta;
+                }
+                break :blk null;
+            } else null;
             const ts = if (obj.get("timestamp")) |v| if (v == .integer) @as(i64, @intCast(v.integer)) else @as(i64, 0) else @as(i64, 0);
             const msg_model: ?[]const u8 = if (obj.get("model")) |v| if (v == .string) try arena.dupe(u8, v.string) else null else null;
             const usage: ?types.TokenUsage = if (obj.get("usage")) |u_val| blk: {
@@ -220,6 +229,7 @@ pub const Session = struct {
                 .reasoning_content = reasoning_content,
                 .tool_calls = tool_calls,
                 .tool_call_id = tool_call_id,
+                .meta = msg_meta,
                 .timestamp = ts,
                 .model = msg_model,
                 .usage = usage,
@@ -277,6 +287,7 @@ pub const Session = struct {
             }
             duped.tool_calls = duped_tcs;
         }
+        if (msg.meta) |meta| duped.meta = try dupeToolMeta(arena, meta);
 
         try self._messages.append(arena, duped);
         self.modified = true;
@@ -677,6 +688,221 @@ fn writeHeader(allocator: std.mem.Allocator, io: Io, file: Io.File, name: []cons
     try file.writeStreamingAll(io, buf.items);
 }
 
+/// Parse the flat "meta" object persisted by appendToolMetaJson back into
+/// ToolMeta. All string fields arena-duped (persistence never borrows).
+/// Returns null on unknown name / missing fields (forward compat: a newer
+/// variant or truncated line degrades to no meta, never fails the load).
+fn parseToolMeta(arena: std.mem.Allocator, obj: std.json.ObjectMap) ?types.ToolMeta {
+    const name = if (obj.get("name")) |v| if (v == .string) v.string else return null else return null;
+
+    inline for (.{ "bash", "read", "grep", "glob", "write", "edit", "skill", "webfetch" }) |tag| {
+        if (std.mem.eql(u8, name, tag)) {
+            return parseToolMetaVariant(arena, obj, tag);
+        }
+    }
+    return null;
+}
+
+fn parseToolMetaVariant(arena: std.mem.Allocator, obj: std.json.ObjectMap, comptime tag: []const u8) ?types.ToolMeta {
+    inline for (@typeInfo(types.ToolMeta).@"union".fields) |field| {
+        if (std.mem.eql(u8, field.name, tag)) {
+            const T = field.type;
+            if (T == void) {
+                return @unionInit(types.ToolMeta, field.name, {});
+            }
+            var result: T = undefined;
+            inline for (@typeInfo(T).@"struct".fields) |f| {
+                // skill 变体的 name 字段与顶层标签键 "name" 冲突——序列化用 "skill" 键
+                const key: []const u8 = if (comptime std.mem.eql(u8, field.name, "skill") and std.mem.eql(u8, f.name, "name")) "skill" else f.name;
+                const raw = obj.get(key) orelse return null;
+                if (f.type == []const u8 or f.type == ?[]const u8) {
+                    if (raw != .string) return null;
+                    const duped = arena.dupe(u8, raw.string) catch return null;
+                    @field(result, f.name) = duped;
+                } else if (f.type == ?usize or f.type == ?u32) {
+                    if (raw != .integer) return null;
+                    @field(result, f.name) = @intCast(raw.integer);
+                } else if (f.type == usize or f.type == u32) {
+                    if (raw != .integer) return null;
+                    @field(result, f.name) = @intCast(raw.integer);
+                } else if (f.type == i32) {
+                    if (raw != .integer) return null;
+                    @field(result, f.name) = @intCast(raw.integer);
+                } else if (f.type == bool) {
+                    if (raw != .bool) return null;
+                    @field(result, f.name) = raw.bool;
+                } else {
+                    return null; // unsupported field type — degrade
+                }
+            }
+            return @unionInit(types.ToolMeta, field.name, result);
+        }
+    }
+    return null;
+}
+
+/// Serialize ToolMeta into session JSONL as a flat object with ALL fields
+/// (unlike sse.zig serializeMeta which is numeric-only for streaming display).
+/// JSON string values escaped via appendEscapedJsonString. Invariant: every
+/// ToolMeta variant must be covered here + parseToolMeta + sse serializeMeta.
+fn appendToolMetaJson(buf: *std.array_list.Managed(u8), meta: types.ToolMeta) !void {
+    try buf.appendSlice(",\"meta\":{");
+    switch (meta) {
+        .none => {
+            try buf.appendSlice("\"name\":\"none\"}");
+            return;
+        },
+        .write => |m| {
+            try buf.appendSlice("\"name\":\"write\",\"path\":\"");
+            try appendEscapedJsonString(buf, m.path);
+            try buf.appendSlice("\",\"existed\":");
+            try buf.appendSlice(if (m.existed) "true" else "false");
+            if (m.old_lines) |ol| {
+                try buf.appendSlice(",\"old_lines\":");
+                var nb: [24]u8 = undefined;
+                try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{ol}) catch unreachable);
+            }
+            try buf.appendSlice(",\"new_lines\":");
+            var nb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.new_lines}) catch unreachable);
+            try buf.appendSlice(",\"byte_count\":");
+            var cb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&cb, "{d}", .{m.byte_count}) catch unreachable);
+            try buf.appendSlice("}");
+        },
+        .read => |m| {
+            try buf.appendSlice("\"name\":\"read\",\"path\":\"");
+            try appendEscapedJsonString(buf, m.path);
+            try buf.appendSlice("\",\"is_directory\":");
+            try buf.appendSlice(if (m.is_directory) "true" else "false");
+            try buf.appendSlice(",\"total_lines\":");
+            var nb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.total_lines}) catch unreachable);
+            try buf.appendSlice(",\"byte_count\":");
+            var cb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&cb, "{d}", .{m.byte_count}) catch unreachable);
+            try buf.appendSlice(",\"truncated\":");
+            try buf.appendSlice(if (m.truncated) "true" else "false");
+            if (m.next_offset) |no| {
+                try buf.appendSlice(",\"next_offset\":");
+                var ob: [24]u8 = undefined;
+                try buf.appendSlice(std.fmt.bufPrint(&ob, "{d}", .{no}) catch unreachable);
+            }
+            try buf.appendSlice("}");
+        },
+        .grep => |m| {
+            try buf.appendSlice("\"name\":\"grep\",\"pattern\":\"");
+            try appendEscapedJsonString(buf, m.pattern);
+            try buf.appendSlice("\"");
+            if (m.path) |p| {
+                try buf.appendSlice(",\"path\":\"");
+                try appendEscapedJsonString(buf, p);
+                try buf.appendSlice("\"");
+            }
+            try buf.appendSlice(",\"match_count\":");
+            var nb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.match_count}) catch unreachable);
+            try buf.appendSlice(",\"files_scanned\":");
+            var fb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&fb, "{d}", .{m.files_scanned}) catch unreachable);
+            try buf.appendSlice(",\"truncated\":");
+            try buf.appendSlice(if (m.truncated) "true" else "false");
+            try buf.appendSlice("}");
+        },
+        .bash => |m| {
+            try buf.appendSlice("\"name\":\"bash\",\"command\":\"");
+            try appendEscapedJsonString(buf, m.command);
+            try buf.appendSlice("\",\"exit_code\":");
+            var nb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.exit_code}) catch unreachable);
+            try buf.appendSlice(",\"byte_count\":");
+            var cb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&cb, "{d}", .{m.byte_count}) catch unreachable);
+            try buf.appendSlice(",\"truncated\":");
+            try buf.appendSlice(if (m.truncated) "true" else "false");
+            try buf.appendSlice(",\"timed_out\":");
+            try buf.appendSlice(if (m.timed_out) "true" else "false");
+            try buf.appendSlice("}");
+        },
+        .glob => |m| {
+            try buf.appendSlice("\"name\":\"glob\",\"pattern\":\"");
+            try appendEscapedJsonString(buf, m.pattern);
+            try buf.appendSlice("\"");
+            if (m.path) |p| {
+                try buf.appendSlice(",\"path\":\"");
+                try appendEscapedJsonString(buf, p);
+                try buf.appendSlice("\"");
+            }
+            try buf.appendSlice(",\"file_count\":");
+            var nb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.file_count}) catch unreachable);
+            try buf.appendSlice(",\"truncated\":");
+            try buf.appendSlice(if (m.truncated) "true" else "false");
+            try buf.appendSlice("}");
+        },
+        .skill => |m| {
+            try buf.appendSlice("\"name\":\"skill\",\"skill\":\"");
+            try appendEscapedJsonString(buf, m.name);
+            try buf.appendSlice("\",\"file_count\":");
+            var nb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.file_count}) catch unreachable);
+            try buf.appendSlice("}");
+        },
+        .edit => |m| {
+            try buf.appendSlice("\"name\":\"edit\",\"path\":\"");
+            try appendEscapedJsonString(buf, m.path);
+            try buf.appendSlice("\",\"replacements\":");
+            var nb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.replacements}) catch unreachable);
+            try buf.appendSlice(",\"old_lines\":");
+            var ob: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&ob, "{d}", .{m.old_lines}) catch unreachable);
+            try buf.appendSlice(",\"new_lines\":");
+            var nb2: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&nb2, "{d}", .{m.new_lines}) catch unreachable);
+            try buf.appendSlice("}");
+        },
+        .webfetch => |m| {
+            try buf.appendSlice("\"name\":\"webfetch\",\"url\":\"");
+            try appendEscapedJsonString(buf, m.url);
+            try buf.appendSlice("\",\"byte_count\":");
+            var cb: [24]u8 = undefined;
+            try buf.appendSlice(std.fmt.bufPrint(&cb, "{d}", .{m.byte_count}) catch unreachable);
+            try buf.appendSlice(",\"format\":\"");
+            try appendEscapedJsonString(buf, m.format);
+            try buf.appendSlice("\",\"mime\":\"");
+            try appendEscapedJsonString(buf, m.mime);
+            try buf.appendSlice("\"}");
+        },
+    }
+}
+
+/// Deep-copy a ToolMeta's owned slices into the session arena. Persistence
+/// never holds borrows from ToolResult (types.zig zero-copy borrow rule).
+fn dupeToolMeta(arena: std.mem.Allocator, meta: types.ToolMeta) !types.ToolMeta {
+    const tag = std.meta.activeTag(meta);
+    inline for (@typeInfo(types.ToolMeta).@"union".fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, "none")) continue;
+        if (std.mem.eql(u8, field.name, @tagName(tag))) {
+            const payload = @field(meta, field.name);
+            const T = field.type;
+            var result: T = undefined;
+            inline for (@typeInfo(T).@"struct".fields) |f| {
+                if (f.type == []const u8) {
+                    @field(result, f.name) = try arena.dupe(u8, @field(payload, f.name));
+                } else if (f.type == ?[]const u8) {
+                    const v = @field(payload, f.name);
+                    @field(result, f.name) = if (v) |s| try arena.dupe(u8, s) else null;
+                } else {
+                    @field(result, f.name) = @field(payload, f.name);
+                }
+            }
+            return @unionInit(types.ToolMeta, field.name, result);
+        }
+    }
+    return .none;
+}
+
 fn serializeMessage(buf: *std.array_list.Managed(u8), msg: types.Message) !void {
     var id_buf: [24]u8 = undefined;
     const id_str = try std.fmt.bufPrint(&id_buf, "{{\"id\":{d},\"role\":\"", .{msg.id});
@@ -753,6 +979,10 @@ fn serializeMessage(buf: *std.array_list.Managed(u8), msg: types.Message) !void 
             try buf.appendSlice(cm_s);
         }
         try buf.appendSlice("}");
+    }
+
+    if (msg.meta) |meta| {
+        try appendToolMetaJson(buf, meta);
     }
 
     try buf.appendSlice("}\n");
@@ -1115,6 +1345,89 @@ test "session: flush then load roundtrip" {
     try std.testing.expectEqualStrings("world", loaded.messages()[1].content);
 
     try std.process.setCurrentPath(io, orig_cwd_buf[0..orig_len]);
+}
+
+test "session: tool meta roundtrip persists full fields" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-session-meta";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    const rt_sessions_dir = try std.fs.path.join(allocator, &.{ test_root, sessions_subdir });
+    defer allocator.free(rt_sessions_dir);
+    try Io.Dir.cwd().createDirPath(io, rt_sessions_dir);
+
+    var orig_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const orig_len = Io.Dir.cwd().realPath(io, &orig_cwd_buf) catch unreachable;
+
+    try std.process.setCurrentPath(io, test_root);
+
+    var sess = try Session.init(allocator, io, "deepseek/model");
+    defer sess.deinit();
+    try sess.append(.{ .role = .tool, .content = "out", .tool_call_id = "c1", .meta = .{ .webfetch = .{
+        .url = "https://example.com/page",
+        .byte_count = 12345,
+        .format = "markdown",
+        .mime = "text/html; charset=utf-8",
+    } } });
+    try sess.flush();
+    const saved_path = sess.path.?;
+
+    var loaded = try Session.load(allocator, io, saved_path);
+    defer loaded.deinit();
+
+    const msgs = loaded.messages();
+    try std.testing.expectEqual(@as(usize, 1), msgs.len);
+    try std.testing.expectEqual(types.Role.tool, msgs[0].role);
+    const meta = msgs[0].meta orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("webfetch", @tagName(meta));
+    switch (meta) {
+        .webfetch => |w| {
+            try std.testing.expectEqualStrings("https://example.com/page", w.url);
+            try std.testing.expectEqual(@as(usize, 12345), w.byte_count);
+            try std.testing.expectEqualStrings("markdown", w.format);
+            try std.testing.expectEqualStrings("text/html; charset=utf-8", w.mime);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    try std.process.setCurrentPath(io, orig_cwd_buf[0..orig_len]);
+}
+
+test "session: load legacy file without meta degrades to null" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-session-legacy-meta";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    const sessions_dir = try std.fs.path.join(allocator, &.{ test_root, sessions_subdir });
+    defer allocator.free(sessions_dir);
+    try Io.Dir.cwd().createDirPath(io, sessions_dir);
+
+    // 旧格式 tool 消息：无 meta 字段
+    const content =
+        \\{"type":"header","timestamp":"2026-07-09T12:00:00Z","model":"deepseek/model","name":"Test"}
+        \\{"role":"tool","content":"out","tool_call_id":"c1","timestamp":1752062402}
+        \\
+    ;
+
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, sessions_subdir, "legacy.jsonl" });
+    defer allocator.free(file_path);
+    {
+        const file = try Io.Dir.cwd().createFile(io, file_path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, content);
+    }
+
+    var loaded_sess = try Session.load(allocator, io, file_path);
+    defer loaded_sess.deinit();
+
+    const msgs = loaded_sess.messages();
+    try std.testing.expectEqual(@as(usize, 1), msgs.len);
+    try std.testing.expectEqual(types.Role.tool, msgs[0].role);
+    try std.testing.expect(msgs[0].meta == null);
 }
 
 test "session: rename keeps file name (stable id)" {

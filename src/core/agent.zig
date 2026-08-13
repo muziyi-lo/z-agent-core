@@ -431,6 +431,7 @@ pub const AgentLoop = struct {
                                 .role = .tool,
                                 .content = ok.session_content,
                                 .tool_call_id = tc.id,
+                                .meta = ok.meta,
                             });
                             new_msgs += 1;
                         } else |exec_err| {
