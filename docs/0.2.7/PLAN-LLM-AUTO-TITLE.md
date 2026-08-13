@@ -105,6 +105,22 @@ LLM 调用可能失败（网络/限流/模型拒绝）。原方案失败后保�
 - CLI 新会话若 LLM 失败 → 标题为截断文本，而非 "New Session"；Web is_new 本就截断 → LLM 成功则覆盖、失败则保留截断（行为不变）
 - 空会话（无用户消息）无 prompt 可截断 → 保持 "New Session"/UUID 名（无内容可命名，符合预期）
 
+**D5 — 配置开关：`auto_title`（默认开启，可关闭）**
+
+对齐 opencode 的 `agent.title.disable`（`agent.ts:268` `if (value.disable) delete agents[key]`）。z-agent-core 无 agent registry，采用**顶层 TOML 布尔开关**（对齐现有 `max_tool_rounds`/`skills_dir` 配置风格）：
+
+```toml
+# .zagent/config.toml
+# Auto-generate a conversational title with the LLM after the first turn.
+# Set false to keep static naming (Web prompt-prefix, CLI "New Session").
+auto_title = true
+```
+
+- `config.zig` `Config` 增 `auto_title: bool = true`；`parseConfigContent` 用 `getBool(parsed, "auto_title") orelse true`（`config.zig:460`）；`DEFAULT_TEMPLATE` 加注释行（`config.zig:526`）
+- `shouldAutoTitle` 签名增 `enabled: bool` 参数（或在调用方检查 `cfg.auto_title`）：`false` → 直接返回，不生成、不改名——CLI/Web 行为回退到现状（Web 保留 `prompt[0..30]` 截断启发式，CLI 保持 "New Session"）
+- 开关只影响 LLM 标题；**不影响 Web is_new 的 `prompt[0..30]` 静态截断**（那是既有行为，非本计划引入）
+- 实现上 CLI `App` 持有 `cfg`（`App.zig:67`）、Web `ctx.config`（`handler.zig`）均可直接读取，无侵入
+
 **TITLE_PROMPT**（对齐 opencode `title.txt` 精编版）：
 
 ```text
@@ -124,20 +140,22 @@ Generate a brief title that would help the user find this conversation later.
 
 ## 触发条件（对齐 opencode ensureTitle）
 
-前端（CLI `App` / Web `handler`）在回合边界调用 `shouldAutoTitle(session)` 判定：
+前端（CLI `App` / Web `handler`）在回合边界调用 `shouldAutoTitle(session, auto_title)` 判定：
 
+0. **开关启用**：`auto_title == true`（D5，`config.zig` 顶层布尔，默认 true）。关闭 → 直接返回，不改名。
 1. **无 parent_id**：fork 子会话已有 `(fork #N)` 命名，不触发（对齐 opencode `if (input.session.parentID) return`）。
 2. **标题为默认**：`name == "New Session"`（CLI/新会话默认）**或** `uuid.isUuid(name)`（Web 空会话）**或** `name` 等于首条用户消息的 30 字符截断（Web is_new 启发式）——判定为"尚未命名"。
 3. **恰 1 条真实用户消息**：`msgs` 中 `role == .user` 的数量 == 1（排除 index 0 系统提示词；`[Compaction]` 是 system 不计入）。
 
-三项全满足才调用 `ensureTitle`。任一失败 → 保留现状，静默。
+四项全满足才调用 `ensureTitle`。任一失败 → 保留现状，静默。
 
 ## 实施步骤
 
-**步骤 1**: 新增 `src/core/title.zig`——`TITLE_PROMPT` 常量、`shouldAutoTitle(session) bool`、`cleanTitle(raw) !?[]const u8`（剥 think/首行/截断）、`fallbackTitle(user_msg) ![]const u8`（30 字符截断 + trim/剥换行）、`ensureTitle(provider, session, allocator, io) bool`（LLM 成功 → LLM 标题；失败/空 → `fallbackTitle`；均 rename + flush）。
-**步骤 2**: `cli/App.zig`——`processLine`（`App.zig:399` runTurn 后）与 `singleTurn`（`App.zig:240` runTurn 后）调 `title_mod.shouldAutoTitle` + `ensureTitle`（在 `session.flush()` 前）。
-**步骤 3**: `web/handler.zig`——`handleSSE` 在 `runTurn` 返回后（`handler.zig:1055` `session.flush()` 前）调 `title_mod.shouldAutoTitle` + `ensureTitle`（复用 `agent.provider_ref` 与当前 `session`）。
-**步骤 4**: 测试——`title.zig` 单测（shouldAutoTitle 三条件/cleanTitle think 剥离与截断/ensureTitle 空 LLM 结果不动会话）；`node tests/frontend/run-tests.mjs` 回归。
+**步骤 1**: 新增 `src/core/title.zig`——`TITLE_PROMPT` 常量、`shouldAutoTitle(session, auto_title) bool`、`cleanTitle(raw) !?[]const u8`（剥 think/首行/截断）、`fallbackTitle(user_msg) ![]const u8`（30 字符截断 + trim/剥换行）、`ensureTitle(provider, session, allocator, io) bool`（LLM 成功 → LLM 标题；失败/空 → `fallbackTitle`；均 rename + flush）。
+**步骤 2**: `config.zig`——`Config` 增 `auto_title: bool = true`，`parseConfigContent` 读 `getBool("auto_title") orelse true`，`DEFAULT_TEMPLATE` 加注释行。
+**步骤 3**: `cli/App.zig`——`processLine`（`App.zig:399` runTurn 后）与 `singleTurn`（`App.zig:240` runTurn 后）传 `self.cfg.auto_title` 调 `shouldAutoTitle` + `ensureTitle`（在 `session.flush()` 前）。
+**步骤 4**: `web/handler.zig`——`handleSSE` 在 `runTurn` 返回后（`handler.zig:1055` `session.flush()` 前）传 `ctx.config.auto_title` 调 `shouldAutoTitle` + `ensureTitle`（复用 `agent.provider_ref` 与当前 `session`）。
+**步骤 5**: 测试——`title.zig` 单测（开关关闭直接 false / shouldAutoTitle 四条件 / cleanTitle think 剥离与截断 / ensureTitle 空 LLM 结果回退截断）；`config.zig` 测试（`auto_title` 默认 true、`auto_title = false` 解析）；`node tests/frontend/run-tests.mjs` 回归。
 
 ## 验证
 
@@ -149,6 +167,8 @@ node tests/frontend/run-tests.mjs
 
 | 测试场景 | 预期结果 |
 |----------|----------|
+| `auto_title = true`（默认） | 首回合后生成 LLM 标题 |
+| `auto_title = false` | 首回合不触发、不改名；Web 保持 `prompt[0..30]` 截断，CLI 保持 "New Session" |
 | CLI 首回合（`--prompt "帮我修 src/app.js 的 500 错误"`） | 回合结束后面板无新输出（静默），`/list` 显示自然语言标题（如 "App.js 500 错误排查"） |
 | CLI 第二回合 | 不再触发（消息数 >1），标题保持首回合生成值 |
 | Web 新会话首条消息 | `sse_done` 后 `loadSessions` 列表显示 LLM 标题，替换 30 字符截断 |
@@ -163,14 +183,16 @@ node tests/frontend/run-tests.mjs
 
 | 文件 | 改动 |
 |------|------|
-| `src/core/title.zig` | 新增：TITLE_PROMPT / shouldAutoTitle / cleanTitle / ensureTitle |
-| `src/frontends/cli/App.zig` | `processLine` + `singleTurn` 回合边界调用 |
-| `src/frontends/web/handler.zig` | `handleSSE` runTurn 后调用 |
+| `src/core/title.zig` | 新增：TITLE_PROMPT / shouldAutoTitle / cleanTitle / fallbackTitle / ensureTitle |
+| `src/config.zig` | `Config.auto_title: bool` 字段 + 解析 + DEFAULT_TEMPLATE 注释 |
+| `src/frontends/cli/App.zig` | `processLine` + `singleTurn` 回合边界调用（传 `cfg.auto_title`） |
+| `src/frontends/web/handler.zig` | `handleSSE` runTurn 后调用（传 `ctx.config.auto_title`） |
 | `docs/REMAINING.md` | F2 标记实施（发布时） |
 
 ## 明确不做
 
 - **small model（`title_model` 配置）**：本期用会话当前模型；小模型节省的 token 在首条消息场景可忽略，后续需要再加
+- **按会话/按命令粒度开关**：本期只做全局 `auto_title` 顶层开关；per-session 或 `/title off` 命令粒度后续按需评估
 - **异步/fire-and-forget**：同步模型下回合后触发已不阻塞主回复，无线程需求
 - **CLI 实时标题刷新**：CLI 无 TUI，标题在 `/list` 可见即可（对齐现有会话管理交互）
 - **sub-agent 注册表 / 通用子代理抽象**：只有一个消费者（title），`compactSession` 已证明直接 provider 调用足够；出现第二个子代理（如 F4 分支摘要）时再评估抽象
