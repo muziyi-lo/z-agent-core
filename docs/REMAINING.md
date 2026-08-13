@@ -104,7 +104,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | # | Item | Notes |
 |---|------|-------|
 | N1 | Web 端 `PATCH /api/session/:id/fork` + `/reset` 端点 | 承自 v0.2.3 Known Gaps |
-| N2 | CLI `/delete <id>` 命令 + sessions 路径常量化 + 删除运行中会话保护 | docs/PLAN-FUTURE-SESSION-IMPROVEMENTS.md P1 |
+| N2 | CLI `/delete <id>` 命令 + sessions 路径常量化 + 删除运行中会话保护 | **✅ 已实施（2026-08-12，OPT2 P2）**：`/delete`（y/N 二次确认 + `resolve` 规范化当前会话保护）、`sessions_subdir` 常量（替换 3 处硬编码）、`session_ops.deleteById`、删除后 `undo_map` 级联清理。见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT2.md` P2 |
 | N3 | 侧边栏 DOM diff / 会话列表分页 / Web CRUD 冒烟测试 | docs/PLAN-FUTURE-SESSION-IMPROVEMENTS.md P2 |
 | N4 | `@container` 响应式侧边栏 | docs/DESIGN-WEB-RENDER.md 待实现 高 |
 | N5 | 技能覆盖缺口 3 项 (SSE filter / @embedFile 预览适配 / Web 冒烟测试) | docs/PLAN-SKILL-COVERAGE.md GAP-1~3 |
@@ -113,7 +113,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | N8 | 增量上下文更新（chronogical system 消息 + baseline 持久化） | 对齐 opencode D1，需 DB/会话格式扩展（CONTEXT-ASSEMBLY F3） |
 | N9 | 系统 prompt 缓存 breakpoint | 依赖 provider 缓存 hint 协议（CONTEXT-ASSEMBLY F4） |
 | N10 | 多 skill 目录数组（`skills_dir = ["...", "..."]`） | 索引与 tool 按顺序查找同名 skill，前者优先（CONTEXT-ASSEMBLY F5） |
-| N11 | 会话系统优化（消息 ID 模型 + 按 ID 操作 + 分页/compact/history） | **P1-P5 已实施（2026-08-12）**：消息 id 模型 + 按 id 操作 + `(fork #N)` 分支（自动重答 + parent_id 分支树）+ 滚动状态机 + 三层流式防护 + `/active` + 游标分页 + `POST /compact` LLM 压缩 + undo 栈（delete/truncate/branch）。见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT.md` |
+| N11 | 会话系统优化（消息 ID 模型 + 按 ID 操作 + 分页/compact/history） | **一期 P1-P5 + 二期 OPT2 已实施（2026-08-12）**：一期=消息 id + 按 id 操作 + `(fork #N)` 分支（自动重答 + parent_id 分支树）+ 滚动状态机 + 三层流式防护 + `/active` + 游标分页 + `POST /compact` + undo 栈；二期=自动压缩触发（token 预算/迭代摘要/`last_compact_id`）+ CLI `/delete` + `sessions_subdir` + 删除保护/级联。见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT.md` + `PLAN-SESSION-SYSTEM-OPT2.md` |
 
 ## Deferred (explicitly skipped)
 
