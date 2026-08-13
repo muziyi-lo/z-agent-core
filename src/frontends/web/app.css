@@ -165,6 +165,9 @@ body{font-family:var(--font-ui);background:var(--bg-base);color:var(--text-base)
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.5);display:none;align-items:center;justify-content:center;z-index:100}
 .modal-overlay.open{display:flex}
 .modal-box{background:var(--bg-layer-01);border:1px solid var(--border-base);border-radius:var(--radius-lg);padding:20px;min-width:300px;box-shadow:var(--elevation-floating)}
+#input-field{width:100%;margin:4px 0 12px;padding:8px 10px;background:var(--bg-layer-02);border:1px solid var(--border-base);border-radius:var(--radius-md);color:var(--text-base);font-size:var(--text-sm);box-sizing:border-box}
+#input-field::placeholder{color:var(--text-faint)}
+#input-field:focus{outline:none;border-color:var(--border-focus)}
 .modal-msg{color:var(--text-base);margin-bottom:16px;font-size:var(--text-base-fs)}
 .modal-actions{display:flex;justify-content:flex-end;gap:8px}
 .modal-cancel{padding:6px 14px;background:var(--bg-layer-02);border:1px solid var(--border-base);border-radius:var(--radius-md);color:var(--text-base);cursor:pointer;font-size:var(--text-sm)}

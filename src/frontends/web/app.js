@@ -202,6 +202,31 @@ function confirmModal(msg) {
   });
 }
 
+/// Text-input modal. Resolves the trimmed input value, or null on cancel.
+/// `placeholder` sets the input's ghost hint (e.g. an example value).
+function inputModal(msg, initial, placeholder) {
+  return new Promise(function(resolve) {
+    document.getElementById('input-msg').textContent = msg;
+    var field = document.getElementById('input-field');
+    field.value = initial || '';
+    field.placeholder = placeholder || '';
+    var overlay = document.getElementById('input-modal');
+    overlay.classList.add('open');
+    var done = false;
+    function close(r) { if (done) return; done = true; overlay.classList.remove('open'); resolve(r); }
+    document.getElementById('input-ok').onclick = function() { close(field.value.trim() || null); };
+    overlay.querySelector('.modal-cancel').onclick = function() { close(null); };
+    overlay.onclick = function(e) { if (e.target === overlay) close(null); };
+    field.onkeydown = function(e) {
+      if (e.key === 'Enter') { close(field.value.trim() || null); }
+      else if (e.key === 'Escape') { close(null); }
+    };
+    function escHandler(e) { if (e.key === 'Escape') close(null); }
+    document.addEventListener('keydown', escHandler, {once:true});
+    setTimeout(function() { field.focus(); field.select(); }, 0);
+  });
+}
+
 // --- api helper ---
 async function api(path, opts) {
   var r = await fetch(A + path, opts);
@@ -692,7 +717,16 @@ async function loadSessions() {
         if (mt && mt.textContent !== (s.model + ' · ' + s.msg_count + ' msgs')) mt.textContent = s.model + ' · ' + s.msg_count + ' msgs';
       }
       // Position: keep timestamp-desc. Move node if needed.
-      if (insertBefore && insertBefore !== node) cont.insertBefore(node, insertBefore);
+      if (node.parentNode !== cont) {
+        // New node (or moved across groups): append or insert before the
+        // first newer sibling. `cont.firstChild` is null on first insert into
+        // an empty container — append in that case (insertBefore(null) also
+        // appends, but guard explicitly for clarity).
+        if (insertBefore) cont.insertBefore(node, insertBefore);
+        else cont.appendChild(node);
+      } else if (insertBefore && insertBefore !== node) {
+        cont.insertBefore(node, insertBefore);
+      }
       insertBefore = node ? node.nextElementSibling : null;
       while (insertBefore && insertBefore.classList.contains('branch-children')) insertBefore = insertBefore.nextElementSibling;
     });
@@ -1599,7 +1633,7 @@ document.getElementById('new-session-btn').onclick = async function() {
 
 async function forkSession(s) {
   // Empty name → server auto-generates `(fork #N)` via forkTitle.
-  var name = prompt('Fork name (leave empty for auto (fork #N)):', '');
+  var name = await inputModal('Fork this session', '', 'x (fork #N)');
   if (name === null) return;
   var forkName = name.trim();
   try {

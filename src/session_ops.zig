@@ -36,10 +36,13 @@ pub fn fork(allocator: std.mem.Allocator, io: Io, source: *session_mod.Session, 
     if (fork_name.len == 0) return error.InvalidForkName;
     if (std.mem.indexOfAny(u8, fork_name, "/\\") != null) return error.PathSeparatorInName;
 
-    const safe_name = try sanitizeForkName(allocator, fork_name);
-    defer allocator.free(safe_name);
-
-    const target_path = try std.fmt.allocPrint(allocator, "{s}/{s}.jsonl", .{ session_dir, safe_name });
+    // File id is a fresh UUID (stable, URL-safe, language-independent) — the
+    // display name (fork title) lives in the header. Using the sanitized display
+    // name as the file name breaks for CJK titles (all chars → `_`).
+    const uuid = @import("util/uuid.zig");
+    const id = try uuid.v4(allocator);
+    defer allocator.free(id);
+    const target_path = try std.fmt.allocPrint(allocator, "{s}/{s}.jsonl", .{ session_dir, id });
     defer allocator.free(target_path);
 
     const f_check = Io.Dir.cwd().openFile(io, target_path, .{ .mode = .read_only }) catch null;
@@ -49,7 +52,10 @@ pub fn fork(allocator: std.mem.Allocator, io: Io, source: *session_mod.Session, 
     }
 
     try source.writeTo(target_path, io);
-    return session_mod.Session.load(allocator, io, target_path);
+    var loaded = try session_mod.Session.load(allocator, io, target_path);
+    try loaded.rename(fork_name);
+    try loaded.flush();
+    return loaded;
 }
 
 /// Compute the next fork title for a branch: `{base} (fork #N)` where base is

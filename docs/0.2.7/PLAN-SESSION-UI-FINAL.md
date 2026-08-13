@@ -11,6 +11,9 @@
 - **Reset UI**：用现有 `confirmModal`（非自定义 modal）
 - **bash 超时**：未传 timeout → `.none` 保持阻塞；传了 clamp [1,3600]；中断优先于超时；`meta.timed_out` 仅超时路径 true
 - 测试 263 通过 + 1 既有失败（`tool.bash.test.bash: echo hello`，stash 基线复现，与本次改动无关）
+- **修复 1（DOM diff 首插）**：组内会话 diff 首次插入空容器时 `insertBefore` 为 null → 节点从未 append（侧边栏只剩 header 无会话条目）；修 `node.parentNode !== cont` 时 append/insertBefore 兜底
+- **修复 2（fork 中文名 → UUID 文件 id）**：`session_ops.fork` 原用 sanitize 显示名当文件名，中文会话名 fork 产生全下划线 id（`____.jsonl`）；改 UUID 文件 id + 显示名（forkTitle）写 header
+- **修复 3（alert → inputModal）**：fork 命名从 `prompt()` 改自定义 `inputModal`（modal-overlay + input-field + placeholder `x (fork #N)`），对齐现有 modal 组件
 
 ## 问题
 
