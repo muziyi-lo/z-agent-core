@@ -117,10 +117,40 @@ pub fn ensureTitle(
 创建  spawn(task) —— 独立 arena + 复制 provider 配置（api_key dup）+ dup session_id/sessions_dir
 执行  线程内 Session.load 磁盘副本 → shouldAutoTitle 复查（防御）→ Provider 独立副本
       → chatCompletionStreaming(msgs, null, null) → cleanTitle
-写回  持 session_write_mutex → 重新 load 最新 session → rename → flush → 释放锁
+写回  renameTitle() 原子事务（单层持锁，见下）
 清理  arena.deinit + thread.detach；失败路径同样清理
 退出  active_threads 计数等待（复用 server.zig:151-163 的 30s 等待先例）
 ```
+
+**`session_write_mutex` 锁边界（评论者质疑澄清）**：
+
+`session.rename()`（`session.zig:476`）是**纯内存操作**（改 `self.name` + `modified`），**不涉及文件**；文件系统 rename 在 `flush()` 内部（`session.zig:419` `Io.Dir.rename(tmp→path)`），且 **tmp 文件名固定**（`session.zig:399` `{path}.tmp`）——并发 flush 同一 session 会写同一 tmp 文件互相覆盖。因此锁必须覆盖**读-改-写整个事务**，且**单层持锁**：
+
+- 新增**原子事务函数**（`core/subcall.zig` 或 `session.zig` 高层）：
+
+```zig
+/// 原子重命名会话标题：锁内 load 最新 → 内存 rename → flush 写盘。
+/// 单层持锁——调用方不得在已持锁时再调本函数或底层 flush。
+pub fn renameTitle(
+    allocator: std.mem.Allocator,
+    io: Io,
+    session_dir: []const u8,
+    id: []const u8,
+    new_name: []const u8,
+) !void {
+    session_write_mutex.lock(io) catch unreachable;
+    defer session_write_mutex.unlock(io);
+    var sess = try Session.load(allocator, io, join(session_dir, id));  // 锁内读最新
+    defer sess.deinit();
+    try sess.rename(new_name);        // 内存改名
+    try sess.flushLocked();           // 锁内写盘（无锁内部版，不重入）
+}
+```
+
+- **`Session.flush` 拆双版**：公开 `flush()` 持锁调 `flushLocked()`；`flushLocked()` 为无锁内部版（含 `session.zig:419` 的文件 rename）。主线程既有调用点（`handler.zig`/`App.zig`/`compact.zig`）继续调公开 `flush()` → 自动持锁，与子代理事务互斥。**禁止**在持锁事务内再调公开 `flush()`（死锁）
+- **子代理写回** = `renameTitle()`（一次调用，锁覆盖 load→rename→flush 全程）——load 在锁内读到最新（含主线程已 flush 的消息），rename+flush 原子，**杜绝旧快照覆盖新消息**
+- `load()` 本身在子代理线程开始时**锁外**调用仅用于守卫复查（只读不写，无竞争）；写回才走锁内 `renameTitle()`
+- `writeTo`/`writePrefixTo`/`removeMessage` 同样拆 `XxxLocked` + 公开持锁包装，或改为调用方持锁——统一原则：**写盘代码只在一层持锁，公开入口持锁，内部无锁**
 
 **并发安全矩阵**（G14 生命周期 + F4 跨线程审查）：
 
@@ -128,12 +158,12 @@ pub fn ensureTitle(
 |------|------|------|
 | arena | 每线程独立 | 无 UAF，不依赖请求线程 allocator |
 | Provider | 线程内独立副本（config 值拷贝 + api_key dup） | 无共享可变状态，无锁 |
-| session 文件 | **进程级 `session_write_mutex`（`Io.Mutex`）** 串行化所有写路径 | 防整文件覆盖竞争 |
-| 写回 | 锁内重新 load 最新 session → rename → flush | 基于最新消息，不丢并发写入 |
+| session 文件 | **进程级 `session_write_mutex`（`Io.Mutex`）** 串行化**原子写事务**（`renameTitle` 与公开 `flush()`） | 防整文件覆盖竞争；`session.rename` 是内存操作，文件 rename 在 flush 内（`session.zig:419`） |
+| 写回 | `renameTitle()` 单层持锁：锁内 load 最新 → 内存 rename → `flushLocked` 写盘 | 读-改-写原子，基于最新消息，不丢并发写入 |
 | abort_map | 子代理**不碰** abort_map | 不误判 isSessionStreaming，与主线程隔离 |
 | 进程退出 | `active_threads` 计数等待 | 复用 server.zig 模式；CLI `deinit` 前等待子代理完成 |
 
-**`session_write_mutex`**（新增，`core/session.zig` 进程级）：`flush`/`writeTo`/`writePrefixTo`/`removeMessage` 等写路径入口持锁。不同 session 文件也被全局串行化——flush 是轻量小文件写，全局锁可接受（对齐 `abort_mutex` 先例）。
+**`session_write_mutex`**（新增，`core/session.zig` 进程级，`Io.Mutex` 对齐 `abort_mutex` 先例）：锁覆盖**所有写盘代码**（`renameTitle` 事务 + 公开 `flush()`/`writeTo`/`writePrefixTo`/`removeMessage`），但**只在一层持锁**——公开入口持锁，内部 `XxxLocked` 无锁。不同 session 文件也被全局串行化，flush 是轻量小文件写，可接受。
 
 **CLI 与 Web 统一走子代理机制**（消除两前端可见阻塞）：
 - **Web**：`handlePrompt` `sse_done` 后 `spawnSubcall`（立即返回，不阻塞连接线程收尾）
@@ -218,7 +248,7 @@ Generate a brief title that would help the user find this conversation later.
 
 **步骤 1**: 新增 `src/core/title.zig`——`TITLE_PROMPT` 常量、`shouldAutoTitle(session, auto_title) bool`、`cleanTitle(raw) !?[]const u8`（剥 think/首行/截断）、`keywordTitle(user_msg) !?[]const u8`（L2 本地关键词：切词→滤停用词→前 3-5 个→拼接）、`fallbackTitle(user_msg) ![]const u8`（L3 静态截断 + trim/剥换行）、`ensureTitle(provider, session, allocator, io) bool`（LLM 成功 → LLM 标题取前两条 user；失败/空 → `keywordTitle` → 空则 `fallbackTitle`；写回持锁）。
 **步骤 2**: 新增 `src/core/subcall.zig`——`SubcallRunner`（`spawn(task)` fire-and-forget detached 线程 + `active_threads` 计数 + `waitIdle()`）；task 携带 provider 配置副本（api_key dup）+ session_id + sessions_dir + auto_title；线程内独立 arena → `Session.load` 磁盘副本 → 复查 `shouldAutoTitle` → `ensureTitle` → arena 释放。
-**步骤 3**: `core/session.zig`——进程级 `session_write_mutex: Io.Mutex`，`flush`/`writeTo`/`writePrefixTo`/`removeMessage` 写路径入口持锁（D6 防并发整文件覆盖）。
+**步骤 3**: `core/session.zig`——进程级 `session_write_mutex: Io.Mutex`；`flush`/`writeTo`/`writePrefixTo`/`removeMessage` 拆双版（公开持锁调 `XxxLocked` 无锁内部版，含 `session.zig:419` 文件 rename）；新增 `renameTitle` 原子事务（单层持锁：锁内 `Session.load` 最新 → `rename` → `flushLocked`）。主线程既有 `flush()` 调用点自动持锁，无侵入。
 **步骤 4**: `config.zig`——`Config` 增 `auto_title: bool = true`，`parseConfigContent` 读 `getBool("auto_title") orelse true`，`DEFAULT_TEMPLATE` 加注释行。
 **步骤 5**: `cli/App.zig`——`processLine`（`App.zig:399` runTurn 后）与 `singleTurn`（`App.zig:240`）传 `self.cfg.auto_title` 调 `shouldAutoTitle`；满足则 `subcall_runner.spawn(title_task)`（立即返回）；`pipe_mode` 跳过；`deinit` 前 `waitIdle()`（有限等待）。
 **步骤 6**: `web/handler.zig`——`handlePrompt` 在 `runTurn` 返回、`session.flush()`、**`sse_done` 帧写出之后**（`handler.zig:1069` 之后）、函数返回前，传 `ctx.config.auto_title` 调 `shouldAutoTitle`；满足则 `subcall_runner.spawn(title_task)`（复用 `agent.provider_ref` 的 config 副本 + session_id）。
@@ -240,7 +270,8 @@ node tests/frontend/run-tests.mjs
 | CLI 第二回合（`--prompt "帮我修 src/app.js 的 500 错误"`） | 回合后提示符**立即返回**（不等待标题），后台生成，`/list` 显示自然语言标题（如 "App.js 500 错误排查"）——覆盖首轮元操作 |
 | CLI 第三回合 | 不再触发（消息数 >2），标题保持第二轮生成值 |
 | Web 新会话前两条消息 | 首条不命名（保持截断）；第二条后 `sse_done` 即时返回 + spawn 子代理（连接线程不阻塞）→ `loadSessions` 显示 LLM 标题 |
-| **Web 第三条消息竞态（关键）** | done 后立即发第三条 → `isSessionStreaming` **不误判**（子代理不碰 abort_map）；第三条消息 flush 与标题 flush 由 `session_write_mutex` 串行化，**消息不丢失** |
+| **Web 第三条消息竞态（关键）** | done 后立即发第三条 → `isSessionStreaming` **不误判**（子代理不碰 abort_map）；第三条消息 flush 与标题写回由 `session_write_mutex` 串行化，**消息不丢失** |
+| **写回原子性** | 子代理 `renameTitle` 单层持锁，锁内 load 最新 + rename + flushLocked——并发主线程 flush 不插入、不产生旧快照覆盖；无嵌套死锁 |
 | **子代理生命周期** | spawn 的线程完成（含失败/LLM 错误路径）后 arena 释放、计数归零，无泄漏/无悬垂 |
 | **进程退出** | CLI `deinit` / Web 退出等待子代理完成（active_threads==0，30s 上限），标题写盘完成才退出 |
 | CLI 管道模式（`--prompt "..." \| ...`） | 跳过标题生成，stdout 纯净无污染 |
@@ -259,7 +290,7 @@ node tests/frontend/run-tests.mjs
 |------|------|
 | `src/core/title.zig` | 新增：TITLE_PROMPT / shouldAutoTitle / cleanTitle / keywordTitle（L2）/ fallbackTitle（L3）/ ensureTitle |
 | `src/core/subcall.zig` | 新增：SubcallRunner（spawn / active_threads / waitIdle），子代理后台执行基础设施 |
-| `src/core/session.zig` | `session_write_mutex`（Io.Mutex）串行化 flush/writeTo/writePrefixTo/removeMessage |
+| `src/core/session.zig` | `session_write_mutex`（Io.Mutex）+ `flush`/`writeTo`/`writePrefixTo`/`removeMessage` 双版（公开持锁 + `XxxLocked` 无锁）+ `renameTitle` 原子事务 |
 | `src/config.zig` | `Config.auto_title: bool` 字段 + 解析 + DEFAULT_TEMPLATE 注释 |
 | `src/frontends/cli/App.zig` | `processLine` + `singleTurn` 回合边界 spawn（传 `cfg.auto_title`）；deinit 前 waitIdle |
 | `src/frontends/web/handler.zig` | `handlePrompt` sse_done 后 spawn（传 `ctx.config.auto_title`）；server.zig 挂载 runner |
