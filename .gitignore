@@ -1,11 +1,12 @@
 node_modules/
 .zig-cache/
 zig-out/
+.zig-out/
 .zagent/
 *.jsonl
 .env
 depgraph.html
-.zig-test-config-*/
+.zig-test-*/
 .opencode/
 *.exe
 *.obj

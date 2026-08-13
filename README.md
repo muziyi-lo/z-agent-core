@@ -1,6 +1,6 @@
 # z-agent-core
 
-An experiment exploring DeepSeek's coding capabilities through a pure agent loop implementation in Zig. Supports tool hooks, abort, lifecycle callbacks, token usage tracking, session forking, context compaction, and doom loop detection. No TUI.
+An experiment exploring DeepSeek's coding capabilities through a pure agent loop implementation in Zig. Supports tool hooks, abort, lifecycle callbacks, token usage tracking, session forking/branching, LLM auto-titles, context compaction, and doom loop detection. No TUI.
 
 ## Motivation: AI knowledge lag and Zig 0.16.0
 
@@ -15,6 +15,8 @@ The 33-item trap table in `AGENTS.md` catalogs the most frequent hallucinations 
 ```bash
 zig build run                         # interactive REPL
 zig build run -- --prompt "hello"     # single-shot mode
+zig build run -- --web                # Web UI (default http://127.0.0.1:8090)
+zig build run -- --web --port 9000    # Web UI on custom port
 ```
 
 Tests (GPA leak traces cause `zig build test` to deadlock — use this instead):
@@ -50,6 +52,9 @@ DEEPSEEK_API_KEY=sk-...
 default_model = "deepseek/deepseek-v4-flash"
 max_tokens = 384000
 max_tool_rounds = 10
+auto_title = true
+# skills_dir = ".zagent/skills"      # skill root; point elsewhere to reuse other tools' skills
+# title_stop_words = ["修", "TODO"]  # extra stopwords for the L2 keyword fallback title
 
 [[providers]]
 name = "deepseek"
@@ -68,6 +73,7 @@ input = ["text"]
 
 [models.compat]
 # thinking_format — auto-detected from base_url; uncomment to force
+# params_json — vendor-specific JSON fragment (e.g. top_p)
 
 [[models]]
 id = "deepseek-v4-flash"
@@ -82,6 +88,8 @@ input = ["text"]
 Key points:
 - **`provider` field**: binds a model to a specific provider. Leave empty (`""`) to share the model definition across all providers. Duplicate `(provider, id)` pairs: **last entry wins** (override).
 - **`[models.compat]` sub-table**: optional per-model protocol quirk overrides — `thinking_format` (7 formats: `thinking_object`, `reasoning_effort`, `enable_thinking_bool`, etc.), `max_tokens_field`, `supports_stream_options`, `require_reasoning_on_tool_calls`. Everything is auto-detected from `base_url`; the sub-table only needs values you want to override.
+- **`auto_title`**: LLM generates a conversational title after the second turn. Set `false` to keep static naming.
+- **`skills_dir`**: skill root relative to project root (default `.zagent/skills`). Point at another tool's skills dir (e.g. `.opencode/skills`) to reuse its skills.
 - **API key**: via `api_key_env` environment variable or `.zagent/.env`.
 - Corrupted config? Delete `.zagent/config.toml` and restart to regenerate.
 
@@ -105,7 +113,7 @@ src/main.zig                  -- 4-line shim: delegates to src/frontends/cli/ or
 src/frontends/cli/
   main.zig                    -- CLI entry, arg parsing (--prompt, --model, --thinking)
   App.zig                     -- orchestrator: config → provider → tools → session → agent
-                              --   REPL: /exit, /new, /load, /name, /list, /fork, /thinking, /help
+                              --   REPL: /exit, /help, /new, /reset, /load, /name, /list, /delete, /fork, /thinking
   render.zig                  -- ANSI output, Markdown→ANSI, streaming LineBuffer, tool display
 src/config.zig                -- TOML loading, model/provider resolution, compat override, .env
 src/toml.zig                  -- lightweight TOML parser (self-contained, no deps)
@@ -117,11 +125,12 @@ src/frontends/
   cli/
     main.zig                  -- CLI entry, arg parsing (--prompt, --model, --thinking)
     App.zig                   -- orchestrator: config → provider → tools → session → agent
-                              --   REPL: /exit, /new, /load, /name, /list, /fork, /thinking, /help
+                              --   REPL: /exit, /help, /new, /reset, /load, /name, /list, /delete, /fork, /thinking
     render.zig                -- ANSI output, Markdown→ANSI, streaming LineBuffer, tool display
   web/
     server.zig                -- TCP entry, --web/--root, project root resolution
-    handler.zig               -- route dispatch, 10 RESTful endpoints, per-request arena
+    handler.zig               -- route dispatch, 20+ RESTful endpoints (session CRUD, message
+                              --   delete, fork/reset, abort/truncate/branch/compact/undo), per-request arena
     sse.zig                   -- SSE frame construction, PhaseWriterCb/ToolDisplayCb mapping
     error.zig                 -- unified JSON error responses
     api_types.zig             -- request/response structs
@@ -135,7 +144,7 @@ src/io/
   provider.zig                -- OpenAI-compat SSE streaming + retry (5× backoff),
                               --   error classification, thinking format dispatch (7 variants)
 src/tool/
-  registry.zig                -- buildRegistry(): 8 built-in tools
+  registry.zig                -- buildRegistry(): 9 built-in tools
   read.zig                    -- read files / list directories
   write.zig                   -- create/overwrite files
   bash.zig                    -- execute shell commands (pwsh/sh)
@@ -144,6 +153,7 @@ src/tool/
   edit.zig                    -- exact string replacement with diff preview
   compact.zig                 -- context compaction via LLM summarization
   skill.zig                   -- load .zagent/skills/*/SKILL.md
+  webfetch.zig                -- fetch URL via curl, HTML→Markdown conversion (3 formats)
 src/util/
   path.zig                    -- path resolution with traversal guard, Windows drive letter normalize
   signal.zig                  -- Ctrl+C handler (Windows SetConsoleCtrlHandler)
@@ -170,6 +180,7 @@ Tools return only `session_content` (LLM context data) + optional `err_msg`. No 
 | `edit` | Exact string replacement with diff preview. Supports `replaceAll`. |
 | `compact` | Compress conversation via LLM summarization (keep system + recent N). |
 | `skill` | Load `.zagent/skills/*/SKILL.md`. Traversal-guarded. |
+| `webfetch` | Fetch URL via curl subprocess. HTML→Markdown/text/html, MIME validation, double timeout, browser-UA retry on Cloudflare 403. |
 
 Add a tool: `tool/xxx.zig` + 1 line in `registry.zig` `buildRegistry()`.
 
@@ -180,7 +191,7 @@ Add a tool: `tool/xxx.zig` + 1 line in `registry.zig` `buildRegistry()`.
 - **TOML config**: Self-contained parser, no external dependencies. Model definitions can be shared across providers (`provider = ""`) or scoped to a single provider. Duplicate entries use last-write-wins override semantics.
 - **SSE streaming + retry**: Provider parses `data:` lines via curl subprocess with 5× exponential backoff (500ms→8s), error classification (rate limit/503 retryable, 4xx fatal), `stream_options` 400 auto-fallback. LineBuffer renders chunks immediately for typewriter feel; Markdown-to-ANSI on complete lines.
 - **Dual-phase streaming**: `thinking_started`/`text_started` independent flags replace single `in_content_phase`, preventing flicker with interleaved reasoning and supporting models like Qwen that stream reasoning before content.
-- **Static tool registry**: Compile-time array, one line per tool (8 tools). LLM sees tools as OpenAI-compatible JSON schema auto-generated from registry.
+- **Static tool registry**: Compile-time array, one line per tool (9 tools). LLM sees tools as OpenAI-compatible JSON schema auto-generated from registry.
 - **Linear JSONL sessions**: One file per conversation. `/fork` copies messages to new file (atomic temp+rename) and auto-switches.
 - **Context compaction**: Token monitoring at 85% window threshold; `compact` tool uses LLM to summarize old messages and replace them in-place.
 - **StormBreaker**: FIFO queue (5 entries) tracks tool call `{name, args_hash}`; 3 consecutive identical calls injects system warning.
@@ -191,16 +202,10 @@ Add a tool: `tool/xxx.zig` + 1 line in `registry.zig` `buildRegistry()`.
 | File | Content |
 |------|---------|
 | `docs/CORE-FRONTEND.md` | Core definition, frontend integration, Phase 0/1/2 plan, architecture comparison |
-| `docs/PLAN-PHASE-5-WEBFETCH.md` | Phase 5: webfetch tool — HTTP GET with HTML→Markdown conversion (planned) |
 | `docs/PLAN-PHASE-6-TUI.md` | Phase 6: TUI frontend architecture + framework evaluation (design stage) |
 | `docs/设计原则整理.md` | 15 design principles accumulated from development |
 | `docs/REMAINING.md` | Remaining work tracker: done/planned/deferred/future/wishlist |
-| `docs/0.2.4/` | v0.2.4 plan docs: WEB-CONCURRENT, WEB-OPT, WEB-UI-OPT, WEB-FIX-STREAMING, WEB-FIX-SESSION-LIST, WEB-REMAINING, LOGGING-MODULE (7 files, all done) |
-| `docs/0.2.5/` | v0.2.5 plan docs: WEB-UI-FIXES, FIX-APIKEY-ENV, STREAM-ORDER-PARTS (all done) |
-| `docs/0.2.3/` | v0.2.3 plan docs: PHASE-7, FIX-SYSTEM-PROMPT, FIX-WEB-SESSION, REF-1, REF-2 (5 files, all done) |
-| `docs/0.2.2/` | v0.2.2 plan docs: PHASE-3, PHASE-4, FIX-1, FIX-2 (4 files, all done) |
-| `docs/0.2.0/` | v0.2.0 plan docs: OPT-1 through OPT-6 + FIX-1 (9 files, all done) |
-| `docs/0.0.1-alpha/` | v0.0.1-alpha step-by-step design docs (8 files) |
+| `docs/<version>/` | Per-release plan docs (e.g. `0.2.8/PLAN-WEBFETCH.md`), archived by release cycle |
 
 ## Vibe Coding insights
 
