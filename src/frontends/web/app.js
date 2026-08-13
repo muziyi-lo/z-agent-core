@@ -715,6 +715,16 @@ async function loadSessions() {
         if (nm && nm.textContent !== s.name) nm.textContent = s.name;
         var mt = node.querySelector('.meta');
         if (mt && mt.textContent !== (s.model + ' · ' + s.msg_count + ' msgs')) mt.textContent = s.model + ' · ' + s.msg_count + ' msgs';
+        // Active highlight follows currentId — the incremental patch must
+        // refresh the class on both the newly active and the previously active
+        // node (existing node is not rebuilt, so className would go stale).
+        var wantActive = s.id === currentId;
+        var isActive = node.className.indexOf('active') !== -1;
+        if (wantActive && !isActive) {
+          node.className += ' active';
+        } else if (!wantActive && isActive) {
+          node.className = node.className.replace(/\s*active/, '');
+        }
       }
       // Position: keep timestamp-desc. Move node if needed.
       if (node.parentNode !== cont) {
@@ -804,14 +814,17 @@ function renderMessages(msgs, insertBeforeNode) {
           var ts = lastAsst._toolSegments[k];
           if (ts.callId === m.tool_call_id) {
             ts.output = m.content || '';
+            ts.data = m.meta || {};
             var out = ts.el.querySelector('.output');
             if (out) out.innerHTML = outHtml;
+            if (ts.name) applyToolType(ts.el, ts.name, ts.data);
             break;
           }
         }
       }
       return;
     }
+    if (m.role === 'system') return; // system 由 renderSystemPrompt 渲染，不重复进消息流
     var div = addMessage(m, 0, null, true);
     if (insertBeforeNode) container.insertBefore(div, insertBeforeNode);
     if (m.role === 'assistant') wrapContextToolGroups(div);
@@ -1305,22 +1318,15 @@ function sendPrompt(prompt) {
     try {
       var d = JSON.parse(e.data);
       currentTool.el._toolData = currentTool.el._toolData || {};
+      // 累积式合并：多段 tool_meta 事件（不同字段）全部保留——parts 从
+      // 累积 _toolData 构建（真幂等，可重放），而非单次事件字段
       Object.keys(d).forEach(function(k) { currentTool.el._toolData[k] = d[k]; });
       var meta = currentTool.el.querySelector('.tool-meta');
-      if (!meta) {
-        meta = document.createElement('div');
-        meta.className = 'tool-meta';
-        currentTool.el.insertBefore(meta, currentTool.el.querySelector('.output'));
+      if (meta) {
+        var parent = meta.parentNode;
+        if (parent) parent.removeChild(meta);
       }
-      var parts = [];
-      if (d.exit_code !== undefined) parts.push('exit: ' + d.exit_code);
-      if (d.byte_count !== undefined) parts.push(d.byte_count + 'B');
-      if (d.total_lines !== undefined) parts.push(d.total_lines + ' lines');
-      if (d.match_count !== undefined) parts.push(d.match_count + ' matches');
-      if (d.file_count !== undefined) parts.push(d.file_count + ' files');
-      if (d.files_scanned !== undefined) parts.push('in ' + d.files_scanned + ' files');
-      if (d.replacements !== undefined) parts.push(d.replacements + ' replacements');
-      meta.textContent = parts.join(' | ');
+      applyToolType(currentTool.el, currentTool.el._toolName || d.name, currentTool.el._toolData);
     } catch(ex) { console.error('tool_meta handler:', ex); }
   });
 
@@ -1394,7 +1400,7 @@ function sendPrompt(prompt) {
         tc.classList.toggle('open');
       };
       var out = tc.querySelector('.output');
-      if (out) {
+      if (out && !out.querySelector('pre')) {
         out.innerHTML = renderMd(out.textContent);
       }
     });
@@ -1744,10 +1750,14 @@ function abortPrompt() {
 function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 // --- tool registry (typed views) ---
+// 每个条目是纯函数 (toolDiv, toolData) => void：只操作 toolDiv 内部 DOM，
+// 不读全局流式状态（curSegments/currentTool/isStreaming），同一数据多次调用
+// 结果一致（幂等、可重放——对齐 dsh presentCall/presentResult render intent）。
 var ToolRegistry = {
   bash: function(toolDiv, d) {
+    setToolIcon(toolDiv, '&#128190;');
     var nameRow = toolDiv.querySelector('.name-row');
-    if (nameRow) {
+    if (nameRow && !toolDiv.querySelector('.copy-cmd')) {
       var copyCmd = document.createElement('button');
       copyCmd.className = 'copy-cmd';
       copyCmd.textContent = 'Copy cmd';
@@ -1757,17 +1767,25 @@ var ToolRegistry = {
       };
       nameRow.appendChild(copyCmd);
     }
-    // Bash output: wrap in pre/code
+    // Bash output: wrap in pre/code (幂等：已包则跳过)
     var out = toolDiv.querySelector('.output');
-    if (out) {
+    if (out && !out.querySelector('pre')) {
       out.innerHTML = '<pre><code>' + esc(out.textContent) + '</code></pre>';
     }
+    var p = [];
+    if (d.exit_code !== undefined && d.exit_code !== null) p.push('exit: ' + d.exit_code);
+    if (d.byte_count) p.push(d.byte_count + 'B');
+    if (d.truncated) p.push('truncated');
+    if (d.timed_out) p.push('timed out');
+    if (p.length) setToolMeta(toolDiv, p);
   },
   read: function(toolDiv, d) {
     setToolIcon(toolDiv, '&#8962;');
     var p = [];
     if (d.total_lines) p.push(d.total_lines + ' lines');
     if (d.byte_count) p.push(d.byte_count + 'B');
+    if (d.is_directory) p.push('dir');
+    if (d.truncated) p.push('truncated');
     if (p.length) setToolMeta(toolDiv, p);
   },
   write: function(toolDiv, d) {
@@ -1779,22 +1797,62 @@ var ToolRegistry = {
   },
   edit: function(toolDiv, d) {
     setToolIcon(toolDiv, '&#9986;');
-    if (d.replacements) setToolMeta(toolDiv, [d.replacements + ' replacements']);
+    var p = [];
+    if (d.replacements) p.push(d.replacements + ' replacements');
+    if (d.old_lines && d.new_lines) p.push(d.old_lines + '->' + d.new_lines + ' lines');
+    if (p.length) setToolMeta(toolDiv, p);
+    // diff 视图（幂等）：output 为统一 diff 格式时着色 +/- 行
+    var out = toolDiv.querySelector('.output');
+    if (out && toolDiv.className.indexOf('tool-diff') === -1) {
+      var text = out.textContent || '';
+      if (text.indexOf('\n+') !== -1 || text.indexOf('\n-') !== -1 || text.indexOf('^+') === 0 || text.indexOf('^-') === 0) {
+        toolDiv.classList.add('tool-diff');
+        var lines = text.split('\n');
+        var html = '';
+        for (var i = 0; i < lines.length; i++) {
+          var l = lines[i];
+          var cls = '';
+          if (l.indexOf('+++') === 0 || l.indexOf('---') === 0) cls = 'diff-hunk';
+          else if (l.indexOf('@@') === 0) cls = 'diff-hunk';
+          else if (l.charAt(0) === '+') cls = 'diff-add';
+          else if (l.charAt(0) === '-') cls = 'diff-del';
+          html += '<div class="' + cls + '">' + esc(l) + '</div>';
+        }
+        out.innerHTML = html;
+      }
+    }
   },
   grep: function(toolDiv, d) {
     setToolIcon(toolDiv, '&#8981;');
     var p = [];
     if (d.match_count) p.push(d.match_count + ' matches');
     if (d.files_scanned) p.push('in ' + d.files_scanned + ' files');
+    if (d.truncated) p.push('truncated');
     if (p.length) setToolMeta(toolDiv, p);
   },
   glob: function(toolDiv, d) {
     setToolIcon(toolDiv, '&#8727;');
-    if (d.file_count) setToolMeta(toolDiv, [d.file_count + ' files']);
+    var p = [];
+    if (d.file_count) p.push(d.file_count + ' files');
+    if (d.truncated) p.push('truncated');
+    if (p.length) setToolMeta(toolDiv, p);
   },
   skill: function(toolDiv, d) {
     setToolIcon(toolDiv, '&#9889;');
     if (d.file_count) setToolMeta(toolDiv, [d.file_count + ' files']);
+  },
+  webfetch: function(toolDiv, d) {
+    setToolIcon(toolDiv, '&#128279;');
+    var p = [];
+    if (d.url) p.push(d.url);
+    if (d.format) p.push(d.format);
+    if (d.mime) p.push(d.mime);
+    if (d.byte_count) p.push(d.byte_count + 'B');
+    if (p.length) setToolMeta(toolDiv, p);
+  },
+  fallback: function(toolDiv, d) {
+    setToolIcon(toolDiv, '&#9881;');
+    if (d && d.byte_count) setToolMeta(toolDiv, [d.byte_count + 'B']);
   }
 };
 
@@ -1870,10 +1928,9 @@ function wrapContextToolGroups(container) {
 }
 
 function applyToolType(toolDiv, toolName, toolData) {
-  if (ToolRegistry[toolName]) {
-    toolDiv.className += ' tool-' + toolName;
-    try { ToolRegistry[toolName](toolDiv, toolData); } catch(ex) { console.error('ToolRegistry error:', ex); }
-  }
+  var fn = ToolRegistry[toolName] || ToolRegistry.fallback;
+  toolDiv.className += ' tool-' + toolName;
+  try { fn(toolDiv, toolData || {}); } catch(ex) { console.error('ToolRegistry error:', ex); }
 }
 
 loadSessions();

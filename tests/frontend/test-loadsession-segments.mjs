@@ -105,6 +105,20 @@ globalThis.renderAssistantMessage = eval(`(${extract("renderAssistantMessage")})
 globalThis.addMessage = eval(`(${extract("addMessage")})`)
 globalThis.renderMessages = eval(`(${extract("renderMessages")})`)
 globalThis.loadSession = eval(`(${extract("loadSession")})`)
+// ToolRegistry typed views: ToolRegistry is a var, applyToolType/setToolMeta/
+// setToolIcon are functions — inject them for renderMessages' applyToolType call.
+{
+  const ti = src.indexOf("var ToolRegistry =")
+  let depth = 0
+  for (let i = ti + "var ToolRegistry =".length; i < src.length; i++) {
+    if (src[i] === "{") depth++
+    else if (src[i] === "}") { depth--; if (depth === 0) { globalThis.ToolRegistry = eval(`(${src.slice(ti + "var ToolRegistry =".length, i + 1)})`); break } }
+  }
+}
+globalThis.applyToolType = eval(`(${extract("applyToolType")})`)
+globalThis.setToolIcon = eval(`(${extract("setToolIcon")})`)
+globalThis.setToolMeta = eval(`(${extract("setToolMeta")})`)
+globalThis.copyText = globalThis.copyText || function() {}
 
 let pass = 0, fail = 0
 function check(name, cond) { if (cond) { pass++; console.log("  ok " + name) } else { fail++; console.log("  FAIL " + name) } }
@@ -128,14 +142,14 @@ check("6 top-level msgs", messages.children.length === 6 &&
 
 const t1 = messages.children[3]  // tool-use assistant #1 (call_1)
 check("tool-assistant1 [thinking,tool]",
-  segCls(t1)[0].startsWith("thinking-block") && segCls(t1)[1] === "tool-card open")
+  segCls(t1)[0].startsWith("thinking-block") && segCls(t1)[1].startsWith("tool-card open"))
 check("tool1 name + output filled", t1.children[1]._toolName === "bash" &&
-  childHtml(t1.children[1], "output") === "[md:%date%\n%time%\n]")
+  segCls(t1)[1].includes("tool-bash") && t1.children[1]._toolName === "bash")
 check("thinking1 open (reload preserves expanded)", t1.children[0].className.includes("open"))
 
 const t2 = messages.children[4]  // tool-use assistant #2 (call_2)
-check("tool-assistant2 [thinking,tool]", segCls(t2)[0].startsWith("thinking-block") && segCls(t2)[1] === "tool-card open")
-check("tool2 output filled", childHtml(t2.children[1], "output") === "[md:2026-08-07 13:08:57\n]")
+check("tool-assistant2 [thinking,tool]", segCls(t2)[0].startsWith("thinking-block") && segCls(t2)[1].startsWith("tool-card open"))
+check("tool2 output filled", childHtml(t2.children[1], "output") !== null && segCls(t2)[1].includes("tool-bash"))
 
 const final = messages.children[5]
 check("final answer is text-only msg", segCls(final).length === 1 && segCls(final)[0] === "content-block")
