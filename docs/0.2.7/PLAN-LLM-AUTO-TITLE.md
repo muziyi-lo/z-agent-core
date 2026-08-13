@@ -13,7 +13,7 @@
 | Web 空会话 | UUID 名 + `uuid.isUuid` 显示 "New Session"（`handler.zig:284`） | 用户不重命名就保持通用名 |
 | fork 子会话 | `(fork #N)` 自动命名（已实施） | ✅ 已有专用命名，不参与 LLM 标题 |
 
-**目标**：首回合结束后用 LLM 根据第一条真实用户消息生成自然语言标题（对齐 opencode `SessionPrompt.ensureTitle`），替换上述静态启发式。
+**目标**：第二轮回合结束后用 LLM 根据前两条真实用户消息生成自然语言标题（对齐 ChatGPT/Claude"新对话"占位 + 延迟命名范式），替换上述静态启发式。
 
 ## 参照：opencode ensureTitle + title agent
 
@@ -25,10 +25,10 @@ opencode 实现（`packages/opencode/src/session/prompt.ts:193-253` + `agent/pro
 | 模型 | agent.model → `getSmallModel` → 会话模型，`small: true` | **用会话当前模型**（无 small model 概念，见决策 D2） |
 | 工具 | `tools: {}`（无工具） | `tools = null` |
 | 触发 | step===1（首回合循环内），`Effect.forkIn` 异步，不阻塞主回复 | 回合边界同步触发（同步模型，见决策 D1） |
-| 触发条件 | ① 无 parentID ② 标题为默认 ③ 恰 1 条真实用户消息 | 对齐（见下方「触发条件」） |
-| 请求消息 | `[{user: "Generate a title for this conversation:\n"}, ...context 转模型消息]` + 专用 system | `[system: TITLE_PROMPT, user: 首条用户消息]` |
+| 触发条件 | ① 无 parentID ② 标题为默认 ③ 恰 1 条真实用户消息 | ① 无 parent_id ② 标题为默认 ③ **恰 2 条**真实用户消息（第二轮延迟，D1）；④ `auto_title` 开关（D5） |
+| 请求消息 | `[{user: "Generate a title for this conversation:\n"}, ...context 转模型消息]` + 专用 system | `[system: TITLE_PROMPT, user: 前两条 user 消息拼接]`（D3） |
 | 结果清洗 | 剥 `<think>` 块 → 取首个非空行 → 截断 100 字符 | 对齐（`title.txt` 要求 ≤50 字符，代码实际截断 100） |
-| 失败语义 | `Effect.catchCause` 静默，不失败回合 | LLM 失败回退静态截断（见 D4），不失败回合 |
+| 失败语义 | `Effect.catchCause` 静默，不失败回合 | 三层降级 LLM→本地关键词→静态截断（D4），不失败回合 |
 | 写入 | `sessions.setTitle`（改标题不改 id） | `session.rename(title)` + `flush`（`rename` 不改文件名，id 稳定） |
 
 ## 子代理调用机制（核心问题）
@@ -53,16 +53,16 @@ LLM 自动标题需要一次**独立的、轻量的 LLM 调用**，与主 agent 
 
 ### 决策
 
-**D1 — 触发时机：回合边界同步触发（第二轮回合完成后）**
+**D1 — 触发时机：第二轮回合后触发（子代理后台执行）**
 
 | 方案 | 说明 | 决策 |
 |------|------|------|
 | 回合前（append user 后、runTurn 前） | 标题立即就绪，但阻塞首答（同步模型无 forkIn） | ❌ 首答延迟不可接受 |
 | 首回合后（runTurn 完成后） | 首答结束后触发，不阻塞主回复 | ❌ 首条消息意图不可靠（greeting/元操作如"恢复上下文"/试探），标题质量差；且产生一次无效请求 + 错误的持久标题 |
-| **第二轮回合后（runTurn 完成后）** | 第二轮用户已表达真实任务，标题命中率高；首轮保持占位 | ✅ **采用**（对齐 ChatGPT/Claude"新对话"占位 + 延迟后台生成范式） |
+| **第二轮回合后（runTurn 完成后）** | 第二轮用户已表达真实任务，标题命中率高；首轮保持占位；由子代理后台执行（D6） | ✅ **采用**（对齐 ChatGPT/Claude"新对话"占位 + 延迟后台生成范式） |
 
-- CLI：`processLine`/`singleTurn` 在 `runTurn` 返回、usage 显示后、回提示符前同步调用（恰 2 条真实 user 时触发）；`pipe_mode` 跳过（输出纯净性）。**阻塞处理见 D6**。
-- Web：`handleSSE` 在 `runTurn` 返回、**`sse_done` 帧写出之后**、`handleSSE` 返回前调用（`handler.zig:1055` 附近）——客户端已收到 done 并关闭 SSE，连接线程继续执行标题生成，**零 UX 影响**（**D6**）。
+- CLI：`processLine`/`singleTurn` 在 `runTurn` 返回、usage 显示后**立即返回提示符**（标题由子代理后台执行，D6）；`pipe_mode` 跳过（输出纯净性）。**执行机制见 D6**。
+- Web：`handlePrompt` 在 `runTurn` 返回、**`sse_done` 帧写出之后**（`handler.zig:1069`）、`handlePrompt` 返回前 `spawnSubcall`（D6）——客户端已收到 done 并关闭 SSE，**连接线程不等待标题**（D6）。
 - 因触发条件含"恰 2 条真实用户消息"，**天然只在第二轮回合后触发一次**——第三回合起消息数 >2，判定返回 false，无需额外去重标志。
 - **首轮占位**：Web 保持 `prompt[0..30]` 截断（`handler.zig:958`），CLI 保持 "New Session"——即成熟系统的 "New chat" 占位，零新增成本。
 
@@ -72,17 +72,18 @@ LLM 自动标题需要一次**独立的、轻量的 LLM 调用**，与主 agent 
 
 opencode 用 `getSmallModel`（title agent 默认）。z-agent-core 的 config 无 small model 概念（`config.zig` 只有 `default_model`），引入需配置模型解析、校验、回退多套逻辑。标题请求喂前两条用户消息、token 成本可忽略，**用会话当前模型（`provider` 已配置）**。small model 列入后续可选（`title_model` 配置项，REMAINING Future）。
 
-**D3 — 子代理实现形态：`core/title.zig` + `generateTitle()`，复用 `chatCompletionStreaming`**
+**D3 — 子代理实现形态：`core/title.zig` + `ensureTitle()`，复用 `chatCompletionStreaming`**
 
 新增 `src/core/title.zig`，与 `compactSession` 同构：
 
 ```zig
-/// LLM 生成会话标题（子代理调用）。仅当标题为默认且会话恰有 2 条真实
-/// 用户消息时有效（第二轮后触发，对齐 ChatGPT/Claude 延迟命名范式）；
-/// 调用方（frontend）先做守卫判定再调用。
+/// LLM 生成会话标题（子代理调用，在后台线程执行）。仅当标题为默认且会话
+/// 恰有 2 条真实用户消息时有效（第二轮后触发，对齐 ChatGPT/Claude 延迟
+/// 命名范式）；调用方（frontend）先做守卫判定再调用。
 /// 不写消息记录、不注入系统提示词。
-/// LLM 成功 → rename 为 LLM 标题；LLM 失败/空结果 → 回退到首条用户消息的
-/// 30 字符截断（D4），保证至少有一个有意义的标题。都 flush。
+/// LLM 成功 → rename 为 LLM 标题；LLM 失败/空结果 → 本地关键词（keywordTitle，
+/// L2）→ 空则静态截断最近一条用户消息（fallbackTitle，L3），保证至少有
+/// 一个有意义标题。写回持 session_write_mutex 串行化（D6）。
 pub fn ensureTitle(
     provider: *provider_mod.Provider,
     session: *session_mod.Session,
@@ -94,40 +95,52 @@ pub fn ensureTitle(
 - 请求构造：`[system: TITLE_PROMPT, user: 前两条真实用户消息的拼接]`（跳过系统提示词 index 0；`[Compaction]` 是 system 不计入）。两轮 user 消息足以覆盖"元操作 + 真实任务"模式（如"恢复上下文" + "帮我修 X"→ 标题反映 X）。
 - 内部 `provider.chatCompletionStreaming(&arena_state, io, msgs, null, null)`（无工具、无 phase_writer → 静默）。
 - 清洗结果（对齐 opencode）：剥 `<think>` 块 → 按行 split/trim → 取首个非空行 → `len > 100` 截断为 `[0..97] + "..."`。
-- 空结果/失败 → **回退静态截断标题**（见 D4），不失败回合。
+- 空结果/失败 → **三层降级**（见 D4）：keywordTitle → fallbackTitle，不失败回合。
 - 成功 → `session.rename(title)` + `session.flush()`。
 - 守卫判定函数独立（`shouldAutoTitle`，供 frontend 在 runTurn 前/后自检，避免无谓请求）。
 
-**D6 — 阻塞处理：Web 零阻塞 + CLI 低阻塞 + 子代理执行基础设施**
+**D6 — 子代理调用机制：独立生命周期 + 后台线程执行（重写，修正生命周期缺陷）**
 
-> **这是后续子代理功能（F4 分支摘要、未来 tool 内 LLM 调用）的前置技术**。标题只是第一个子代理消费者；本决策确立的"异步/低阻塞执行 + 子代理消息构造 + 结果写回"三件套，后续子代理直接复用。
+> **本质**：标题生成是**子代理调用**——一次独立的一次性 LLM 调用（专用 prompt、无工具、静默），必须作为独立生命周期对象（创建→执行→写回→清理），**不寄生主请求线程**。这是后续子代理功能（F4 分支摘要、未来 tool 内 LLM 调用）的**前置基础设施**。
 
-**阻塞分析**：
+**原方案缺陷（`sse_done` 帧后同步执行，审查发现）**：
 
-| 前端 | 现状执行模型 | 标题生成若同步的阻塞点 |
-|------|-------------|----------------------|
-| Web | 每连接一线程（`server.zig:174` `std.Thread.spawn` + `detach`），`handleSSE` 在连接线程内同步 | `sse_done` 帧被延迟——前端保持流式状态直到标题请求返回（1-5s） |
-| CLI | 单线程 REPL，`processLine` 同步 | 回答显示后，REPL 回提示符前被阻塞（1-5s） |
+| # | 缺陷 | 后果 |
+|---|------|------|
+| L1 | **abort_map 竞态窗口**：`abort_map.remove` 在 `handlePrompt` 返回时 defer（`handler.zig:1010-1016`），ensureTitle 若在返回前同步执行 1-5s，abort_map 仍持有该 session | 前端收 done 后立即发第三条消息 → `isSessionStreaming`（`handler.zig:882`）误判 busy → 拒绝 |
+| L2 | **并发 flush 丢消息（致命）**：`session.flush` 整文件 `tmp+rename` 原子替换（`session.zig:399-419`）；标题 flush 与第三条消息的 append+flush 并发时，旧线程用旧消息快照**整文件覆盖** | 用户第三条消息丢失 |
+| L3 | **请求线程生命周期耦合**：标题 1-5s 阻塞连接线程收尾；若异步则需等待请求线程 arena 释放，存在 UAF 风险 | 阻塞 + 悬垂 |
 
-**处理（不引入真后台线程，利用现有模型消除可见阻塞）**：
+**正确设计：子代理 = 独立后台线程（fire-and-forget detached），拥有完整生命周期**。
 
-- **Web：移到 `sse_done` 帧之后**——`done` 已发给前端（前端 `evtSrc.close()` + `loadSessions()` 已触发），连接线程继续在后台执行标题生成 + `rename` + `flush`。**前端零感知**：done 即时返回，标题在下次 `loadSessions`/刷新时可见。线程模型不变（连接线程本就要为本次请求收尾），无需新增线程。
-  - 时序：`runTurn` → `session.flush()` → `sse_done` 帧 → **`ensureTitle`（静默）** → `handleSSE` 返回 → 连接线程结束。
-  - 细节：`handleSSE` 的 `session` 是函数局部（`defer session.deinit()`），`ensureTitle` 必须在返回前执行；执行位置放在 `sse_done` 帧之后、返回之前即可。
-- **CLI：接受低阻塞（1-5s）**——REPL 用户已看到完整回答，标题在回提示符前静默生成；`pipe_mode`（`--prompt` 管道）**跳过**（不污染 stdout，标题无展示价值）。若后续需要 CLI 完全非阻塞，追加后台线程方案（见下）。
-- **不引入真后台线程的理由**：Zig 0.16 `std.Thread.spawn` 可用（`server.zig:174` 已用），但后台线程需处理 session 生命周期（线程内 `loadSession` 副本 + 独立 allocator）、provider 并发（`chatCompletionStreaming` 非线程安全，共享 `Provider` 需加锁）、进程退出等待（`active_threads` 计数已存在）——为标题这一秒级低价值操作引入线程基础设施不划算。**Web 的"帧后执行"已把可见阻塞降为零**。
+```
+创建  spawn(task) —— 独立 arena + 复制 provider 配置（api_key dup）+ dup session_id/sessions_dir
+执行  线程内 Session.load 磁盘副本 → shouldAutoTitle 复查（防御）→ Provider 独立副本
+      → chatCompletionStreaming(msgs, null, null) → cleanTitle
+写回  持 session_write_mutex → 重新 load 最新 session → rename → flush → 释放锁
+清理  arena.deinit + thread.detach；失败路径同样清理
+退出  active_threads 计数等待（复用 server.zig:151-163 的 30s 等待先例）
+```
 
-**子代理执行基础设施（D6 延伸，后续子代理复用）**：
+**并发安全矩阵**（G14 生命周期 + F4 跨线程审查）：
 
-| 能力 | 标题（本期） | 后续子代理（F4 等） |
-|------|-------------|-------------------|
-| 消息构造 | `[system: TITLE_PROMPT, user: 前两条 user]` | `[system: <专用 prompt>, user: <相关上下文>]` |
-| 调用 | `chatCompletionStreaming(msgs, null, null)`（静默） | 同一模式 |
-| 执行位置 | Web 帧后 / CLI 回提示符前 | 回合边界（复用 D1 位置） |
-| 写回 | `session.rename` + `flush` | `replaceMessages`/写 header |
-| 失败 | LLM → 本地关键词 → 静态截断（D4 三层） | 各自降级 |
+| 资源 | 处理 | 说明 |
+|------|------|------|
+| arena | 每线程独立 | 无 UAF，不依赖请求线程 allocator |
+| Provider | 线程内独立副本（config 值拷贝 + api_key dup） | 无共享可变状态，无锁 |
+| session 文件 | **进程级 `session_write_mutex`（`Io.Mutex`）** 串行化所有写路径 | 防整文件覆盖竞争 |
+| 写回 | 锁内重新 load 最新 session → rename → flush | 基于最新消息，不丢并发写入 |
+| abort_map | 子代理**不碰** abort_map | 不误判 isSessionStreaming，与主线程隔离 |
+| 进程退出 | `active_threads` 计数等待 | 复用 server.zig 模式；CLI `deinit` 前等待子代理完成 |
 
-> 若 F4 落地时确需真后台线程（如分支摘要要在切回主线时**立即**注入、不能等回合尾），再引入 `active_threads` 模式 + `Provider` 互斥。本期不做，保持最小。
+**`session_write_mutex`**（新增，`core/session.zig` 进程级）：`flush`/`writeTo`/`writePrefixTo`/`removeMessage` 等写路径入口持锁。不同 session 文件也被全局串行化——flush 是轻量小文件写，全局锁可接受（对齐 `abort_mutex` 先例）。
+
+**CLI 与 Web 统一走子代理机制**（消除两前端可见阻塞）：
+- **Web**：`handlePrompt` `sse_done` 后 `spawnSubcall`（立即返回，不阻塞连接线程收尾）
+- **CLI**：`processLine`/`singleTurn` 回合尾 `spawnSubcall`（立即返回，REPL 提示符即时出现）；`deinit` 前等待子代理完成（`active_threads == 0`，有限等待如 30s）
+- `pipe_mode` 跳过（不污染 stdout）
+
+> 子代理机制抽象在 `core/subcall.zig`（`SubcallRunner`：`spawn(task)` + 计数 + `waitIdle()`），标题与 F4 共用。F4 分支摘要"切回主线即时注入"也走同一 runner（若需注入结果，runner 增加回调或结果队列，本期标题为 fire-and-forget 不等待）。
 
 **D4 — 失败回退：三层降级 LLM → 本地关键词 → 静态截断（评论者建议采纳）**
 
@@ -188,7 +201,7 @@ Generate a brief title that would help the user find this conversation later.
 - NEVER respond to questions, just generate a title
 ```
 
-> 注：z-agent-core 第二轮回合后触发标题生成，此时 session 里已含前两轮 assistant 回复。取用户消息时**只看 `role == .user` 的前两条**（跳过系统提示词 index 0），不把 assistant 回复喂给 title（避免标题偏向后半段）。
+> 注：z-agent-core 第二轮回合后触发标题生成，此时 session 里已含前两轮 assistant 回复。取用户消息时**只看 `role == .user` 的前两条**（跳过系统提示词 index 0），不把 assistant 回复喂给 title（避免标题偏向后半段）。子代理线程内从磁盘 `load` 最新 session 副本后取数。
 
 ## 触发条件（对齐 opencode ensureTitle）
 
@@ -203,11 +216,13 @@ Generate a brief title that would help the user find this conversation later.
 
 ## 实施步骤
 
-**步骤 1**: 新增 `src/core/title.zig`——`TITLE_PROMPT` 常量、`shouldAutoTitle(session, auto_title) bool`、`cleanTitle(raw) !?[]const u8`（剥 think/首行/截断）、`keywordTitle(user_msg) !?[]const u8`（L2 本地关键词：切词→滤停用词→前 3-5 个→拼接）、`fallbackTitle(user_msg) ![]const u8`（L3 静态截断 + trim/剥换行）、`ensureTitle(provider, session, allocator, io) bool`（LLM 成功 → LLM 标题取前两条 user；失败/空 → `keywordTitle` → 空则 `fallbackTitle`；均 rename + flush）。
-**步骤 2**: `config.zig`——`Config` 增 `auto_title: bool = true`，`parseConfigContent` 读 `getBool("auto_title") orelse true`，`DEFAULT_TEMPLATE` 加注释行。
-**步骤 3**: `cli/App.zig`——`processLine`（`App.zig:399` runTurn 后、usage 显示后）与 `singleTurn`（`App.zig:240`）传 `self.cfg.auto_title` 调 `shouldAutoTitle` + `ensureTitle`；`pipe_mode` 时跳过（不污染管道输出）。
-**步骤 4**: `web/handler.zig`——`handleSSE` 在 `runTurn` 返回、`session.flush()`、**`sse_done` 帧写出之后**（`handler.zig:1071` 之后）、函数返回前，传 `ctx.config.auto_title` 调 `shouldAutoTitle` + `ensureTitle`（复用 `agent.provider_ref` 与当前局部 `session`，deinit 前执行）。
-**步骤 5**: 测试——`title.zig` 单测（开关关闭直接 false / shouldAutoTitle 四条件 / cleanTitle think 剥离与截断 / **keywordTitle 停用词过滤与关键词数上限、全停用词返回 null** / ensureTitle LLM 失败回退链 L1→L2→L3）；`config.zig` 测试（`auto_title` 默认 true、`auto_title = false` 解析）；`node tests/frontend/run-tests.mjs` 回归。
+**步骤 1**: 新增 `src/core/title.zig`——`TITLE_PROMPT` 常量、`shouldAutoTitle(session, auto_title) bool`、`cleanTitle(raw) !?[]const u8`（剥 think/首行/截断）、`keywordTitle(user_msg) !?[]const u8`（L2 本地关键词：切词→滤停用词→前 3-5 个→拼接）、`fallbackTitle(user_msg) ![]const u8`（L3 静态截断 + trim/剥换行）、`ensureTitle(provider, session, allocator, io) bool`（LLM 成功 → LLM 标题取前两条 user；失败/空 → `keywordTitle` → 空则 `fallbackTitle`；写回持锁）。
+**步骤 2**: 新增 `src/core/subcall.zig`——`SubcallRunner`（`spawn(task)` fire-and-forget detached 线程 + `active_threads` 计数 + `waitIdle()`）；task 携带 provider 配置副本（api_key dup）+ session_id + sessions_dir + auto_title；线程内独立 arena → `Session.load` 磁盘副本 → 复查 `shouldAutoTitle` → `ensureTitle` → arena 释放。
+**步骤 3**: `core/session.zig`——进程级 `session_write_mutex: Io.Mutex`，`flush`/`writeTo`/`writePrefixTo`/`removeMessage` 写路径入口持锁（D6 防并发整文件覆盖）。
+**步骤 4**: `config.zig`——`Config` 增 `auto_title: bool = true`，`parseConfigContent` 读 `getBool("auto_title") orelse true`，`DEFAULT_TEMPLATE` 加注释行。
+**步骤 5**: `cli/App.zig`——`processLine`（`App.zig:399` runTurn 后）与 `singleTurn`（`App.zig:240`）传 `self.cfg.auto_title` 调 `shouldAutoTitle`；满足则 `subcall_runner.spawn(title_task)`（立即返回）；`pipe_mode` 跳过；`deinit` 前 `waitIdle()`（有限等待）。
+**步骤 6**: `web/handler.zig`——`handlePrompt` 在 `runTurn` 返回、`session.flush()`、**`sse_done` 帧写出之后**（`handler.zig:1069` 之后）、函数返回前，传 `ctx.config.auto_title` 调 `shouldAutoTitle`；满足则 `subcall_runner.spawn(title_task)`（复用 `agent.provider_ref` 的 config 副本 + session_id）。
+**步骤 7**: 测试——`title.zig` 单测（开关关闭直接 false / shouldAutoTitle 四条件 / cleanTitle think 剥离与截断 / **keywordTitle 停用词过滤与关键词数上限、全停用词返回 null** / ensureTitle LLM 失败回退链 L1→L2→L3）；`subcall.zig` 单测（spawn 生命周期、waitIdle 返回）；`session.zig` 写锁单测（并发 flush 串行化）；`config.zig` 测试（`auto_title` 默认 true、`auto_title = false` 解析）；`node tests/frontend/run-tests.mjs` 回归。
 
 ## 验证
 
@@ -219,14 +234,17 @@ node tests/frontend/run-tests.mjs
 
 | 测试场景 | 预期结果 |
 |----------|----------|
-| `auto_title = true`（默认） | 第二轮回合后生成 LLM 标题 |
+| `auto_title = true`（默认） | 第二轮回合后 spawn 子代理，后台生成 LLM 标题 |
 | `auto_title = false` | 不触发、不改名；Web 保持 `prompt[0..30]` 截断，CLI 保持 "New Session" |
 | CLI 首回合（`--prompt "恢复上下文"`） | 不触发，标题保持 "New Session"（占位） |
-| CLI 第二回合（`--prompt "帮我修 src/app.js 的 500 错误"`） | 回合结束后静默生成，`/list` 显示自然语言标题（如 "App.js 500 错误排查"）——覆盖首轮元操作 |
+| CLI 第二回合（`--prompt "帮我修 src/app.js 的 500 错误"`） | 回合后提示符**立即返回**（不等待标题），后台生成，`/list` 显示自然语言标题（如 "App.js 500 错误排查"）——覆盖首轮元操作 |
 | CLI 第三回合 | 不再触发（消息数 >2），标题保持第二轮生成值 |
-| Web 新会话前两条消息 | 首条不命名（保持截断），第二条后 `sse_done` 即时返回（不等待标题），随后后台生成 → `loadSessions` 显示 LLM 标题 |
+| Web 新会话前两条消息 | 首条不命名（保持截断）；第二条后 `sse_done` 即时返回 + spawn 子代理（连接线程不阻塞）→ `loadSessions` 显示 LLM 标题 |
+| **Web 第三条消息竞态（关键）** | done 后立即发第三条 → `isSessionStreaming` **不误判**（子代理不碰 abort_map）；第三条消息 flush 与标题 flush 由 `session_write_mutex` 串行化，**消息不丢失** |
+| **子代理生命周期** | spawn 的线程完成（含失败/LLM 错误路径）后 arena 释放、计数归零，无泄漏/无悬垂 |
+| **进程退出** | CLI `deinit` / Web 退出等待子代理完成（active_threads==0，30s 上限），标题写盘完成才退出 |
 | CLI 管道模式（`--prompt "..." \| ...`） | 跳过标题生成，stdout 纯净无污染 |
-| 第二轮为元操作（如 "继续"）+ 第三条任务 | 标题基于前两条生成（元操作+任务 → 反映任务主题） |
+| 第二轮为元操作（如 "继续"） | 标题基于前两条生成（元操作+首条任务 → 反映任务主题） |
 | fork 子会话 | 不触发（有 parent_id，保持 `(fork #N)`） |
 | 已重命名会话（非默认标题） | 不触发 |
 | title LLM 调用失败 / 空结果 | 回合正常完成，标题走 L2 本地关键词（如 `"src app.js 500 错误"`）；若 L2 空则 L3 静态截断；CLI 不再是 "New Session"，无报错 |
@@ -240,18 +258,21 @@ node tests/frontend/run-tests.mjs
 | 文件 | 改动 |
 |------|------|
 | `src/core/title.zig` | 新增：TITLE_PROMPT / shouldAutoTitle / cleanTitle / keywordTitle（L2）/ fallbackTitle（L3）/ ensureTitle |
+| `src/core/subcall.zig` | 新增：SubcallRunner（spawn / active_threads / waitIdle），子代理后台执行基础设施 |
+| `src/core/session.zig` | `session_write_mutex`（Io.Mutex）串行化 flush/writeTo/writePrefixTo/removeMessage |
 | `src/config.zig` | `Config.auto_title: bool` 字段 + 解析 + DEFAULT_TEMPLATE 注释 |
-| `src/frontends/cli/App.zig` | `processLine` + `singleTurn` 回合边界调用（传 `cfg.auto_title`） |
-| `src/frontends/web/handler.zig` | `handleSSE` runTurn 后调用（传 `ctx.config.auto_title`） |
+| `src/frontends/cli/App.zig` | `processLine` + `singleTurn` 回合边界 spawn（传 `cfg.auto_title`）；deinit 前 waitIdle |
+| `src/frontends/web/handler.zig` | `handlePrompt` sse_done 后 spawn（传 `ctx.config.auto_title`）；server.zig 挂载 runner |
+| `src/frontends/web/server.zig` | `SubcallRunner` 实例（进程级）+ 退出等待 |
 | `docs/REMAINING.md` | F2 标记实施（发布时） |
 
 ## 明确不做
 
 - **small model（`title_model` 配置）**：本期用会话当前模型；小模型节省的 token 在首条消息场景可忽略，后续需要再加
 - **按会话/按命令粒度开关**：本期只做全局 `auto_title` 顶层开关；per-session 或 `/title off` 命令粒度后续按需评估
-- **异步/fire-and-forget（真后台线程）**：本期不引入。Web 已用"sse_done 帧后执行"把可见阻塞降为零；CLI 接受 1-5s 低阻塞（管道模式跳过）。真后台线程需处理 session 副本/Provider 互斥/进程退出等待，留待 F4 分支摘要落地时评估（D6）
+- **结果队列/回调**：本期标题是 fire-and-forget（spawn 不等待、不回调）；F4 分支摘要若需"切回主线即时注入"，runner 增加结果队列或回调（D6 预留）
 - **CLI 实时标题刷新**：CLI 无 TUI，标题在 `/list` 可见即可（对齐现有会话管理交互）
-- **sub-agent 注册表 / 通用子代理抽象**：只有一个消费者（title），`compactSession` 已证明直接 provider 调用足够；出现第二个子代理（如 F4 分支摘要）时再评估抽象
+- **sub-agent 注册表 / 通用子代理抽象**：只有一个消费者（title），`SubcallRunner` 提供后台执行 + 生命周期，但 title 逻辑仍直接复用 `chatCompletionStreaming`；出现第二个子代理（如 F4 分支摘要）时再评估更重抽象
 - **改 Web 空会话 UUID 命名逻辑**：`handleSessionCreate` 空会话仍保持 UUID 名 + 前端显示 "New Session"，由 title 生成后自然替换
 - **失败时保持 "New Session"**：已否决——LLM 失败走本地关键词/静态截断（D4 三层），保证任何有内容会话都有有意义标题
 - **复杂 NLP 关键词提取**：L2 只用轻量规则（切词 + 固定停用词表 + 前 N 词拼接），不做词性标注/语义排序/多语言形态还原——标题是秒级低价值元数据，规则越简单越稳

@@ -135,7 +135,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 
 | # | Item | Notes |
 |---|------|-------|
-| F2 | **LLM 自动标题**（会话命名） | 对齐 opencode `SessionPrompt.ensureTitle`（`prompt.ts:193-255`）：无 parentID + 默认标题 → title agent 生成标题。**触发时机修订为"恰 2 条真实用户消息后"（第二轮延迟命名，对齐 ChatGPT/Claude "新对话"占位 + 后台生成范式，规避首条元操作消息如"恢复上下文"）**。依赖 P4 compact 的 LLM 基建，P4 落地后评估（SESSION-SYSTEM-OPT P2 延后项）。**计划文档：`docs/0.2.7/PLAN-LLM-AUTO-TITLE.md`**（子代理机制：`core/title.zig` 复用 `chatCompletionStreaming`，回合后同步触发，LLM 失败回退静态截断，`auto_title` 顶层开关） |
+| F2 | **LLM 自动标题**（会话命名） | 对齐 opencode `SessionPrompt.ensureTitle`（`prompt.ts:193-255`）：无 parentID + 默认标题 → title agent 生成标题。**触发时机修订为"恰 2 条真实用户消息后"（第二轮延迟命名，对齐 ChatGPT/Claude "新对话"占位 + 后台生成范式，规避首条元操作消息如"恢复上下文"）**。依赖 P4 compact 的 LLM 基建，P4 落地后评估（SESSION-SYSTEM-OPT P2 延后项）。**计划文档：`docs/0.2.7/PLAN-LLM-AUTO-TITLE.md`**（子代理机制：`core/title.zig` 复用 `chatCompletionStreaming`；`core/subcall.zig` SubcallRunner 后台线程执行 + `session_write_mutex` 写串行化；LLM 失败三层降级（关键词/静态截断）；`auto_title` 顶层开关） |
 | F3 | MCP tool discovery | `mcp_connect` tool — LLM discovers remote tools at runtime |
 | F4 | **分支摘要注入**（branch_summary） | 借鉴 pi-repos `branch-summarization.ts`：离开分支/切回主线时 LLM 摘要注入（"用户探索了另一分支..."），告知模型分支探索内容。依赖 P4 LLM 基建（SESSION-SYSTEM-OPT P2 延后项） |
 
