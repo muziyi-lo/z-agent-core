@@ -71,6 +71,52 @@
 
 **边界**：孤儿分支（父已删）提升到顶层（现有逻辑 `app.js:324-334` 保留）；收起父时其下所有深度后代一并收起（`renderChildren` 递归判断）。
 
+### UI 设计（新增，对齐现有视觉语言）
+
+> 所有样式沿用现有 CSS 变量（`--bg-layer-01/02/03`、`--border-base`、`--accent-base`、`--text-*`），不新增色板。图标用现有 `biIcon` helper（app.js:104）或 UTF-8 符号。
+
+**N1 — Fork/Reset 按钮（more-menu）**：
+
+| 元素 | 设计 |
+|------|------|
+| Fork 菜单项 | `more-menu` 内 rename 与 pin 之间插 `<div class="more-item" data-act="fork">Fork</div>`（`app.js:352` 的 innerHTML 追加）；hover 同现有 `.more-item:hover` 样式 |
+| Fork 命名输入 | 复用 rename 的 `input` 模式（`app.js:380-401`）：点击后 name 区变 `input.rename-input`，Enter/失焦提交；**预填默认 `{base} (fork #N)`**（服务端 forkTitle 计算，PATCH 无 name 时服务端生成）——简化交互，用户可改可留空 |
+| Reset 菜单项 | `<div class="more-item danger" data-act="reset">Reset</div>`（danger 类，对齐现有 delete 样式 `.more-item.danger:hover` 红色） |
+| Reset 确认 | 用现有 `modal-overlay`（`app.css:165-173`）弹确认框："Reset this session? All messages will be cleared." + `modal-cancel`/`modal-danger` 按钮——比 `confirm()` 更贴合现有 modal 组件 |
+| Fork 成功后 | `switchToSession(fork_id, name)`（app.js:1279）自动切换 + `loadSessions` 刷新分支树 |
+
+**N3a — 分支树收起（视觉）**：
+
+| 元素 | 设计 |
+|------|------|
+| 折叠按钮 | 父会话条目左侧新增 `▸/▾` 符号（`font-size:10px`、`--text-faint`），置于 branch-icon 之前（若同时是分支则 ▸ 在前）；点击 toggle |
+| 定位 | `position:absolute; left:6px; top:50%; translateY(-50%)`（现有 pin-btn/delete-btn 用 absolute 定位，但靠右；折叠钮靠左避免与名称重叠） |
+| 有子会话标记 | `data-has-children` 且 `childrenMap[id].length > 0` 才显示折叠钮（叶子无钮） |
+| 收起态 | `div.collapsed` class：子分支 DOM `display:none`；▸ 旋转或替换为 ▾ |
+| 缩进 | 折叠钮随 `padding-left` 移动（现有 `app.js:346` 按 depth 缩进 28+14*(depth-1)px）——折叠钮固定在每行最左，`left` 用 `padding-left + 6` 计算 |
+
+**N3b — 分页加载（视觉）**：
+
+| 元素 | 设计 |
+|------|------|
+| 加载中指示 | `session-list` 底部追加 `<div class="sessions-loading">`（`--text-faint`、`font-size:11px`、`padding:8px`、居中），显示 "Loading more…"（复用 `.empty-hint` 风格） |
+| 无更多 | 到底后显示一次 "No more sessions" 后移除（不常驻） |
+| 加载 spinner | 复用 `.spinner`（app.css:146）——loading 行内小 spinner + 文本 |
+| 滚动阈值 | `#session-list` 底部 100px 内触发加载更早；`loading` 标志防重复（追加中不重复触发） |
+
+**新增 CSS**（app.css 追加，对齐现有单行紧凑风格）：
+
+```css
+/* branch collapse */
+.collapse-btn{position:absolute;left:6px;top:50%;transform:translateY(-50%);width:16px;height:16px;display:flex;align-items:center;justify-content:center;color:var(--text-faint);font-size:10px;cursor:pointer;border-radius:var(--radius-sm);user-select:none;background:none;border:none}
+.collapse-btn:hover{color:var(--text-strong);background:var(--bg-layer-02)}
+.session.collapsed .branch-children{display:none}
+/* paging */
+.sessions-loading{padding:8px;color:var(--text-faint);font-size:11px;text-align:center;display:flex;align-items:center;justify-content:center;gap:6px}
+```
+
+> **交互一致性**：收起/分页/按钮全部走现有 hover/active 视觉模式（`opacity:0→hover:0.4→active:1` 三段式，对齐 delete/pin/more 按钮）；`prefers-reduced-motion` 已全局处理（app.css:176），diff 不新增动画。
+
 ### D3 — N3b：会话列表分页
 
 **现状**：`session.zig:764 list()` 全量返回；`GET /api/session`（handler.zig:270 附近）无分页。
@@ -118,13 +164,13 @@
 ### 步骤 2: 前端 more-menu Fork/Reset 按钮
 
 **文件**: `src/frontends/web/app.js` + `app.css`
-**改动**: more-menu 追加 Fork/Reset 项；Fork 弹输入框（复用 rename 模式）、Reset 用 `confirm()`；调用 PATCH 端点
-**注意**: fork 成功后 `switchToSession`（app.js:1279）；reset 后 `loadSessions`；流式中禁用（`isStreaming` 前端标志）
+**改动**: more-menu 追加 Fork/Reset 项（`app.js:352` innerHTML 追加 `data-act="fork"/"reset"`）；Fork 复用 rename 输入模式（`app.js:380-401`）+ 预填 forkTitle；Reset 用 modal 确认框（`modal-overlay` 组件）；调用 PATCH 端点
+**注意**: fork 成功后 `switchToSession`（app.js:1279）；reset 后 `loadSessions`；流式中禁用（`isStreaming` 前端标志）；UI 规范见「UI 设计」节
 
 ### 步骤 3: 侧边栏 DOM diff + 收起
 
 **文件**: `src/frontends/web/app.js` + `app.css`
-**改动**: `loadSessions` 重写为增量 patch；`data-session-id` 定位；`localStorage` 收起状态；`renderChildren` 支持收起
+**改动**: `loadSessions` 重写为增量 patch；`data-session-id` 定位；`localStorage` 收起状态；`renderChildren` 支持收起（`collapse-btn` + `.session.collapsed`）；UI 规范见「UI 设计」节
 **关键代码**:
 
 ```js
@@ -181,18 +227,23 @@ node ..\.opencode\skills\zig-dev\scripts\check-catch-silent.mjs . --audit
 
 | 测试场景 | 预期结果 |
 |----------|----------|
-| Web 会话 more-menu 点 Fork | 弹输入框 → 确认 → 新会话出现在侧边栏（`(fork #N)`）→ 自动切换 |
-| Web 会话 more-menu 点 Reset | `confirm()` → 会话消息清空（保留系统提示词）→ 侧边栏刷新 |
-| 流式会话 Fork/Reset | `agent_busy` 拒绝（isSessionStreaming） |
+| Web 会话 more-menu 点 Fork | 名称变输入框（预填 `(fork #N)`）→ Enter → 新会话出现在侧边栏 → 自动切换 |
+| Web 会话 more-menu 点 Reset | modal 确认框（Cancel/Danger）→ 确认后会话消息清空（保留系统提示词）→ 侧边栏刷新 |
+| Fork/Reset 按钮 hover | 三段式 opacity（0→0.4→1），Reset danger 红色 hover（对齐 delete） |
+| 流式会话 Fork/Reset | `agent_busy` 拒绝（isSessionStreaming）+ 按钮禁用态 |
 | slash `/fork` `/reset` | 兼容保留（command 通道转发新逻辑） |
+| 父会话折叠按钮 | 有子会话显示 `▸`，点击变 `▾` + 子树隐藏；叶子无按钮 |
 | 侧边栏收起父会话 | 子树隐藏；刷新/操作后**收起状态保持**（localStorage） |
+| 收起嵌套分支 | 收起 2 代父 → 所有后代隐藏；展开父 → 后代按各自收起状态恢复 |
 | 侧边栏会话多 | 只更新变化的条目，无全量闪烁 |
 | 孤儿分支（父已删） | 提升顶层（既有逻辑），收起状态不受影响 |
-| 会话列表 >50 | 首屏 50 + 滚动到底加载更早，`has_more` 正确 |
+| 会话列表 >50 | 首屏 50 + 滚动到底显示 "Loading more…" spinner → 加载更早，`has_more` 正确 |
+| 无更多会话 | 显示一次 "No more sessions" 后移除 |
 | 无分页参数 `GET /api/session` | 全量返回（兼容） |
 | 崩溃后残留 `.jsonl.tmp` | 启动清理删除；无 tmp 时启动正常 |
 | fork 命名冲突 | `error.SessionAlreadyExists` → 400 提示 |
 | 分页与收起共存 | 追加加载更早会话时，已收起父的子树保持收起 |
+| reduced-motion | 收起/加载无动画（全局已处理） |
 
 ## 波及
 
@@ -200,7 +251,7 @@ node ..\.opencode\skills\zig-dev\scripts\check-catch-silent.mjs . --audit
 |------|------|----------|
 | `src/frontends/web/handler.zig` | fork/reset PATCH 端点 + 抽共享函数 | 否（command 保留） |
 | `src/frontends/web/app.js` | more-menu 按钮 + loadSessions diff + 收起 + 分页加载 | 是（loadSessions 重写，前端测试需适配） |
-| `src/frontends/web/app.css` | 收起按钮样式、diff 过渡 | 否 |
+| `src/frontends/web/app.css` | `.collapse-btn` / `.session.collapsed` / `.sessions-loading` 样式 | 否 |
 | `src/core/session.zig` | `list` 增 limit/after | 否（默认全量） |
 | `src/frontends/init.zig` | tmp 残留清理 | 否 |
 | `tests/frontend/*` | loadSessions 相关测试适配 | 是 |
