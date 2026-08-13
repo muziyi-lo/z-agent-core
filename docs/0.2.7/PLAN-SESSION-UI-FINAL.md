@@ -18,9 +18,9 @@
 
 ## 概览
 
-- 涉及 3 模块：`core/session.zig`、`web/handler.zig`、`web/app.js`（+ `app.css`）
-- 新增：fork/reset REST 端点、侧边栏收起、列表分页、tmp 清理
-- 一句话思路：**前端可发现性（按钮）→ 侧边栏性能（diff + 收起 + 分页）→ 数据容错（tmp 清理）**，三段独立可发、同属会话系统收尾
+- 涉及 4 模块：`core/session.zig`、`web/handler.zig`、`web/app.js`（+ `app.css`）、`tool/bash.zig`
+- 新增：fork/reset REST 端点、侧边栏收起、列表分页、tmp 清理、bash 超时
+- 一句话思路：**前端可发现性（按钮）→ 侧边栏性能（diff + 收起 + 分页）→ 数据容错（tmp 清理）→ 工具诚实性（bash 超时）**，四段独立可发、同属会话系统收尾
 - 参照：opencode `SessionPrompt` 的分支 UI + `createAutoScroll` 状态持久化先例
 
 ## 前置依赖
@@ -196,6 +196,26 @@
 
 > **为什么这是本计划范围**：session CRUD 日志是会话系统收尾的一部分（LOGGING-SYSTEM P1 只覆盖了 SSE/agent/provider/compact，会话管理操作是遗漏领域）。本计划触碰这些 handler（抽 fork/reset 共享函数、加 list 分页），顺带补齐零增量成本。
 
+### D6 — bash 超时修复（工具诚实性，评论者场景确认）
+
+**问题**：`bash.zig` 的 `timeout` 参数标注 "informational only — process execution is blocking"（bash.zig:15），**实际不生效**——`std.process.run` 调用（bash.zig:56-68）未传 `options.timeout`，阻塞命令无限挂起。模型要么等用户 Ctrl+C（返回 `"Command aborted by user."`），要么**永远等不到结果、无感知**（opencode 中观察到的"人工中断后模型无感知"即此场景的变体——中断感知有，但超时感知缺）。
+
+**方案**：传 `options.timeout`（`std.process.run` 已支持，`process.zig:485` `timeout: Io.Timeout = .none`），超时自动 kill 子进程 + 明确返回给模型：
+
+| 状态 | 现状 | 修复后 | 模型感知 |
+|------|------|--------|---------|
+| 完成 | `Command exited with code N.` | 不变 | ✅ 完成 |
+| 中断（Ctrl+C） | `"Command aborted by user."` | 不变 | ✅ 中断 |
+| **超时** | **无限阻塞** | **`Command timed out after Ns.` + `meta.timed_out=true`** | ✅ 超时（新增） |
+
+**实现**：
+- `bash.zig` 读 `timeout` 参数（秒，默认如 120）：`const timeout_opt = Io.Timeout{ .duration = Io.Clock.Duration.fromSeconds(secs) };`
+- `std.process.run` 传 `.timeout = timeout_opt`；超时 → `run` 返回 `error.Timeout`（`Io.Timeout.Error = error{Timeout}`，Io.zig:1137）→ catch 分支返回 `"Command timed out after Ns."`
+- `meta.timed_out = true`（替换当前硬编码 false，bash.zig:139）
+- 中断路径保留（`signal.isInterrupted()` 分支，bash.zig:94-96）；确认 signal.reset 时机——中断时先判断超时还是中断，避免超时路径吞掉中断状态
+
+**API 验证（G7）**：`Io.Timeout` union（Io.zig:1132，`.none`/`.duration`/`.deadline`）+ `Clock.Duration.fromSeconds`（Io.zig:986）+ `RunOptions.timeout`（process.zig:485）+ `error.Timeout`（Io.zig:1137）——全部已确认存在于 Zig 0.16 stdlib。
+
 ## 实施
 
 ### 步骤 1: fork/reset REST 端点 + 共享逻辑
@@ -271,6 +291,26 @@ while (it.next(io) catch null) |entry| {
 **改动**: `list` 分页单测（limit/after/has_more）；`handleFork`/`handleReset` 单测（复用 handler 测试模式）；`tmp 清理` 单测（造 `.jsonl.tmp` → init → 消失）；前端 Node 测试适配 `loadSessions` 新逻辑（若测试引用旧全量重建行为需更新）；**日志验证**（D5：fork/reset/delete/rename/truncate/branch/undo 成功路径打 `session_*` 事件，grep 日志确认）
 **注意**: handler 测试用 `testing.io`（无子进程）——fork/reset 无 LLM 调用，可测；日志验证在 e2e（真实进程）下做，单测不依赖日志
 
+### 步骤 7: bash 超时（D6）
+
+**文件**: `src/tool/bash.zig`
+**改动**: 读 `timeout` 参数（秒，默认 120）→ `std.process.run` 传 `Io.Timeout{ .duration = Clock.Duration.fromSeconds(secs) }`；超时 catch 返回 `"Command timed out after Ns."` + `meta.timed_out = true`；中断路径保留，signal.reset 时机区分超时/中断
+**关键代码**:
+
+```zig
+// bash.zig execute() 内，解析 timeout 参数
+const timeout_secs: u32 = if (args.object.get("timeout")) |tv|
+    (if (tv == .integer) @intCast(@max(tv.integer, 1)) else 120) else 120;
+const timeout_opt = Io.Timeout{ .duration = Io.Clock.Duration.fromSeconds(@intCast(timeout_secs)) };
+
+// std.process.run 传入 .timeout；catch 区分超时 vs 其他
+// error.Timeout → "Command timed out after {timeout_secs}s."
+// 其他 err → 现状 "Error: execution failed: {s}"
+// meta.timed_out = true（超时分支）
+```
+
+**注意**: 超时分支不碰 signal；中断分支（`signal.isInterrupted()`）在超时判断之后——命令超时被 kill 与用户 Ctrl+C 是两条独立路径，不可互相吞状态；`meta.timed_out` 不再硬编码 false
+
 ## 验证
 
 ```powershell
@@ -304,6 +344,9 @@ node ..\.opencode\skills\zig-dev\scripts\check-catch-silent.mjs . --audit
 | **分组 header 不重复（评论者场景）** | 追加跨组（today 满 → yesterday）→ yesterday header 只创建一次，会话落对组；全量重建/追加均按 `data-group` 判定，无重复 header |
 | **分组消失** | 会话全删/移组后，空组 header 被移除 |
 | **追加会话落组正确** | 更早会话插入对应组 timestamp desc 位置，非"最近节点后" |
+| **bash 阻塞命令超时（D6）** | `timeout: 2` + `sleep 10` → 约 2s 返回 `"Command timed out after 2s."`，`meta.timed_out=true`，命令被 kill |
+| **bash 正常命令** | 完成返回，`timed_out=false`，行为不变 |
+| **bash 中断** | Ctrl+C → `"Command aborted by user."`（既有），超时路径不吞中断状态 |
 | reduced-motion | 收起/加载无动画（全局已处理） |
 
 ## 波及
@@ -314,6 +357,7 @@ node ..\.opencode\skills\zig-dev\scripts\check-catch-silent.mjs . --audit
 | `src/frontends/web/app.js` | more-menu 按钮 + loadSessions diff + 收起 + 分页加载 | 是（loadSessions 重写，前端测试需适配） |
 | `src/frontends/web/app.css` | `.collapse-btn` / `.session.collapsed` / `.sessions-loading` 样式 | 否 |
 | `src/core/session.zig` | `list` 增 limit/after | 否（默认全量） |
+| `src/tool/bash.zig` | bash 超时（D6）：timeout 参数生效 + timed_out 上报 | 否（默认无超时变更，仅新增能力） |
 | `src/frontends/init.zig` | tmp 残留清理 | 否 |
 | `tests/frontend/*` | loadSessions 相关测试适配 | 是 |
 
@@ -323,6 +367,8 @@ node ..\.opencode\skills\zig-dev\scripts\check-catch-silent.mjs . --audit
 - **会话文件损坏自动修复**：`load` 已跳坏行，不做逐行重建
 - **`.tmp` 半写内容恢复**：tmp 是完整新文件，rename 前崩溃则旧文件完好，删 tmp 即恢复
 - **侧边栏虚拟滚动**：分页 + 收起已控规模，DOM diff 足够
+- **bash 执行耗时上报给模型**：模型需要"完成/超时/中断"三态，不需要耗时数值（D6 边界）
+- **bash 后台化/异步**：超时 kill 已解决挂死，后台任务执行是更大特性，另立
 - **消息级无限滚动**：`GET /session/:id?limit=50` 已有游标分页（一期 P3），本次只做会话列表级
 
 ## 术语
