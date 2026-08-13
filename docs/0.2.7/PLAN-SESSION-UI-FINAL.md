@@ -42,6 +42,12 @@
 | `PATCH /api/session/:id/fork` | body `{name?: string}` | fork 当前会话，`session_ops.fork` 复用；返回 `{session_id, name}` |
 | `PATCH /api/session/:id/reset` | 无 body | 清空会话消息，`session_ops.reset` + flush；返回 `{status:"ok"}` |
 
+**reset 语义（评论者确认，明确"保留系统提示词"）**：
+- `session_ops.reset`（`session_ops.zig:131-135`）保留系统提示词：`keep = 1`（index 0 为 system 时），`truncateTo(keep)`——**用户/助手/工具消息全部清空，系统提示词保留**，会话 id/name 不变
+- 已有单测验证（`session_ops.zig:137-149` "reset keeps system prompt"）
+- **下回合刷新**：agent 每回合 `updateFirstSystem` 重建系统提示词（含 env/date/project_context）——reset 保留的旧 system prompt 会在下一回合被覆盖为最新版，两者不矛盾
+- **日志**：`session_reset` 记录 `msgs_cleared`（清空前的消息数）
+
 - 前端 **more-menu 增 Fork/Reset 两项**（`app.js:352` more-menu 已含 rename/pin/delete，追加两项）
 - Fork 点击 → 弹内联输入框（复用 rename 的 `input` 模式，`app.js:380-401`）→ PATCH fork → `switchToSession`（app.js:1279）
 - Reset 点击 → `confirm()` 二次确认 → PATCH reset → `loadSessions`
@@ -109,7 +115,7 @@
 | Fork 菜单项 | `more-menu` 内 rename 与 pin 之间插 `<div class="more-item" data-act="fork">Fork</div>`（`app.js:352` 的 innerHTML 追加）；hover 同现有 `.more-item:hover` 样式 |
 | Fork 命名输入 | 复用 rename 的 `input` 模式（`app.js:380-401`）：点击后 name 区变 `input.rename-input`，Enter/失焦提交；**预填默认 `{base} (fork #N)`**（服务端 forkTitle 计算，PATCH 无 name 时服务端生成）——简化交互，用户可改可留空 |
 | Reset 菜单项 | `<div class="more-item danger" data-act="reset">Reset</div>`（danger 类，对齐现有 delete 样式 `.more-item.danger:hover` 红色） |
-| Reset 确认 | 用现有 `modal-overlay`（`app.css:165-173`）弹确认框："Reset this session? All messages will be cleared." + `modal-cancel`/`modal-danger` 按钮——比 `confirm()` 更贴合现有 modal 组件 |
+| Reset 确认 | 用现有 `modal-overlay`（`app.css:165-173`）弹确认框："Reset this session? All messages will be cleared. (System prompt is kept.)" + `modal-cancel`/`modal-danger` 按钮——比 `confirm()` 更贴合现有 modal 组件；文案明确"消息清空、系统提示词保留" |
 | Fork 成功后 | `switchToSession(fork_id, name)`（app.js:1279）自动切换 + `loadSessions` 刷新分支树 |
 
 **N3a — 分支树收起（视觉）**：
@@ -195,7 +201,7 @@
 ### 步骤 1: fork/reset REST 端点 + 共享逻辑
 
 **文件**: `src/frontends/web/handler.zig`
-**改动**: 抽 `handleFork`/`handleReset`（从 `handleCommandExec:564-577` 提取），新增 PATCH 路由；`handleCommandExec` 转发；**补日志**（D5）：fork → `session_fork`、reset → `session_reset`；顺带补 delete/rename/truncate/branch/undo 的 `session_*` 事件
+**改动**: 抽 `handleFork`/`handleReset`（从 `handleCommandExec:564-577` 提取），新增 PATCH 路由；`handleCommandExec` 转发；**补日志**（D5）：fork → `session_fork`、reset → `session_reset`（`msgs_cleared`）；顺带补 delete/rename/truncate/branch/undo 的 `session_*` 事件；**reset 语义**：`session_ops.reset` 保留系统提示词（`session_ops.zig:131`），实现直接复用不改
 **关键代码**:
 
 ```zig
@@ -277,7 +283,8 @@ node ..\.opencode\skills\zig-dev\scripts\check-catch-silent.mjs . --audit
 | 测试场景 | 预期结果 |
 |----------|----------|
 | Web 会话 more-menu 点 Fork | 名称变输入框（预填 `(fork #N)`）→ Enter → 新会话出现在侧边栏 → 自动切换 |
-| Web 会话 more-menu 点 Reset | modal 确认框（Cancel/Danger）→ 确认后会话消息清空（保留系统提示词）→ 侧边栏刷新 |
+| Web 会话 more-menu 点 Reset | modal 确认框（Cancel/Danger，文案含"System prompt is kept"）→ 确认后会话消息清空、**系统提示词保留**（index 0）→ 侧边栏刷新 |
+| Reset 后发消息 | 系统提示词被 agent 下回合 `updateFirstSystem` 刷新为最新（env/date），消息从用户新输入开始 |
 | Fork/Reset 按钮 hover | 三段式 opacity（0→0.4→1），Reset danger 红色 hover（对齐 delete） |
 | 流式会话 Fork/Reset | `agent_busy` 拒绝（isSessionStreaming）+ 按钮禁用态 |
 | slash `/fork` `/reset` | 兼容保留（command 通道转发新逻辑） |
