@@ -10,6 +10,8 @@ const log = @import("../../util/log.zig");
 const command_mod = @import("../../command.zig");
 const session_ops = @import("../../session_ops.zig");
 const compact_mod = @import("../../core/compact.zig");
+const title_mod = @import("../../core/title.zig");
+const subcall_mod = @import("../../core/subcall.zig");
 const trace = @import("../../util/trace.zig");
 const timing = @import("../../util/timing.zig");
 
@@ -56,6 +58,8 @@ pub const Context = struct {
     /// Persistent allocator for the undo stack (survives per-request arenas).
     undo_allocator: std.mem.Allocator,
     undo_map: *std.StringHashMap(*std.ArrayListAligned(UndoOp, null)),
+    /// Process-level background sub-call runner (D6 title generation).
+    subcall_runner: *subcall_mod.SubcallRunner,
     thread_id: u32,
     request_id: u32,
 };
@@ -955,7 +959,7 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
         var s = created.session;
         defer s.deinit();
         try s.append(.{ .role = .user, .content = prompt });
-        const title_len = @min(prompt.len, 30);
+        const title_len = @min(prompt.len, title_mod.TITLE_PREFIX_LEN);
         s.name = try ctx.allocator.dupe(u8, prompt[0..title_len]);
         try s.flush();
         is_new = true;
@@ -1070,6 +1074,29 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
 
     log.biz_info(ctx.thread_id, ctx.request_id, "sse_done", "msgs={d}", .{result.new_message_count});
     timing.mark("sse_done", ctx.thread_id, ctx.request_id);
+
+    // Second-turn title generation (background, best-effort, D6). Runs after the
+    // done frame so the client already got the response; the connection thread is
+    // not blocked. Only on non-error finishes (rolled-back turns never get a title).
+    if (result.finish == .stop or result.finish == .max_rounds) {
+        maybeAutoTitle(ctx, agent, &session);
+    }
+}
+
+/// Fire a background title sub-call when the session qualifies (second user
+/// message, default title, switch on). Non-blocking: spawns a detached thread.
+fn maybeAutoTitle(ctx: *Context, agent: *agent_mod.AgentLoop, session: *session_mod.Session) void {
+    if (!ctx.config.auto_title) return;
+    if (!title_mod.shouldAutoTitle(session, ctx.config.auto_title)) return;
+    const path = session.path orelse return;
+
+    const task = subcall_mod.TitleTask{
+        .provider = agent.provider_ref.*,
+        .session_path = path,
+        .extra_stopwords = ctx.config.title_stop_words,
+        .auto_title = ctx.config.auto_title,
+    };
+    ctx.subcall_runner.spawnTitle(task);
 }
 
 fn buildDonePayload(allocator: std.mem.Allocator, buf: []u8, new_msgs: u32, msgs: []const types.Message, model: []const u8, session_id: []const u8) ![]const u8 {

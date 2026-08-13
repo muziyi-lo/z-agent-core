@@ -8,6 +8,14 @@ pub const DEFAULT_SESSION_FILENAME = "New_Session";
 /// Referenced by Session.flush and both frontends (init.zig, server.zig).
 pub const sessions_subdir = ".zagent/sessions";
 
+/// Process-level lock serializing all session file writes (flush / writeTo /
+/// writePrefixTo / removeMessage / renameTitle). Session.flush does a whole-file
+/// tmp+rename with a FIXED tmp name (`{path}.tmp`), so two threads writing the
+/// same session concurrently would clobber each other's tmp file. Locking must
+/// cover the full read-modify-write transaction, single-layer held (public
+/// entry locks, internal `XxxLocked` is lock-free) — see renameTitle.
+var session_write_mutex: std.Io.Mutex = .init;
+
 /// Linear session storing messages in a JSONL file. All data owned by internal arena.
 pub const Session = struct {
     _arena: std.heap.ArenaAllocator,
@@ -378,7 +386,16 @@ pub const Session = struct {
     }
 
     /// Write all messages to JSONL file. Creates .zagent/sessions/ if needed.
+    /// Public entry — acquires the process-level session_write_mutex, then calls
+    /// the lock-free flushLocked. Do NOT call from inside a held lock.
     pub fn flush(self: *Session) !void {
+        session_write_mutex.lock(self.io) catch return error.MutexLockFailed;
+        defer session_write_mutex.unlock(self.io);
+        try self.flushLocked();
+    }
+
+    /// Lock-free internal flush (no mutex). Callers must hold session_write_mutex.
+    fn flushLocked(self: *Session) !void {
         const arena = self._arena.allocator();
         const cwd = Io.Dir.cwd();
 
@@ -482,7 +499,15 @@ pub const Session = struct {
     /// Remove a message at the given index. Uses temp-then-rename for atomicity.
     /// Index 0 is typically the system message; callers should ensure they don't remove it
     /// unless they know what they're doing.
+    /// Public entry — acquires session_write_mutex, then delegates to removeMessageLocked.
     pub fn removeMessage(self: *Session, index: usize) !void {
+        session_write_mutex.lock(self.io) catch return error.MutexLockFailed;
+        defer session_write_mutex.unlock(self.io);
+        try self.removeMessageLocked(index);
+    }
+
+    /// Lock-free internal remove (no mutex). Callers must hold session_write_mutex.
+    fn removeMessageLocked(self: *Session, index: usize) !void {
         const arena = self._arena.allocator();
         const cwd = Io.Dir.cwd();
 
@@ -529,8 +554,23 @@ fn roleFromString(s: []const u8) ?types.Role {
     return null;
 }
 
-fn sanitizeFileName(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
-    var buf: std.ArrayListAligned(u8, null) = .empty;
+/// Atomically rename a session's display title: single-layer lock covering the
+/// full read-modify-write transaction — lock → load the LATEST file (so we never
+/// clobber messages another thread appended) → in-memory rename → lock-free
+/// flush write-back. Do NOT call flush() (public, re-locks → deadlock).
+/// `path` is the full session file path (session.path).
+pub fn renameTitle(allocator: std.mem.Allocator, io: Io, path: ?[]const u8, new_name: []const u8) !void {
+    const p = path orelse return error.NoPath;
+    session_write_mutex.lock(io) catch return error.MutexLockFailed;
+    defer session_write_mutex.unlock(io);
+
+    var sess = try Session.load(allocator, io, p);
+    defer sess.deinit();
+    try sess.rename(new_name);
+    try sess.flushLocked();
+}
+
+fn sanitizeFileName(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {    var buf: std.ArrayListAligned(u8, null) = .empty;
     errdefer buf.deinit(allocator);
     for (name) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.') {

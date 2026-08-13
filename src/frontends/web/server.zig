@@ -9,6 +9,8 @@ const trace = @import("../../util/trace.zig");
 const timing = @import("../../util/timing.zig");
 const handler = @import("handler.zig");
 const sse = @import("sse.zig");
+const title_mod = @import("../../core/title.zig");
+const subcall_mod = @import("../../core/subcall.zig");
 
 const Io = std.Io;
 const builtin = @import("builtin");
@@ -20,6 +22,8 @@ var abort_mutex: std.Io.Mutex = .init;
 var undo_map: std.StringHashMap(*std.ArrayListAligned(handler.UndoOp, null)) = undefined;
 /// Long-lived allocator for undo ops (survives per-request arenas).
 var persistent_alloc: std.mem.Allocator = undefined;
+/// Process-level sub-call runner (background title generation, D6).
+var subcall_runner: subcall_mod.SubcallRunner = undefined;
 var active_threads: u32 = 0;
 var next_thread_id: u32 = 0;
 var next_request_id: u32 = 0;
@@ -100,6 +104,7 @@ pub fn main(process: std.process.Init) !void {
     abort_map = std.StringHashMap(*agent_mod.AgentLoop).init(gpa);
     undo_map = std.StringHashMap(*std.ArrayListAligned(handler.UndoOp, null)).init(gpa);
     persistent_alloc = gpa;
+    subcall_runner = subcall_mod.SubcallRunner.init(gpa, io);
 
     var arg_iter = try std.process.Args.Iterator.initAllocator(process.minimal.args, process.gpa);
     defer arg_iter.deinit();
@@ -160,6 +165,9 @@ pub fn main(process: std.process.Init) !void {
             };
             kernel32.Sleep(100);
         }
+        // Wait for background title sub-calls to write back before config/session
+        // memory is freed (D6).
+        subcall_runner.waitIdle(30_000);
         state.deinit();
     }
 
@@ -246,6 +254,7 @@ fn handleConnection(
         .current_abort_session = null,
         .undo_allocator = persistent_alloc,
         .undo_map = &undo_map,
+        .subcall_runner = &subcall_runner,
         .thread_id = tid,
         .request_id = rid,
     };

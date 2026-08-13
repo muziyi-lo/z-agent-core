@@ -2,6 +2,8 @@ test {
     _ = @import("core/agent.zig");
     _ = @import("core/session.zig");
     _ = @import("core/compact.zig");
+    _ = @import("core/title.zig");
+    _ = @import("core/subcall.zig");
     _ = @import("session_ops.zig");
     _ = @import("config.zig");
     _ = @import("command.zig");

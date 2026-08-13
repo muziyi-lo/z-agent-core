@@ -14,6 +14,8 @@ const command_mod = @import("../../command.zig");
 const log = @import("../../util/log.zig");
 const trace = @import("../../util/trace.zig");
 const timing = @import("../../util/timing.zig");
+const title_mod = @import("../../core/title.zig");
+const subcall_mod = @import("../../core/subcall.zig");
 
 const Io = std.Io;
 
@@ -79,6 +81,8 @@ pub const App = struct {
     base_prompt: ?[]const u8,
     pipe_mode: bool = false,
     _env_changed: bool = true,
+
+    subcall_runner: subcall_mod.SubcallRunner,
 
     render_ctx: render.RenderContext,
     tool_display: render.ToolDisplay,
@@ -170,6 +174,7 @@ pub const App = struct {
             .tool_display = render.ToolDisplay{ .ctx = undefined, .writer = undefined },
             .line_buffer = undefined,
             .model_context = model_ctx.context_window,
+            .subcall_runner = subcall_mod.SubcallRunner.init(allocator, io),
         };
     }
 
@@ -459,6 +464,31 @@ pub const App = struct {
             },
             else => try self.session.flush(),
         }
+
+        // Second-turn title generation (background, best-effort). Fire only on
+        // non-error finishes so a rolled-back turn never gets a title.
+        if (result.finish == .stop or result.finish == .max_rounds) {
+            self.maybeAutoTitle();
+        }
+    }
+
+    /// After a successful turn, fire a background title sub-call when the
+    /// session qualifies (second user message, default title, switch on).
+    /// Non-blocking: spawns a detached thread (D6). Skipped in pipe mode.
+    fn maybeAutoTitle(self: *App) void {
+        if (self.pipe_mode) return;
+        if (!title_mod.shouldAutoTitle(&self.session, self.cfg.auto_title)) return;
+        if (self.session.path == null) return;
+
+        // The runner dups all borrowed strings, so session/cfg slices are safe
+        // to hand off here.
+        const task = subcall_mod.TitleTask{
+            .provider = self.provider,
+            .session_path = self.session.path.?,
+            .extra_stopwords = self.cfg.title_stop_words,
+            .auto_title = self.cfg.auto_title,
+        };
+        self.subcall_runner.spawnTitle(task);
     }
 
     /// Dispatch a "/command" line. CLI-local commands first (exit/quit/help),
@@ -783,6 +813,9 @@ pub const App = struct {
 
     /// Free session, config, and all heap-allocated fields. Safe to call on zero-value App.
     pub fn deinit(self: *App) void {
+        // Wait for any in-flight background title sub-calls so their write-back
+        // completes before session/config memory is freed (D6).
+        self.subcall_runner.waitIdle(30_000);
         if (self.project_context) |ctx| self.allocator.free(@constCast(ctx));
         self.allocator.free(self.tools);
         self.allocator.free(self.session_dir);

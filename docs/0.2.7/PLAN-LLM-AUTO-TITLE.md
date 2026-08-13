@@ -1,6 +1,17 @@
 # Plan LLM-AUTO-TITLE: LLM 自动标题（子代理调用机制）
 
-## 状态: 计划中
+## 状态: ✅ 已实施（2026-08-13，build + 260 测试 + 前端 9 文件全过；仅余既有 bash 基线失败）
+
+## 实施差异记录
+
+- `ensureTitle` 返回 `bool`（写回成功）；写回统一走 `session_mod.renameTitle`（D6 原子事务），`session` 参数仅用于读取 user 消息
+- `keywordTitle` 中文分词按空白/标点切（中文无空格），CJK 停用词前缀比较用**完整首字符**（3 字节 UTF-8）而非首字节——首字节比较会误伤（是 0xE6 与 模 0xE6 同前缀）。`STOPWORDS` 保守表不含领域词（"修" 保留为关键词）
+- `title_stop_words` 解析 `getStringArray` 返回 `error.InvalidType`，调用方 catch 告警降级 `&.{}`（D5）
+- `renameTitle` 放 `session.zig` 模块级（非 `core/subcall.zig`），`flushLocked`/`removeMessageLocked` 为无锁内部版
+- Web `Context` 增 `subcall_runner` 字段；server.zig 全局 runner + 退出 `waitIdle(30s)`
+- CLI `App` 增 `subcall_runner` 字段 + `maybeAutoTitle()`（pipe_mode 跳过）+ `deinit` 前 `waitIdle(30s)`
+- CLI single-shot（`--prompt`）不触发标题（仅 1 条 user 消息，不满足"恰 2 条"）——符合 D1 设计
+- 测试 260 通过 + 1 既有失败（`tool.bash.test.bash: echo hello`，与本次改动无关，stash 基线复现）
 
 ## 背景
 
@@ -373,5 +384,6 @@ node tests/frontend/run-tests.mjs
 ## 备注
 
 - 创建：2026-08-13
+- 实施：2026-08-13（步骤 1-7 完成，验证通过）
 - 承接：`SESSION-SYSTEM-OPT`（一期 P1-P5）+ `SESSION-SYSTEM-OPT2`（二期），会话系统主题延续；归入 v0.2.7 周期目录（用户决策）
 - REMAINING.md 索引：F2（"无 parentID + 仅 1 条真实用户消息 + 默认标题 → LLM 生成首行"，本计划将其落地——**触发条件修订为"恰 2 条真实用户消息"（第二轮后延迟命名）**）

@@ -43,6 +43,13 @@
   - **落盘 + 轮转**：`log.zig` 双写（stderr + `.zagent/log/z-agent-core.log`，ANSI 剥离）、`ZAGENT_LOG_LEVEL` env 级别、5MB 大小轮转（保留 3 份）、写互斥、磁盘满降级
   - **JSONL 事件 trace（P3）**：`util/trace.zig`，`ZAGENT_TRACE=1` 写 `.zagent/log/trace/<ts>-<pid>.jsonl` + `latest.json` 原子写（tmp+rename）；双策略清理（7 天 / 100 个）
   - **计时插桩（P4）**：`util/timing.zig`，timing 事件入 trace + `ZAGENT_TIMING=1` stderr 输出
+- **LLM 自动标题（`docs/0.2.7/PLAN-LLM-AUTO-TITLE.md`，2026-08-13 追加实施）**:
+  - 第二轮后自动生成会话标题（对齐 ChatGPT/Claude"新对话"占位 + 延迟命名；规避首条元操作消息如"恢复上下文"）
+  - **子代理调用机制**：`core/title.zig`（TITLE_PROMPT + shouldAutoTitle/cleanTitle/keywordTitle/fallbackTitle/ensureTitle）+ `core/subcall.zig`（SubcallRunner 后台线程 fire-and-forget + active 计数 + waitIdle）
+  - **三层降级**：LLM 失败 → 本地关键词（滤 STOPWORDS + 用户 title_stop_words）→ 静态截断（TITLE_PREFIX_LEN 30 字符）
+  - **写回原子性**：`session_write_mutex`（Io.Mutex）串行化 flush/removeMessage/renameTitle；`renameTitle` 单层持锁原子事务（锁内 load 最新 → rename → flushLocked，杜绝并发覆盖丢消息）
+  - **配置**：`auto_title`（顶层布尔，默认 true 可关闭）+ `title_stop_words`（追加停用词，类型错误告警降级）
+  - **常量提取**：`TITLE_*`/`KEYWORD_*`/`STOPWORDS` pub const；`handler.zig:958` 与 L3 回退共享 `TITLE_PREFIX_LEN`
 
 ### Fixed
 - **用户消息 delete 索引漂移**：按钮 index 用 DOM 计数，与服务端消息数组下标漂移（工具回合 N+2 条 vs N+1 元素）→ 删错/静默 400；改为按消息 id 操作根治

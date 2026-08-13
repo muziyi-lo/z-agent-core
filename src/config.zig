@@ -16,6 +16,12 @@ pub const Config = struct {
     /// Skill root directory relative to project_root. Configurable so users can
     /// point at another tool's skills dir (e.g. .opencode/skills).
     skills_dir: []const u8 = ".zagent/skills",
+    /// Auto-generate a conversational title with the LLM after the second turn.
+    /// Set false to keep static naming (Web prompt-prefix, CLI "New Session").
+    auto_title: bool = true,
+    /// Extra stopwords appended to the built-in conservative STOPWORDS set for
+    /// the L2 keyword fallback title. User domain-specific noise words.
+    title_stop_words: []const []const u8 = &.{},
 
     _arena: std.heap.ArenaAllocator,
 
@@ -30,7 +36,7 @@ pub const Config = struct {
 
         const content = readFile(arena.allocator(), path, io) catch |err| switch (err) {
             error.FileNotFound => {
-                var result = try parseConfigContent(arena.allocator(), DEFAULT_TEMPLATE);
+                var result = try parseConfigContent(arena.allocator(), io, DEFAULT_TEMPLATE);
                 try writeDefaultConfig(arena.allocator(), project_root, io);
                 {
                     var stderr_buf: [256]u8 = undefined;
@@ -43,7 +49,7 @@ pub const Config = struct {
             else => return err,
         };
 
-        var result = try parseConfigContent(arena.allocator(), content);
+        var result = try parseConfigContent(arena.allocator(), io, content);
         try validateConfig(&result, io);
 
         result._arena = arena;
@@ -241,7 +247,7 @@ fn validateConfig(config: *const Config, io: std.Io) !void {
     }
 }
 
-fn parseConfigContent(a: std.mem.Allocator, source: []const u8) !Config {
+fn parseConfigContent(a: std.mem.Allocator, io: Io, source: []const u8) !Config {
     var parsed = try toml.parse(a, source);
     defer toml.freeTable(a, &parsed);
 
@@ -255,6 +261,20 @@ fn parseConfigContent(a: std.mem.Allocator, source: []const u8) !Config {
     const all_models = try parseAllModels(a, parsed);
     const bp_raw = getString(parsed, "base_prompt");
     const skills_dir_raw = getString(parsed, "skills_dir") orelse ".zagent/skills";
+    const auto_title_val = getBool(parsed, "auto_title") orelse true;
+
+    // title_stop_words: best-effort; type errors degrade to empty with a warning
+    // (must not block app startup — it's a refinement knob, D5).
+    var title_stop_words_val: []const []const u8 = &.{};
+    title_stop_words_val = getStringArray(a, parsed, "title_stop_words") catch |err| blk: {
+        if (err == error.InvalidType) {
+            var warn_buf: [256]u8 = undefined;
+            var warn_w: Io.File.Writer = .init(.stderr(), io, &warn_buf);
+            warn_w.interface.print("z-agent-core: warning: title_stop_words ignored (expected a string array)\n", .{}) catch {};
+            warn_w.interface.flush() catch {};
+        }
+        break :blk &.{};
+    };
 
     return .{
         .default_model = try a.dupe(u8, dm_raw),
@@ -263,6 +283,8 @@ fn parseConfigContent(a: std.mem.Allocator, source: []const u8) !Config {
         .providers = try parseProviders(a, parsed, all_models),
         .base_prompt = if (bp_raw) |bp| try a.dupe(u8, bp) else null,
         .skills_dir = try a.dupe(u8, skills_dir_raw),
+        .auto_title = auto_title_val,
+        .title_stop_words = title_stop_words_val,
         ._arena = undefined,
     };
 }
@@ -270,7 +292,7 @@ fn parseConfigContent(a: std.mem.Allocator, source: []const u8) !Config {
 fn testParseConfig(allocator: std.mem.Allocator, source: []const u8) !Config {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
-    var config = try parseConfigContent(arena.allocator(), source);
+    var config = try parseConfigContent(arena.allocator(), std.testing.io, source);
     config._arena = arena;
     return config;
 }
@@ -463,6 +485,21 @@ fn getBool(t: ConfigToml, key: []const u8) ?bool {
     return val.boolean;
 }
 
+/// Parse a TOML string array value into an owned []const []const u8. Returns
+/// error.InvalidType when the value is absent-but-typed-wrong, not a string
+/// array, or contains a non-string element. Callers degrade to defaults on error.
+fn getStringArray(a: std.mem.Allocator, t: ConfigToml, key: []const u8) ![]const []const u8 {
+    const val = t.get(key) orelse return &.{};
+    if (val != .array) return error.InvalidType;
+    const out = try a.alloc([]const u8, val.array.len);
+    errdefer a.free(out);
+    for (val.array, 0..) |item, i| {
+        if (item != .string) return error.InvalidType;
+        out[i] = try a.dupe(u8, item.string);
+    }
+    return out;
+}
+
 fn readFile(allocator: std.mem.Allocator, path: []const u8, io: std.Io) ![]u8 {
     const file = try Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
     defer file.close(io);
@@ -537,6 +574,12 @@ const DEFAULT_TEMPLATE =
     \\# Skill root directory relative to project_root. Default .zagent/skills.
     \\# Point at another tool's skills dir (e.g. .opencode/skills) to reuse its skills.
     \\# skills_dir = ".zagent/skills"
+    \\# Auto-generate a conversational title with the LLM after the second turn.
+    \\# Set false to keep static naming (Web prompt-prefix, CLI "New Session").
+    \\auto_title = true
+    \\# Extra stopwords appended to the built-in conservative STOPWORDS set for the
+    \\# L2 keyword fallback title. Use for domain-specific noise words.
+    \\# title_stop_words = ["修", "修复", "TODO"]
     \\
     \\# Provider: defines an API endpoint with auth and available models.
     \\# Add multiple [[providers]] blocks for different services (openai, ollama, etc).
@@ -631,6 +674,59 @@ test "config: skills_dir override parsed" {
     );
     defer config.deinit();
     try std.testing.expectEqualStrings(".opencode/skills", config.skills_dir);
+}
+
+test "config: auto_title defaults true" {
+    const allocator = std.testing.allocator;
+    var config = try testParseConfig(allocator, DEFAULT_TEMPLATE);
+    defer config.deinit();
+    try std.testing.expect(config.auto_title);
+}
+
+test "config: auto_title false parsed" {
+    const allocator = std.testing.allocator;
+    var config = try testParseConfig(allocator,
+        \\auto_title = false
+        \\default_model = "deepseek/deepseek-v4-pro"
+        \\max_tokens = 1000
+        \\max_tool_rounds = 8
+    );
+    defer config.deinit();
+    try std.testing.expect(!config.auto_title);
+}
+
+test "config: title_stop_words defaults empty" {
+    const allocator = std.testing.allocator;
+    var config = try testParseConfig(allocator, DEFAULT_TEMPLATE);
+    defer config.deinit();
+    try std.testing.expectEqual(@as(usize, 0), config.title_stop_words.len);
+}
+
+test "config: title_stop_words parsed" {
+    const allocator = std.testing.allocator;
+    var config = try testParseConfig(allocator,
+        \\title_stop_words = ["修", "修复", "TODO"]
+        \\default_model = "deepseek/deepseek-v4-pro"
+        \\max_tokens = 1000
+        \\max_tool_rounds = 8
+    );
+    defer config.deinit();
+    try std.testing.expectEqual(@as(usize, 3), config.title_stop_words.len);
+    try std.testing.expectEqualStrings("修", config.title_stop_words[0]);
+    try std.testing.expectEqualStrings("TODO", config.title_stop_words[2]);
+}
+
+test "config: title_stop_words type error degrades to empty with warning" {
+    const allocator = std.testing.allocator;
+    var config = try testParseConfig(allocator,
+        \\title_stop_words = "not-an-array"
+        \\default_model = "deepseek/deepseek-v4-pro"
+        \\max_tokens = 1000
+        \\max_tool_rounds = 8
+    );
+    defer config.deinit();
+    try std.testing.expectEqual(@as(usize, 0), config.title_stop_words.len);
+    try std.testing.expect(config.auto_title);
 }
 
 test "config: model params_json present" {
@@ -1242,3 +1338,4 @@ test "config: parseMaxTokensField all values" {
     try std.testing.expectEqual(types.MaxTokensField.max_output_tokens, parseMaxTokensField("max_output_tokens"));
     try std.testing.expectEqual(types.MaxTokensField.max_tokens, parseMaxTokensField("invalid"));
 }
+
