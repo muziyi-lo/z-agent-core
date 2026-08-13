@@ -94,7 +94,7 @@ pub fn ensureTitle(
 
 - 请求构造：`[system: TITLE_PROMPT, user: 前两条真实用户消息的拼接]`（跳过系统提示词 index 0；`[Compaction]` 是 system 不计入）。两轮 user 消息足以覆盖"元操作 + 真实任务"模式（如"恢复上下文" + "帮我修 X"→ 标题反映 X）。
 - 内部 `provider.chatCompletionStreaming(&arena_state, io, msgs, null, null)`（无工具、无 phase_writer → 静默）。
-- 清洗结果（对齐 opencode）：剥 `<think>` 块 → 按行 split/trim → 取首个非空行 → `len > 100` 截断为 `[0..97] + "..."`。
+- 清洗结果（对齐 opencode）：剥 `<think>` 块 → 按行 split/trim → 取首个非空行 → `len > TITLE_HARD_CAP` 截断为 `[0..97] + "..."`（`TITLE_HARD_CAP = 100`）。
 - 空结果/失败 → **三层降级**（见 D4）：keywordTitle → fallbackTitle，不失败回合。
 - 成功 → `session.rename(title)` + `session.flush()`。
 - 守卫判定函数独立（`shouldAutoTitle`，供 frontend 在 runTurn 前/后自检，避免无谓请求）。
@@ -181,15 +181,15 @@ LLM 调用可能失败（网络/限流/模型拒绝）。原方案失败后保�
 | 层 | 输入 | 方法 | 失败→ |
 |----|------|------|-------|
 | **L1 LLM** | 前两条真实 user 消息 | `chatCompletionStreaming` 生成（主路径） | 超时/限流/API 错误/空结果 → L2 |
-| **L2 本地关键词**（新增） | 最近一条真实 user 消息 | 轻量规则提取前若干关键词拼接（见下） | 提取为空（消息全停用词/过短）→ L3 |
-| **L3 静态截断** | 最近一条真实 user 消息 | `[0..min(30)]` + trim/剥换行（对齐 Web 启发式） | 空会话无消息 → 保持 "New Session"/UUID |
+| **L2 本地关键词**（新增） | 最近一条真实 user 消息 | 轻量规则提取 `KEYWORD_MIN..KEYWORD_MAX` 个关键词拼接（见下） | 提取为空（消息全停用词/过短）→ L3 |
+| **L3 静态截断** | 最近一条真实 user 消息 | `[0..min(TITLE_PREFIX_LEN)]` + trim/剥换行（对齐 Web 启发式） | 空会话无消息 → 保持 "New Session"/UUID |
 
 **L2 关键词提取规则**（本地零成本、无 LLM）：
 
 - 输入 = 最近一条真实 user 消息（第二轮触发时即第二条 user——比首条更贴近当前意图；首条可能是"恢复上下文"等元操作）
-- 按空白/标点切词 → 过滤**停用词**（中英常用：`的 了 是 我 你 他 帮 请 一个 在 用 the a an to of and or for with 请 修复...` 等）→ 保留词干顺序取**前 3-5 个** → 空格/顿号拼接
+- 按空白/标点切词 → 过滤 `STOPWORDS` 停用词（中英常用，见常量节）→ 保留词干顺序取 **`KEYWORD_MIN..KEYWORD_MAX` 个** → 空格/顿号拼接
 - 保持原语言（不做翻译）——与 LLM 层要求一致
-- 拼接后长度 > 50 截断（对齐 `title.txt` ≤50 约束）
+- 拼接后长度 > `TITLE_MAX_CHARS` 截断（对齐 `title.txt` ≤50 约束）
 - 失败语义：提取结果为空（消息全为停用词或过短）→ 落到 L3，不额外处理
 
 **示例**：`"帮我修 src/app.js 的 500 错误"` → 去停用词 → `src app.js 500 错误` → 标题 `"src app.js 500 错误"`（优于静态截断的 `"帮我修 src/app.js 的 500"`——后者含停用词且断在不自然处）。
@@ -233,6 +233,32 @@ Generate a brief title that would help the user find this conversation later.
 
 > 注：z-agent-core 第二轮回合后触发标题生成，此时 session 里已含前两轮 assistant 回复。取用户消息时**只看 `role == .user` 的前两条**（跳过系统提示词 index 0），不把 assistant 回复喂给 title（避免标题偏向后半段）。子代理线程内从磁盘 `load` 最新 session 副本后取数。
 
+**标题相关常量（评论者建议采纳）**
+
+原 D3/D4 用裸数字（`30`/`50`/`100`/`3-5`），且与现有代码 `handler.zig:958` 的硬编码 `@min(prompt.len, 30)` 值耦合——改一处忘另一处会漂移。**统一提取为 `core/title.zig` 顶层 `pub const`**（对齐项目先例：`compact.zig:10-15` 的 `DEFAULT_KEEP_RECENT_TOKENS`/`MIN_KEEP_MESSAGES`/`COMPACTION_PREFIX`）：
+
+```zig
+/// Title length cap from the title prompt (title.txt: `<=50 characters`).
+pub const TITLE_MAX_CHARS: usize = 50;
+/// Hard truncation cap for cleaned LLM titles (opencode truncates >100 → 97+"...").
+pub const TITLE_HARD_CAP: usize = 100;
+/// Static fallback prefix length (L3). MUST equal Web is_new prompt-prefix
+/// (handler.zig:958 `@min(prompt.len, 30)`) — shared via this constant.
+pub const TITLE_PREFIX_LEN: usize = 30;
+/// Keyword extraction token range (L2): keep the first 3-5 non-stopword tokens.
+pub const KEYWORD_MIN: usize = 3;
+pub const KEYWORD_MAX: usize = 5;
+/// Stopwords filtered by L2 keyword extraction. Chinese + English common words.
+pub const STOPWORDS = [_][]const u8{
+    "的", "了", "是", "我", "你", "他", "帮", "请", "一个", "在", "用", "修",
+    "the", "a", "an", "to", "of", "and", "or", "for", "with", "please",
+};
+```
+
+- **`TITLE_PREFIX_LEN` 双端共享**：`core/title.zig` 定义；`handler.zig:958` 的 `@min(prompt.len, 30)` 改为 `@min(prompt.len, title_mod.TITLE_PREFIX_LEN)`——Web is_new 占位与 L3 回退同源，改值一处生效（`handler.zig` 已 import core 模块，单向依赖不破坏）
+- `STOPWORDS` 独立常量便于后续增删维护（评论者建议）；`keywordTitle` 遍历 `STOPWORDS` 判定
+- 上述常量全部在 `core/title.zig` 顶层，与 `TITLE_PROMPT` 同文件（标题逻辑单一来源）
+
 ## 触发条件（对齐 opencode ensureTitle）
 
 前端（CLI `App` / Web `handler`）在回合边界调用 `shouldAutoTitle(session, auto_title)` 判定：
@@ -246,13 +272,13 @@ Generate a brief title that would help the user find this conversation later.
 
 ## 实施步骤
 
-**步骤 1**: 新增 `src/core/title.zig`——`TITLE_PROMPT` 常量、`shouldAutoTitle(session, auto_title) bool`、`cleanTitle(raw) !?[]const u8`（剥 think/首行/截断）、`keywordTitle(user_msg) !?[]const u8`（L2 本地关键词：切词→滤停用词→前 3-5 个→拼接）、`fallbackTitle(user_msg) ![]const u8`（L3 静态截断 + trim/剥换行）、`ensureTitle(provider, session, allocator, io) bool`（LLM 成功 → LLM 标题取前两条 user；失败/空 → `keywordTitle` → 空则 `fallbackTitle`；写回持锁）。
+**步骤 1**: 新增 `src/core/title.zig`——常量（`TITLE_MAX_CHARS`/`TITLE_HARD_CAP`/`TITLE_PREFIX_LEN`/`KEYWORD_MIN`/`KEYWORD_MAX`/`STOPWORDS`，见常量节）+ `TITLE_PROMPT` 常量、`shouldAutoTitle(session, auto_title) bool`、`cleanTitle(raw) !?[]const u8`（剥 think/首行/`TITLE_HARD_CAP` 截断）、`keywordTitle(user_msg) !?[]const u8`（L2 本地关键词：切词→滤 `STOPWORDS`→取 `KEYWORD_MIN..KEYWORD_MAX` 个→拼接）、`fallbackTitle(user_msg) ![]const u8`（L3 静态截断 `TITLE_PREFIX_LEN` + trim/剥换行）、`ensureTitle(provider, session, allocator, io) bool`（LLM 成功 → LLM 标题取前两条 user；失败/空 → `keywordTitle` → 空则 `fallbackTitle`；写回持锁）。
 **步骤 2**: 新增 `src/core/subcall.zig`——`SubcallRunner`（`spawn(task)` fire-and-forget detached 线程 + `active_threads` 计数 + `waitIdle()`）；task 携带 provider 配置副本（api_key dup）+ session_id + sessions_dir + auto_title；线程内独立 arena → `Session.load` 磁盘副本 → 复查 `shouldAutoTitle` → `ensureTitle` → arena 释放。
 **步骤 3**: `core/session.zig`——进程级 `session_write_mutex: Io.Mutex`；`flush`/`writeTo`/`writePrefixTo`/`removeMessage` 拆双版（公开持锁调 `XxxLocked` 无锁内部版，含 `session.zig:419` 文件 rename）；新增 `renameTitle` 原子事务（单层持锁：锁内 `Session.load` 最新 → `rename` → `flushLocked`）。主线程既有 `flush()` 调用点自动持锁，无侵入。
 **步骤 4**: `config.zig`——`Config` 增 `auto_title: bool = true`，`parseConfigContent` 读 `getBool("auto_title") orelse true`，`DEFAULT_TEMPLATE` 加注释行。
 **步骤 5**: `cli/App.zig`——`processLine`（`App.zig:399` runTurn 后）与 `singleTurn`（`App.zig:240`）传 `self.cfg.auto_title` 调 `shouldAutoTitle`；满足则 `subcall_runner.spawn(title_task)`（立即返回）；`pipe_mode` 跳过；`deinit` 前 `waitIdle()`（有限等待）。
 **步骤 6**: `web/handler.zig`——`handlePrompt` 在 `runTurn` 返回、`session.flush()`、**`sse_done` 帧写出之后**（`handler.zig:1069` 之后）、函数返回前，传 `ctx.config.auto_title` 调 `shouldAutoTitle`；满足则 `subcall_runner.spawn(title_task)`（复用 `agent.provider_ref` 的 config 副本 + session_id）。
-**步骤 7**: 测试——`title.zig` 单测（开关关闭直接 false / shouldAutoTitle 四条件 / cleanTitle think 剥离与截断 / **keywordTitle 停用词过滤与关键词数上限、全停用词返回 null** / ensureTitle LLM 失败回退链 L1→L2→L3）；`subcall.zig` 单测（spawn 生命周期、waitIdle 返回）；`session.zig` 写锁单测（并发 flush 串行化）；`config.zig` 测试（`auto_title` 默认 true、`auto_title = false` 解析）；`node tests/frontend/run-tests.mjs` 回归。
+**步骤 7**: 测试——`title.zig` 单测（开关关闭直接 false / shouldAutoTitle 四条件 / cleanTitle think 剥离与 `TITLE_HARD_CAP` 截断 / **keywordTitle 滤 `STOPWORDS` 与 `KEYWORD_MIN..MAX` 上限、全停用词返回 null** / ensureTitle LLM 失败回退链 L1→L2→L3）；`subcall.zig` 单测（spawn 生命周期、waitIdle 返回）；`session.zig` 写锁单测（并发 flush 串行化）；`config.zig` 测试（`auto_title` 默认 true、`auto_title = false` 解析）；**`handler.zig:958` 改用 `title_mod.TITLE_PREFIX_LEN` 后编译 + Web is_new 截断行为不变**；`node tests/frontend/run-tests.mjs` 回归。
 
 ## 验证
 
@@ -278,7 +304,8 @@ node tests/frontend/run-tests.mjs
 | 第二轮为元操作（如 "继续"） | 标题基于前两条生成（元操作+首条任务 → 反映任务主题） |
 | fork 子会话 | 不触发（有 parent_id，保持 `(fork #N)`） |
 | 已重命名会话（非默认标题） | 不触发 |
-| title LLM 调用失败 / 空结果 | 回合正常完成，标题走 L2 本地关键词（如 `"src app.js 500 错误"`）；若 L2 空则 L3 静态截断；CLI 不再是 "New Session"，无报错 |
+| title LLM 调用失败 / 空结果 | 回合正常完成，标题走 L2 本地关键词（如 `"src app.js 500 错误"`）；若 L2 空则 L3 静态截断（`TITLE_PREFIX_LEN`）；CLI 不再是 "New Session"，无报错 |
+| **常量共享** | `handler.zig:958` 与 L3 `fallbackTitle` 均引用 `TITLE_PREFIX_LEN`——改值一处生效，Web is_new 占位与回退截断不漂移 |
 | L2 全停用词消息（如 "嗯 啊 帮我"） | keywordTitle 返回 null → 落 L3 静态截断 |
 | title 输出含 `<think>` 块 / 多行 | 剥 think、取首非空行、超 100 截断 |
 | 会话重载后标题 | `rename` 不改文件名，id/路径稳定，重载后 header name 为生成标题或回退截断 |
@@ -288,12 +315,12 @@ node tests/frontend/run-tests.mjs
 
 | 文件 | 改动 |
 |------|------|
-| `src/core/title.zig` | 新增：TITLE_PROMPT / shouldAutoTitle / cleanTitle / keywordTitle（L2）/ fallbackTitle（L3）/ ensureTitle |
+| `src/core/title.zig` | 新增：常量（TITLE_MAX_CHARS/HARD_CAP/PREFIX_LEN/KEYWORD_MIN/KEYWORD_MAX/STOPWORDS）+ TITLE_PROMPT / shouldAutoTitle / cleanTitle / keywordTitle（L2）/ fallbackTitle（L3）/ ensureTitle |
 | `src/core/subcall.zig` | 新增：SubcallRunner（spawn / active_threads / waitIdle），子代理后台执行基础设施 |
 | `src/core/session.zig` | `session_write_mutex`（Io.Mutex）+ `flush`/`writeTo`/`writePrefixTo`/`removeMessage` 双版（公开持锁 + `XxxLocked` 无锁）+ `renameTitle` 原子事务 |
 | `src/config.zig` | `Config.auto_title: bool` 字段 + 解析 + DEFAULT_TEMPLATE 注释 |
 | `src/frontends/cli/App.zig` | `processLine` + `singleTurn` 回合边界 spawn（传 `cfg.auto_title`）；deinit 前 waitIdle |
-| `src/frontends/web/handler.zig` | `handlePrompt` sse_done 后 spawn（传 `ctx.config.auto_title`）；server.zig 挂载 runner |
+| `src/frontends/web/handler.zig` | `handlePrompt` sse_done 后 spawn（传 `ctx.config.auto_title`）；`handler.zig:958` 改用 `title_mod.TITLE_PREFIX_LEN`（常量共享）；server.zig 挂载 runner |
 | `src/frontends/web/server.zig` | `SubcallRunner` 实例（进程级）+ 退出等待 |
 | `docs/REMAINING.md` | F2 标记实施（发布时） |
 
@@ -307,6 +334,7 @@ node tests/frontend/run-tests.mjs
 - **改 Web 空会话 UUID 命名逻辑**：`handleSessionCreate` 空会话仍保持 UUID 名 + 前端显示 "New Session"，由 title 生成后自然替换
 - **失败时保持 "New Session"**：已否决——LLM 失败走本地关键词/静态截断（D4 三层），保证任何有内容会话都有有意义标题
 - **复杂 NLP 关键词提取**：L2 只用轻量规则（切词 + 固定停用词表 + 前 N 词拼接），不做词性标注/语义排序/多语言形态还原——标题是秒级低价值元数据，规则越简单越稳
+- **全项目魔法值清理**：本计划只提取标题相关常量（`TITLE_*`/`KEYWORD_*`/`STOPWORDS`）+ `handler.zig:958` 双端共享；`handler.zig:333/421` 的 `catch 50` 分页默认值等**既有**魔法值不属于标题主题，另行评估
 
 ## 备注
 
