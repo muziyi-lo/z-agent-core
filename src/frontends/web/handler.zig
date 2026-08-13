@@ -1494,9 +1494,10 @@ fn appendMetaJson(allocator: std.mem.Allocator, buf: *AlignedU8, meta: types.Too
             const mi = try escapeJsonDynamic(allocator, m.mime);
             defer allocator.free(mi);
             try buf.appendSlice(allocator, mi);
+            try buf.appendSlice(allocator, "\"");
         },
     }
-    try buf.appendSlice(allocator, "\"}");
+    try buf.appendSlice(allocator, "}");
 }
 
 fn escapeJsonDynamic(allocator: std.mem.Allocator, src: []const u8) ![]const u8 {    var result: AlignedU8 = .empty;
@@ -1632,4 +1633,40 @@ test "handler: writeModelIds emits provider/model_id list" {
     const a = tmp.allocator();
     try writeModelIds(a, &cfg, &buf);
     try std.testing.expectEqualStrings("\"deepseek/deepseek-v4-pro\",\"deepseek/deepseek-v4-flash\",\"openai/gpt-4o\"", buf.items);
+}
+
+test "handler: appendMetaJson emits parseable JSON for every variant" {
+    // 回归防护（LRN-20260813-019）：手写 JSON 拼接曾因函数尾假设"末字段为字符串"
+    // 对布尔/数字结尾的分支多输出一个引号 → Web API 非法 JSON → 前端 loadSession 解析失败。
+    const variants = [_]types.ToolMeta{
+        .{ .bash = .{ .command = "echo hi", .exit_code = 0, .byte_count = 3, .truncated = false, .timed_out = true } },
+        .{ .read = .{ .path = "src/main.zig", .is_directory = false, .total_lines = 10, .byte_count = 99, .truncated = false, .next_offset = null } },
+        .{ .grep = .{ .pattern = "fn", .path = null, .match_count = 2, .files_scanned = 3, .truncated = false } },
+        .{ .glob = .{ .pattern = "*.zig", .path = null, .file_count = 4, .truncated = false } },
+        .{ .write = .{ .path = "a.txt", .existed = false, .old_lines = null, .new_lines = 3, .byte_count = 7 } },
+        .{ .edit = .{ .path = "a.zig", .replacements = 1, .old_lines = 2, .new_lines = 2 } },
+        .{ .skill = .{ .name = "memory", .file_count = 5 } },
+        .{ .webfetch = .{ .url = "https://example.com", .byte_count = 100, .format = "markdown", .mime = "text/html" } },
+    };
+
+    var tmp = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer tmp.deinit();
+    const a = tmp.allocator();
+
+    for (variants) |meta| {
+        var buf: AlignedU8 = .empty;
+        // 模拟 formatMessageJson 上下文：`{"id":1,"role":"tool"` 已写，meta 后跟 message 闭
+        try buf.appendSlice(a, "{\"id\":1,\"role\":\"tool\"");
+        try appendMetaJson(a, &buf, meta);
+        try buf.appendSlice(a, "}");
+        // 输出必须可被 JSON 解析
+        var parsed = std.json.parseFromSlice(std.json.Value, a, buf.items, .{}) catch |err| {
+            std.debug.print("meta JSON invalid for {s}: [{s}] err={s}\n", .{ @tagName(meta), buf.items, @errorName(err) });
+            return err;
+        };
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("tool", parsed.value.object.get("role").?.string);
+        const m = parsed.value.object.get("meta").?.object;
+        try std.testing.expectEqualStrings(@tagName(meta), m.get("name").?.string);
+    }
 }

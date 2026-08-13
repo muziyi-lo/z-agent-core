@@ -44,6 +44,9 @@ Object.defineProperty(messages, "innerHTML", {
   set(v) { this.children.length = 0; this._html = String(v) },
   get() { return this._html },
 })
+const sysPromptEl = makeEl("div")
+sysPromptEl.id = "system-prompt"
+sysPromptEl.className = "msg system"
 const els = {
   "messages": messages,
   "send-btn": { disabled: false },
@@ -51,6 +54,7 @@ const els = {
   "prompt-input": { disabled: false, focus() {} },
   "topbar": { textContent: "" },
   "topbar-title": { textContent: "" },
+  "system-prompt": sysPromptEl,
 }
 globalThis.document = {
   createElement: (t) => makeEl(t),
@@ -70,6 +74,7 @@ const session = {
     { role: "assistant", reasoning_content: "The echo did not expand the variables", content: "", tool_calls: [{ id: "call_2", name: "bash", arguments: "{}" }] },
     { role: "tool", tool_call_id: "call_2", content: "2026-08-07 13:08:57\n" },
     { role: "assistant", reasoning_content: "", content: "现在是 2026年8月7日 13:08（下午 1 点过 8 分）。", model: "deepseek-v4-flash", timestamp: 2 },
+    { role: "system", content: "[Notice: tool call limit reached (10 rounds this turn). Stop calling tools now.]" },
   ],
 }
 globalThis.api = async () => ({
@@ -80,6 +85,8 @@ globalThis.api = async () => ({
   has_more: false,
 })
 
+// renderMessages 按 [Notice: 前缀识别警告 system（StormBreaker/max_rounds 约定）；
+// 提示词与补充段由 renderSystemPrompt 管理，此处 no-op 即可。
 globalThis.renderSystemPrompt = () => {}
 globalThis.wrapContextToolGroups = () => {}
 globalThis.loadSessions = () => {}
@@ -136,9 +143,9 @@ function blockHtml(el, cls) {
 await loadSession("s1")
 
 const top = clsList(messages)
-check("6 top-level msgs", messages.children.length === 6 &&
+check("6 top-level msgs", messages.children.length === 7 &&
   top[0] === "msg user" && top[1] === "msg assistant" && top[2] === "msg user" &&
-  top[3] === "msg assistant" && top[4] === "msg assistant" && top[5] === "msg assistant")
+  top[3] === "msg assistant" && top[4] === "msg assistant" && top[5] === "msg assistant" && top[6] === "msg system")
 
 const t1 = messages.children[3]  // tool-use assistant #1 (call_1)
 check("tool-assistant1 [thinking,tool]",
@@ -154,6 +161,12 @@ check("tool2 output filled", childHtml(t2.children[1], "output") !== null && seg
 const final = messages.children[5]
 check("final answer is text-only msg", segCls(final).length === 1 && segCls(final)[0] === "content-block")
 check("final text content", blockHtml(final, "content-block") === "[md:现在是 2026年8月7日 13:08（下午 1 点过 8 分）。]")
+
+// 后续 system（非首条）必须渲染为可见提示——max_rounds/StormBreaker 警告
+const warn = messages.children[6]
+check("trailing system warning rendered", warn && warn.className.indexOf("msg system") !== -1 &&
+  warn.textContent.indexOf("tool call limit reached") !== -1)
+check("7 top-level msgs with warning", messages.children.length === 7)
 
 console.log(`\nresult: ${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

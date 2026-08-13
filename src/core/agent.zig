@@ -277,9 +277,13 @@ pub const AgentLoop = struct {
             }
             if (tool_rounds >= self.max_tool_rounds) {
                 new_msgs += 1;
+                const rounds_msg = try std.fmt.allocPrint(self.allocator, "[Notice: tool call limit reached ({d} rounds this turn). Stop calling tools now. Report your completed work and any remaining questions to the user.]", .{self.max_tool_rounds});
+                defer self.allocator.free(rounds_msg);
                 try self.session_ref.append(.{
                     .role = .system,
-                    .content = "[max tool rounds reached - further tool calls prevented]",
+                    .content = rounds_msg,
+                    // max_tool_rounds 上限已到，注入当前回合的强制指令（对齐 StormBreaker
+                    // [Notice: ...] 措辞——明确"现在做什么"而非陈述历史，模型才不会忽略）
                 });
                 return finishTurn(self, new_msgs, .max_rounds, null);
             }

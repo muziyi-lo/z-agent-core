@@ -824,7 +824,10 @@ function renderMessages(msgs, insertBeforeNode) {
       }
       return;
     }
-    if (m.role === 'system') return; // system 由 renderSystemPrompt 渲染，不重复进消息流
+    // system 消息：只渲染警告类（[Notice: 前缀——StormBreaker/max_rounds 约定），
+    // 其余（系统提示词首条 + spRebuild 补充段）由 renderSystemPrompt/服务端管理，
+    // 不重复进消息流。
+    if (m.role === 'system' && m.content.indexOf('[Notice:') !== 0) return;
     var div = addMessage(m, 0, null, true);
     if (insertBeforeNode) container.insertBefore(div, insertBeforeNode);
     if (m.role === 'assistant') wrapContextToolGroups(div);

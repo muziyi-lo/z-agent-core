@@ -19,8 +19,10 @@
 ### Fixed
 - **webfetch 首次运行 code -1**（用户实测）: 工具依赖 `.tmp/` 目录写 curl body 临时文件，但**从未创建该目录**——用户项目首次运行 `.tmp` 不存在时 curl `-o` 失败（exit 23 "Failed writing body"）→ 误报 `HTTP request failed (code -1)`。开发机测试时 `.tmp` 恰好存在未暴露。修复: doFetch 前 `createDir` 确保 `.tmp` 存在（已存在则忽略 PathAlreadyExists）
 - **工具输出 `<style>` 注入污染全局布局**（用户实测）: `renderMd`/`renderMdBlocks` 的 `DOMPurify.sanitize()` 默认**保留 `<style>` 标签**——bash 工具输出 example.com 原始 HTML（含 `<style>body{width:60vw;margin:15vh auto}</style>`）时，样式被浏览器执行 → 全局 body 偏移（margin 15vh/60vw）→ 侧栏错位。修复: `FORBID_TAGS: ['style', 'link']`。新增回归测试 `tests/frontend/test-rendermd-style-sanitize.mjs`（5 断言）
-- **system prompt 重复渲染**（用户实测）: `renderMessages` 未过滤 `role='system'` 消息——`#system-prompt` 独立渲染 + addMessage 又渲染一份 `.msg.system` 进消息流（DOM 两个 system 块）。修复: renderMessages 对 system 消息直接跳过
+- **system prompt 重复渲染**（用户实测）: `renderMessages` 未过滤 `role='system'` 消息——`#system-prompt` 独立渲染 + addMessage 又渲染一份 `.msg.system` 进消息流（DOM 两个 system 块）。修复: renderMessages 只渲染 `[Notice:` 前缀的警告 system（StormBreaker/max_rounds/context 警告），提示词本体与 spRebuild 补充段由 renderSystemPrompt 管理不重复进消息流
 - **侧边栏选中高亮失效**（用户实测）: `loadSessions` 增量 patch 对已存在节点只更新 name/meta 文本、不刷新 `active` 类——点击切换会话后 `currentId` 已变但高亮停在旧会话。修复: diff else 分支按 `s.id === currentId` 同步 active 类（加/删）
+- **工具调用上限无前端渲染 + 提示用词模型忽略**（用户实测）: max_rounds 注入的 system 消息被前端过滤不显示；且措辞 `[max tool rounds reached - further tool calls prevented]` 是陈述句，模型误当历史遗留。修复: 前端按 `[Notice:` 前缀渲染警告 system + 措辞改为 `[Notice: tool call limit reached (N rounds this turn). Stop calling tools now. Report your completed work...]`（对齐 StormBreaker 的 [Notice: ...] 指令式措辞，含轮数）
+- **Web API 非法 JSON 致前端 loadSession 解析失败**（用户实测，LRN-20260813-019）: `appendMetaJson` 函数尾 `\"}` 假设"末字段为字符串需闭引号"——bash/read/grep/glob 等布尔/数字结尾分支多输出一个引号（`"timed_out":false"}}`）→ Web API 返回非法 JSON → 前端 `JSON.parse` 失败被 catch 吞 → 聊天看似无响应（曾被误判为 DeepSeek 429 限流）。修复: 函数尾只写 `}`、webfetch 分支自补闭引号（每分支自平衡，禁止共享尾部假设）。新增回归测试: 遍历全部 8 个 ToolMeta 变体序列化后 JSON parse 验证（handler 测试）
 
 ## [0.2.7] — 2026-08-12
 
