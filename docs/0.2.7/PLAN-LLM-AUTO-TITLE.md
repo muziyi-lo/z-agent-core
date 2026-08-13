@@ -12,6 +12,7 @@
 - CLI `App` 增 `subcall_runner` 字段 + `maybeAutoTitle()`（pipe_mode 跳过）+ `deinit` 前 `waitIdle(30s)`
 - CLI single-shot（`--prompt`）不触发标题（仅 1 条 user 消息，不满足"恰 2 条"）——符合 D1 设计
 - 测试 260 通过 + 1 既有失败（`tool.bash.test.bash: echo hello`，与本次改动无关，stash 基线复现）
+- **标题请求关闭 thinking（2026-08-13 修复）**：`ensureTitle` 首行设 `provider.config.compat.thinking_level = .none`——标题是 1 秒任务，开 thinking 会耗尽输出预算（实测 reasoning 124/128 tokens，content 只剩 4 tokens → 被迫输出用户消息尾巴，表现为"复述"）。subcall 线程持独立 provider 副本，关闭不影响主线程。TITLE_PROMPT 加 "NEVER copy or repeat the user message verbatim" 规则
 
 ## 背景
 

@@ -31,6 +31,7 @@ const TITLE_PROMPT =
     \\- A single line, <=50 characters, no explanations
     \\- Use the same language as the user message
     \\- Never include tool names
+    \\- NEVER copy or repeat the user message verbatim — write an original short title
     \\- Focus on the main topic or question the user needs to retrieve
     \\- Keep exact: technical terms, numbers, filenames, HTTP codes
     \\- If the message is short or conversational (e.g. "hello"), reflect its tone
@@ -222,6 +223,14 @@ pub fn ensureTitle(
     io: Io,
     extra_stopwords: []const []const u8,
 ) bool {
+    // Title generation is a 1-second task — disable thinking entirely. The
+    // subcall thread holds an independent provider copy, so this does not affect
+    // the main session's provider. Leaving thinking on is harmful: the model
+    // burns its output budget on reasoning and the content stage has almost no
+    // tokens left, producing truncated/repeated fragments of the user message
+    // (e.g. thinking 124/128 tokens → content = "简单对话测试").
+    provider.config.compat.thinking_level = .none;
+
     const msgs = session.messages();
 
     // Collect the first two real user messages (skip system prompt index 0,
