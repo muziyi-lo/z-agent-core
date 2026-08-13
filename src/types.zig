@@ -106,6 +106,12 @@ pub const ToolMeta = union(enum) {
         old_lines: usize,
         new_lines: usize,
     },
+    webfetch: struct {
+        url: []const u8,
+        byte_count: usize,
+        format: []const u8,
+        mime: []const u8,
+    },
 };
 
 pub const ToolResult = struct {

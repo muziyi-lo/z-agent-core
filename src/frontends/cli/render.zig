@@ -396,6 +396,9 @@ fn toolMetaLabel(tool_name: []const u8, meta: types.ToolMeta) ?[]const u8 {
         .edit => |e| {
             return std.fmt.bufPrint(&DISPLAY_BUF, "Edit {s} ({d} replacements, {d}->{d} lines)", .{ truncatePath(e.path, 50), e.replacements, e.old_lines, e.new_lines }) catch return tool_name;
         },
+        .webfetch => |w| {
+            return std.fmt.bufPrint(&DISPLAY_BUF, "Fetch {s} ({d} bytes, {s})", .{ shorten(w.url, 45), w.byte_count, w.format }) catch return tool_name;
+        },
         .none => return null,
     }
 }

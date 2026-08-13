@@ -16,6 +16,7 @@ test {
     _ = @import("tool/glob.zig");
     _ = @import("tool/skill.zig");
     _ = @import("tool/edit.zig");
+    _ = @import("tool/webfetch.zig");
     _ = @import("util/text.zig");
     _ = @import("util/path.zig");
     _ = @import("util/signal.zig");

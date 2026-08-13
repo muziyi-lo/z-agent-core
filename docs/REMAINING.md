@@ -3,8 +3,6 @@
 ## 实施顺序
 
 ```
-PHASE-5 (webfetch)  ← 当前（计划文档已完善，可随时实施）
-    ↓
 PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 ```
 
@@ -15,7 +13,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | PHASE-3 | `docs/0.2.2/PLAN-PHASE-3-COMPAT.md` | ✅ 已完成 (v0.2.2) |
 | PHASE-4 | `docs/0.2.2/PLAN-PHASE-4-CACHE.md` | ✅ 已完成 (v0.2.2) |
 | PHASE-7 | `docs/0.2.3/PLAN-PHASE-7-WEB-FRONTEND.md` | ✅ 已完成 (v0.2.3) — SSE 流式端点 + Web CRUD |
-| PHASE-5 | `docs/PLAN-PHASE-5-WEBFETCH.md` | 计划中 |
+| PHASE-5 | `docs/0.2.8/PLAN-WEBFETCH.md` | ✅ 已完成 (2026-08-13) — webfetch 工具（curl + HTML→MD，9 测试，opencode 对齐） |
 | PHASE-6 | `docs/PLAN-PHASE-6-TUI.md` | 架构设计 |
 | FIX-2 | `docs/0.2.2/PLAN-FIX-2-DECOUPLE-BUILD.md` | ✅ 已完成 (v0.2.2) |
 | FIX-DOCS | `docs/0.2.2/PLAN-FIX-DOCS-AND-INFRA.md` | ✅ 已完成 (v0.2.2) |
@@ -114,6 +112,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | N9 | 系统 prompt 缓存 breakpoint | 依赖 provider 缓存 hint 协议（CONTEXT-ASSEMBLY F4） |
 | N10 | 多 skill 目录数组（`skills_dir = ["...", "..."]`） | 索引与 tool 按顺序查找同名 skill，前者优先（CONTEXT-ASSEMBLY F5） |
 | N11 | 会话系统优化（消息 ID 模型 + 按 ID 操作 + 分页/compact/history） | **一期 P1-P5 + 二期 OPT2 已实施（2026-08-12）**：一期=消息 id + 按 id 操作 + `(fork #N)` 分支（自动重答 + parent_id 分支树）+ 滚动状态机 + 三层流式防护 + `/active` + 游标分页 + `POST /compact` + undo 栈；二期=自动压缩触发（token 预算/迭代摘要/`last_compact_id`）+ CLI `/delete` + `sessions_subdir` + 删除保护/级联。见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT.md` + `PLAN-SESSION-SYSTEM-OPT2.md` |
+| N12 | 前端工具渲染优化（0.2.8 周期第二项） | **已规划(2026-08-13)**:0.2.8 周期=工具优化。第一项 WebFetch 已完成（docs/0.2.8/PLAN-WEBFETCH.md）。第二项:前端工具卡片渲染优化（对齐 opencode 工具展示），进 docs/0.2.8/ 同周期。历史教训:工具卡片渲染曾多次回归（LRN-20260805-001 G4、LRN-20260806-005 innerHTML） |
 
 ## Deferred (explicitly skipped)
 

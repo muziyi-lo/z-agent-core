@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased] - 0.2.8 周期（未发布）
+
+### Added
+- **WebFetch 工具**（`docs/0.2.8/PLAN-WEBFETCH.md`，9 测试 + 实机验证）:
+  - 第 9 个内置工具 `webfetch`：curl 子进程抓取 URL，HTML→Markdown 转换（markdown/text/html 三档格式），对齐 opencode 实现
+  - **opencode 对齐**：Accept 头按格式协商、MIME 类型校验（isTextualMime，防图片/PDF 污染 session）、Cloudflare 403 重试（浏览器 UA → 诚实 UA）、timeout 参数（1-120s 默认 30s）
+  - **双层超时**：`std.process.run` 进程级兜底（DNS/启动挂起）+ curl `--max-time` 应用层
+  - **body 与响应头分离**：curl `-o` 临时文件写 body + `-w` 尾注留 stdout（stdout_limit 不截断尾注，解析无歧义），临时文件读取后删除
+  - 手写轻量 HTML→Markdown 转换器：h1-h6/段落/加粗/斜体/链接/列表/代码块，script/style/iframe 内容剔除
+  - ToolMeta 新增 `webfetch` 变体（url/byte_count/format/mime），CLI render + Web SSE 双端展示
+
+### Fixed
+- **webfetch 首次运行 code -1**（用户实测）: 工具依赖 `.tmp/` 目录写 curl body 临时文件，但**从未创建该目录**——用户项目首次运行 `.tmp` 不存在时 curl `-o` 失败（exit 23 "Failed writing body"）→ 误报 `HTTP request failed (code -1)`。开发机测试时 `.tmp` 恰好存在未暴露。修复: doFetch 前 `createDir` 确保 `.tmp` 存在（已存在则忽略 PathAlreadyExists）
+- **工具输出 `<style>` 注入污染全局布局**（用户实测）: `renderMd`/`renderMdBlocks` 的 `DOMPurify.sanitize()` 默认**保留 `<style>` 标签**——bash 工具输出 example.com 原始 HTML（含 `<style>body{width:60vw;margin:15vh auto}</style>`）时，样式被浏览器执行 → 全局 body 偏移（margin 15vh/60vw）→ 侧栏错位。修复: `FORBID_TAGS: ['style', 'link']`。新增回归测试 `tests/frontend/test-rendermd-style-sanitize.mjs`（5 断言）
+
 ## [0.2.7] — 2026-08-12
 
 ### Added

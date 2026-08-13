@@ -242,6 +242,7 @@ fn serializeMeta(buf: []u8, meta: types.ToolMeta) ![]const u8 {
         .edit => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"edit\",\"replacements\":{d}}}", .{m.replacements}),
         .write => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"write\",\"byte_count\":{d},\"existed\":{}}}", .{ m.byte_count, m.existed }),
         .skill => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"skill\",\"file_count\":{d}}}", .{m.file_count}),
+        .webfetch => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"webfetch\",\"byte_count\":{d},\"format\":\"{s}\",\"mime\":\"{s}\"}}", .{ m.byte_count, m.format, m.mime }),
         .none => return &.{},
     }
 }
