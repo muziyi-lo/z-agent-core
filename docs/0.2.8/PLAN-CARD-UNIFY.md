@@ -1,6 +1,8 @@
 # Plan CARD-UNIFY: 可折叠卡片统一抽象（thinking / tool / system prompt）
 
-## 状态: 计划中
+## 状态: 已完成（2026-08-14，commit 1f0abfb + e06754a）
+
+> 实施完成。偏差记录见文末"实施偏差"节。关键修复（e06754a）：card-body 双重嵌套 + reload 命令输入块重建——均通过浏览器实测确认。
 
 ## 前置依赖
 
@@ -489,3 +491,15 @@ zig build                           # app.js @embedFile 重新嵌入
 | 折叠骨架 | card-head/card-body 结构 + .open 状态类，与具体卡片特化样式解耦 |
 | 守卫（guard） | 委托 handler 内的点击拦截规则：目标在 body 内或 head 内交互控件时 return（不 toggle） |
 | 修饰类名 | thinking-block/tool-card 作为 .card 的附加类；msg.system 作为**容器类**（#system-prompt 内嵌 .card，不含 card 类） |
+
+## 实施偏差（阶段 5.5 记录）
+
+实施与设计文档的差异，全部经浏览器实测确认：
+
+| # | 偏差 | 说明 | 状态 |
+|---|------|------|------|
+| 1 | **body 元素不含 card-body 类** | 设计步骤 2 注意写 `card-body content` 双类——实现时错误地把 card-body 类设到内容元素（content/output），被 makeCard 再包一层致**双重嵌套**。修正：body 只带特化类，card-body 由 makeCard 包 | 已修复（e06754a） |
+| 2 | **reload 命令输入块重建** | 设计未覆盖：服务端 tool 消息 content 不持久化 ```` ```input ```` args header，reload 无法还原命令显示。补充：renderMessages 从 tool_calls arguments 重建 input 块 | 已修复（e06754a） |
+| 3 | **测试 stub 局限** | input 块重建在测试 stub 下无法精确断言（stub renderMd 不产 pre，bash 分支覆盖）——改为断言 `_toolData.input` 恢复，input 块显示靠浏览器实测 | 记录 |
+
+**残留扫描**：无过时函数名/类名残留（makeCard/setCardOpen/handleCardClick/.card-head/.card-body/aria-expanded 全部就位）。

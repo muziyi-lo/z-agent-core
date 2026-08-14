@@ -1,6 +1,8 @@
 # Plan P0-FIXES: P0 紧急四件套（glob ** / ToolMeta 悬垂 / SSE 恢复 / overflow 恢复）
 
-## 状态: 计划中
+## 状态: 已完成（2026-08-14，commit fefccf6）
+
+> 四项 P0 全部实施。实施偏差见文末"实施偏差"节。
 
 ## 前置依赖
 
@@ -702,3 +704,16 @@ node scripts/check-arch.mjs .
 | args_owned | ToolResult 持有 args JSON 解析树的所有权，保障 meta 借用在其 deinit 前有效 |
 | context overflow | API 返回上下文超限错误（context_length_exceeded），请求体 token 超出模型窗口 |
 | EventSource 自动重连 | 浏览器 SSE 规范行为：连接断开后按 retry 间隔自动重发同一 URL；本项目必须主动 close 禁用 |
+
+
+## 实施偏差（阶段 5.5 记录）
+
+| # | 偏差 | 说明 | 状态 |
+|---|------|------|------|
+| 1 | N14 defer→errdefer 泄漏 | registry.execute 改 errdefer 后，unknown tool/validate 正常返回路径漏释放 parsed（errdefer 仅 error 返回触发）→ testing.allocator 报泄漏。修复：两处正常路径手动 parsed.deinit() | 已修复（LRN-20260814-003） |
+| 2 | N14 finishExec 单点化 | 文档先定"每处手动转移"，审查后收敛为 `ToolResult.finishExec` 单点方法（registry + 8 testExec 委托）——消除遗忘风险 | 已采纳 |
+| 3 | N18 测试 mock | overflow 压缩重试测试依赖真实 provider（网络）不可靠——改用"不可压缩"路径（无网络）+ 不可达端点触发压缩失败 | 已修复 |
+| 4 | N19 横幅残留 | conn 状态机 recover_success 未清除横幅（M-05 生命周期）——审查发现后补 clearBanner | 已修复 |
+| 5 | N19 事件委托 + 状态机 | 文档先设计每卡片 onclick + guard 参数，审查后改 #messages 委托 + handleCardClick（守卫内置） | 已采纳 |
+
+**残留扫描**：error.ContextOverflow / matchEntry / finishExec / conn / handleCardClick 全部就位，无过时引用。
