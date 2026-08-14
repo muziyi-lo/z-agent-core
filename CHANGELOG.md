@@ -39,6 +39,13 @@
 - **reload 后工具命令输入块消失**（用户实测）: 服务端持久化 tool 消息 content 只存工具输出，不存 ` ```input` args header（流式时由 sse.zig 动态注入）→ reload 无法还原命令输入块。修复: renderMessages 工具段从 assistant tool_calls arguments 重建 ` ```input` 块（`ts.args !== '{}'` 时拼到 output 顶部），与流式格式一致。浏览器实测确认 input 块 + 输出正常显示
 
 ### Refactored
+- **JSON 序列化统一模块**（`docs/0.2.8/PLAN-JSON-WRITER.md`，F7）: 新增 `src/util/jsonw.zig`，4 处手写 JSON 拼接收敛为单一 JsonWriter。关键变更:
+  - **JsonWriter**: 自动逗号 + 完整转义（含控制字符 `\u00XX` + 非法 UTF-8 `\ufffd`）+ 容器自平衡（begin/end 配对，深度上限 16）；`Result` 终态持有者（`deinit` 依模式决定释放）；`initFixed` 供 sse 热路径零分配
+  - **转义统一 4→1**: session/provider/handler/sse 各自实现收敛为 `escapeInto`/`escapeAlloc`；handler/sse 修复缺控制字符转义的既有 bug（NUL/ESC 原样透出可能产生非法 JSON）
+  - **ToolMeta 序列化收敛 3→2**: session/handler 全字段序列化统一为 `types.writeJson`（handler 的 write 变体补齐 `old_lines` 等此前缺失字段，向前兼容）；sse 保留 numeric-only 精简集
+  - **sse fixed→alloc 回退**: `writeTextDelta` 先走 8192 栈缓冲零分配，超长 delta 回退堆分配重建单帧（修复既有 BufferTooSmall → 流中断隐患）
+  - **session/provider/handler/sse** 约 180 处手写 `appendSlice("...")` → 声明式组装（净删 167 行）
+  - **测试**: JSONL golden 基线（改造前捕获字节，逐字节零差异防回归）+ ToolMeta 8 变体 roundtrip（parse→serialize→parse 双遍）+ jsonw 7 单测（转义/自平衡/深度越界/错误路径泄漏）
 - **可折叠卡片统一抽象**（`docs/0.2.8/PLAN-CARD-UNIFY.md`）: thinking/tool/system prompt 三卡片收敛为同一 `makeCard` 骨架（.card-head/.card-body + .open 契约）。关键变更:
   - **makeCard 纯构造** + `setCardOpen` 统一状态写入口（同步 aria-expanded）+ `handleCardClick` 委托 handler（#messages 单监听器，零每卡片监听器）
   - **事件委托**替代每卡片 onclick——流式大量卡片无监听器累积，容器清空不泄漏（对齐既有 scroll 委托）

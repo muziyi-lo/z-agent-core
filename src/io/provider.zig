@@ -4,6 +4,7 @@ const types = @import("../types.zig");
 const config_mod = @import("../config.zig");
 const signal = @import("../util/signal.zig");
 const log = @import("../util/log.zig");
+const jsonw = @import("../util/jsonw.zig");
 
 pub const PhaseType = enum { none, thinking, content };
 
@@ -506,127 +507,112 @@ pub const Provider = struct {
         tools: ?[]const types.Tool,
         stream: bool,
     ) ![]u8 {
-        var buf = std.ArrayListAligned(u8, null).empty;
+        var jw = jsonw.JsonWriter.init(allocator);
+        errdefer jw.deinit();
 
-        try buf.appendSlice(allocator, "{\"model\":\"");
-        try buf.appendSlice(allocator, self.config.model);
-        try buf.appendSlice(allocator, "\",\"messages\":[");
+        try jw.beginObject(null);
+        try jw.stringField("model", self.config.model);
+        try jw.beginArray("messages");
 
-        for (messages, 0..) |msg, i| {
-            if (i > 0) try buf.appendSlice(allocator, ",");
-            try buf.appendSlice(allocator, "{\"role\":\"");
-            try buf.appendSlice(allocator, @tagName(msg.role));
-            try buf.appendSlice(allocator, "\"");
+        for (messages) |msg| {
+            try jw.beginObject(null);
+            try jw.stringField("role", @tagName(msg.role));
 
-            if (msg.tool_call_id) |id| {
-                try buf.appendSlice(allocator, ",\"tool_call_id\":\"");
-                try appendEscapedJsonString(&buf, allocator, id);
-                try buf.appendSlice(allocator, "\"");
-            }
+            if (msg.tool_call_id) |id| try jw.stringField("tool_call_id", id);
 
             if (msg.tool_calls) |tcs| {
-                try buf.appendSlice(allocator, ",\"content\":null");
+                try jw.rawField("content", "null");
                 // Include reasoning_content on tool-call messages when compat requires it (DeepSeek)
                 if (self.config.compat.require_reasoning_on_tool_calls) {
-                    if (msg.reasoning_content) |rc| {
-                        try buf.appendSlice(allocator, ",\"reasoning_content\":\"");
-                        try appendEscapedJsonString(&buf, allocator, rc);
-                        try buf.appendSlice(allocator, "\"");
-                    }
+                    if (msg.reasoning_content) |rc| try jw.stringField("reasoning_content", rc);
                 }
-                try buf.appendSlice(allocator, ",\"tool_calls\":[");
-                for (tcs, 0..) |tc, j| {
-                    if (j > 0) try buf.appendSlice(allocator, ",");
-                    try buf.appendSlice(allocator, "{\"id\":\"");
-                    try appendEscapedJsonString(&buf, allocator, tc.id);
-                    try buf.appendSlice(allocator, "\",\"type\":\"function\",\"function\":{\"name\":\"");
-                    try appendEscapedJsonString(&buf, allocator, tc.name);
-                    try buf.appendSlice(allocator, "\",\"arguments\":\"");
-                    try appendEscapedJsonString(&buf, allocator, tc.arguments);
-                    try buf.appendSlice(allocator, "\"}}");
+                try jw.beginArray("tool_calls");
+                for (tcs) |tc| {
+                    try jw.beginObject(null);
+                    try jw.stringField("id", tc.id);
+                    try jw.stringField("type", "function");
+                    try jw.beginObject("function");
+                    try jw.stringField("name", tc.name);
+                    try jw.stringField("arguments", tc.arguments);
+                    try jw.endValue();
+                    try jw.endValue();
                 }
-                try buf.appendSlice(allocator, "]");
+                try jw.endValue();
             } else {
-                try buf.appendSlice(allocator, ",\"content\":\"");
-                try appendEscapedJsonString(&buf, allocator, msg.content);
-                try buf.appendSlice(allocator, "\"");
+                try jw.stringField("content", msg.content);
             }
 
-            try buf.appendSlice(allocator, "}");
+            try jw.endValue();
         }
-        try buf.appendSlice(allocator, "]");
+        try jw.endValue();
 
         if (tools) |ts| {
-            try buf.appendSlice(allocator, ",\"tools\":[");
-            for (ts, 0..) |tool, j| {
-                if (j > 0) try buf.appendSlice(allocator, ",");
-                try buf.appendSlice(allocator, "{\"type\":\"function\",\"function\":{\"name\":\"");
-                try appendEscapedJsonString(&buf, allocator, tool.name);
-                try buf.appendSlice(allocator, "\",\"description\":\"");
-                try appendEscapedJsonString(&buf, allocator, tool.description);
-                try buf.appendSlice(allocator, "\",\"parameters\":");
-                try buf.appendSlice(allocator, tool.params);
-                try buf.appendSlice(allocator, "}}");
+            try jw.beginArray("tools");
+            for (ts) |tool| {
+                try jw.beginObject(null);
+                try jw.stringField("type", "function");
+                try jw.beginObject("function");
+                try jw.stringField("name", tool.name);
+                try jw.stringField("description", tool.description);
+                try jw.rawField("parameters", tool.params);
+                try jw.endValue();
+                try jw.endValue();
             }
-            try buf.appendSlice(allocator, "]");
+            try jw.endValue();
         }
 
-        // compat-driven thinking JSON
+        // compat-driven thinking JSON (pre-formed raw fragment)
         if (self.config.compat.thinking_format != .none) {
-            try buf.appendSlice(allocator, ",");
-            try buildThinkingJson(&buf, allocator,
+            try jw.rawBytes(",");
+            try buildThinkingJson(&jw,
                 self.config.compat.thinking_format,
                 self.config.compat.thinking_level);
         }
 
         // compat-driven max_tokens field name
-        try buf.appendSlice(allocator, ",\"");
-        try buf.appendSlice(allocator, switch (self.config.compat.max_tokens_field) {
+        try jw.rawBytes(",\"");
+        try jw.rawBytes(switch (self.config.compat.max_tokens_field) {
             .max_tokens => "max_tokens",
             .max_tokens_to_sample => "max_tokens_to_sample",
             .max_output_tokens => "maxOutputTokens",
         });
-        try buf.appendSlice(allocator, "\":");
-        {
-            var num_buf: [16]u8 = undefined;
-            const num_str = try std.fmt.bufPrint(&num_buf, "{d}", .{self.config.max_tokens});
-            try buf.appendSlice(allocator, num_str);
-        }
+        try jw.rawBytes("\":");
+        try jw.rawInt(self.config.max_tokens);
 
         if (stream) {
-            try buf.appendSlice(allocator, ",\"stream\":true");
+            try jw.rawBytes(",\"stream\":true");
             if (self.config.compat.supports_stream_options and
                 !self.config.stream_options_declined)
             {
-                try buf.appendSlice(allocator, ",\"stream_options\":{\"include_usage\":true}");
+                try jw.rawBytes(",\"stream_options\":{\"include_usage\":true}");
             }
         }
 
         // KEPT: model_params for backward compat (non-thinking params)
         if (self.config.model_params) |params| {
             if (params.len > 0) {
-                try buf.appendSlice(allocator, ",");
-                try buf.appendSlice(allocator, params);
+                try jw.rawBytes(",");
+                try jw.rawBytes(params);
             }
         }
 
-        try buf.appendSlice(allocator, "}");
+        try jw.endValue();
 
-        return buf.toOwnedSlice(allocator);
+        // Ownership transfer to caller (Result.deinit NOT called — slice escapes).
+        return (try jw.result()).bytes;
     }
 };
 
 fn buildThinkingJson(
-    buf: *std.ArrayListAligned(u8, null),
-    allocator: std.mem.Allocator,
+    jw: *jsonw.JsonWriter,
     format: types.ThinkingFormat,
     level: types.ThinkingLevel,
 ) !void {
     if (level == .none) {
         switch (format) {
-            .thinking_object => try buf.appendSlice(allocator, "\"thinking\":{\"type\":\"disabled\"}"),
-            .enable_thinking_bool => try buf.appendSlice(allocator, "\"enable_thinking\":false"),
-            .thinking_with_budget => try buf.appendSlice(allocator, "\"thinking\":{\"type\":\"disabled\",\"budget_tokens\":0}"),
+            .thinking_object => try jw.rawBytes("\"thinking\":{\"type\":\"disabled\"}"),
+            .enable_thinking_bool => try jw.rawBytes("\"enable_thinking\":false"),
+            .thinking_with_budget => try jw.rawBytes("\"thinking\":{\"type\":\"disabled\",\"budget_tokens\":0}"),
             else => return,
         }
         return;
@@ -636,8 +622,8 @@ fn buildThinkingJson(
         .thinking_object => {
             switch (level) {
                 .none => unreachable,
-                .minimal, .low, .medium, .high => try buf.appendSlice(allocator, "\"thinking\":{\"type\":\"enabled\"}"),
-                .xhigh, .max => try buf.appendSlice(allocator, "\"thinking\":{\"type\":\"enabled\",\"level\":\"max\"}"),
+                .minimal, .low, .medium, .high => try jw.rawBytes("\"thinking\":{\"type\":\"enabled\"}"),
+                .xhigh, .max => try jw.rawBytes("\"thinking\":{\"type\":\"enabled\",\"level\":\"max\"}"),
             }
         },
         .reasoning_effort => {
@@ -650,12 +636,12 @@ fn buildThinkingJson(
                 .xhigh => "xhigh",
                 .max => "high",
             };
-            try buf.appendSlice(allocator, "\"reasoning_effort\":\"");
-            try buf.appendSlice(allocator, s);
-            try buf.appendSlice(allocator, "\"");
+            try jw.rawBytes("\"reasoning_effort\":\"");
+            try jw.rawBytes(s);
+            try jw.rawBytes("\"");
         },
-        .enable_thinking_bool => try buf.appendSlice(allocator, "\"enable_thinking\":true"),
-        .thinking_parameters => try buf.appendSlice(allocator, "\"parameters\":{\"enable_thinking\":true}"),
+        .enable_thinking_bool => try jw.rawBytes("\"enable_thinking\":true"),
+        .thinking_parameters => try jw.rawBytes("\"parameters\":{\"enable_thinking\":true}"),
         .thinking_with_budget => {
             const budget: u32 = switch (level) {
                 .none => 0,
@@ -666,14 +652,12 @@ fn buildThinkingJson(
                 .xhigh => 24000,
                 .max => 31999,
             };
-            var b: [16]u8 = undefined;
-            const bs = try std.fmt.bufPrint(&b, "{d}", .{budget});
             if (budget == 0) {
-                try buf.appendSlice(allocator, "\"thinking\":{\"type\":\"disabled\",\"budget_tokens\":0}");
+                try jw.rawBytes("\"thinking\":{\"type\":\"disabled\",\"budget_tokens\":0}");
             } else {
-                try buf.appendSlice(allocator, "\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":");
-                try buf.appendSlice(allocator, bs);
-                try buf.appendSlice(allocator, "}");
+                try jw.rawBytes("\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":");
+                try jw.rawInt(budget);
+                try jw.rawBytes("}");
             }
         },
         .thinking_config_object => {
@@ -686,47 +670,10 @@ fn buildThinkingJson(
                 .xhigh => 24576,
                 .max => 32768,
             };
-            var b: [16]u8 = undefined;
-            const bs = try std.fmt.bufPrint(&b, "{d}", .{budget});
-            try buf.appendSlice(allocator, "\"thinkingConfig\":{\"thinkingBudget\":");
-            try buf.appendSlice(allocator, bs);
-            try buf.appendSlice(allocator, "}");
+            try jw.rawBytes("\"thinkingConfig\":{\"thinkingBudget\":");
+            try jw.rawInt(budget);
+            try jw.rawBytes("}");
         },
-    }
-}
-
-fn appendEscapedJsonString(buf: *std.ArrayListAligned(u8, null), allocator: std.mem.Allocator, s: []const u8) !void {
-    var i: usize = 0;
-    while (i < s.len) {
-        const c = s[i];
-        if (c < 0x80) {
-            switch (c) {
-                '"' => try buf.appendSlice(allocator, "\\\""),
-                '\\' => try buf.appendSlice(allocator, "\\\\"),
-                '\n' => try buf.appendSlice(allocator, "\\n"),
-                '\r' => try buf.appendSlice(allocator, "\\r"),
-                '\t' => try buf.appendSlice(allocator, "\\t"),
-                0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
-                    var hex_buf: [6]u8 = undefined;
-                    const hex = try std.fmt.bufPrint(&hex_buf, "\\u00{x:0>2}", .{@as(u8, c)});
-                    try buf.appendSlice(allocator, hex);
-                },
-                else => try buf.append(allocator, c),
-            }
-            i += 1;
-        } else if (c >= 0xC0 and c <= 0xDF) {
-            if (i + 1 < s.len) { try buf.appendSlice(allocator, s[i..i+2]); i += 2; }
-            else { try buf.appendSlice(allocator, "\\ufffd"); i += 1; }
-        } else if (c >= 0xE0 and c <= 0xEF) {
-            if (i + 2 < s.len) { try buf.appendSlice(allocator, s[i..i+3]); i += 3; }
-            else { try buf.appendSlice(allocator, "\\ufffd"); i += 1; }
-        } else if (c >= 0xF0 and c <= 0xF4) {
-            if (i + 3 < s.len) { try buf.appendSlice(allocator, s[i..i+4]); i += 4; }
-            else { try buf.appendSlice(allocator, "\\ufffd"); i += 1; }
-        } else {
-            try buf.appendSlice(allocator, "\\ufffd");
-            i += 1;
-        }
     }
 }
 
@@ -847,47 +794,6 @@ test "detectVendor standard" {
     try std.testing.expectEqual(Provider.Vendor.standard, Provider.detectVendor("https://api.openai.com"));
     try std.testing.expectEqual(Provider.Vendor.standard, Provider.detectVendor("https://openrouter.ai/api/v1"));
     try std.testing.expectEqual(Provider.Vendor.standard, Provider.detectVendor("http://localhost:8080"));
-}
-
-test "appendEscapedJsonString: escapes special chars" {
-    const testing = std.testing;
-    var buf: std.ArrayListAligned(u8, null) = .empty;
-    try appendEscapedJsonString(&buf, testing.allocator, "hello\"world\\\n\t");
-    const s = try buf.toOwnedSlice(testing.allocator);
-    defer testing.allocator.free(s);
-    try testing.expect(std.mem.indexOf(u8, s, "\\\"") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "\\\\") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "\\n") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "\\t") != null);
-}
-
-test "appendEscapedJsonString: 0x80+ bytes pass through" {
-    const testing = std.testing;
-    var buf: std.ArrayListAligned(u8, null) = .empty;
-    try appendEscapedJsonString(&buf, testing.allocator, "\xE4\xBD\xA0\xE5\xA5\xBD");
-    const s = try buf.toOwnedSlice(testing.allocator);
-    defer testing.allocator.free(s);
-    try testing.expect(std.mem.indexOf(u8, s, "\xE4") != null);
-}
-
-test "appendEscapedJsonString: control chars escaped" {
-    const testing = std.testing;
-    var buf: std.ArrayListAligned(u8, null) = .empty;
-    try appendEscapedJsonString(&buf, testing.allocator, "\x00\x01\x1f");
-    const s = try buf.toOwnedSlice(testing.allocator);
-    defer testing.allocator.free(s);
-    try testing.expect(std.mem.indexOf(u8, s, "\\u0000") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "\\u0001") != null);
-    try testing.expect(std.mem.indexOf(u8, s, "\\u001f") != null);
-}
-
-test "appendEscapedJsonString: invalid UTF-8 replaced" {
-    const testing = std.testing;
-    var buf: std.ArrayListAligned(u8, null) = .empty;
-    try appendEscapedJsonString(&buf, testing.allocator, "\xAA");
-    const s = try buf.toOwnedSlice(testing.allocator);
-    defer testing.allocator.free(s);
-    try testing.expect(std.mem.indexOf(u8, s, "\\ufffd") != null);
 }
 
 test "buildJsonBody basic" {

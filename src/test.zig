@@ -23,6 +23,7 @@ test {
     _ = @import("util/log.zig");
     _ = @import("util/trace.zig");
     _ = @import("util/timing.zig");
+    _ = @import("util/jsonw.zig");
     _ = @import("toml.zig");
     _ = @import("frontends/cli/render.zig");
     _ = @import("frontends/cli/App.zig");

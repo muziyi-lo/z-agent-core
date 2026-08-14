@@ -1,5 +1,6 @@
 const std = @import("std");
 const types = @import("../types.zig");
+const jsonw = @import("../util/jsonw.zig");
 const Io = std.Io;
 
 pub const DEFAULT_SESSION_NAME = "New Session";
@@ -166,7 +167,7 @@ pub const Session = struct {
 
             const tool_call_id: ?[]const u8 = if (obj.get("tool_call_id")) |v| if (v == .string) try arena.dupe(u8, v.string) else null else null;
 
-            // ToolMeta: parse the flat "meta" object persisted by appendToolMetaJson.
+            // ToolMeta: parse the flat "meta" object persisted by types.writeJson.
             // Missing/invalid meta degrades to null (legacy files, forward compat).
             const msg_meta: ?types.ToolMeta = if (obj.get("meta")) |mv| blk: {
                 if (mv == .object) {
@@ -437,10 +438,8 @@ pub const Session = struct {
 
             try writeHeader(arena, self.io, file, self.name, self.model, self.parent_id, self._messages.items.len);
             for (self._messages.items) |msg| {
-                var buf = std.array_list.Managed(u8).init(arena);
-                defer buf.deinit();
-                try serializeMessage(&buf, msg);
-                try file.writeStreamingAll(self.io, buf.items);
+                const line = try serializeMessage(arena, msg);
+                try file.writeStreamingAll(self.io, line);
             }
         }
 
@@ -488,10 +487,8 @@ pub const Session = struct {
 
             try writeHeader(arena, io, file, name, model, parent_id, count);
             for (self._messages.items[0..count]) |msg| {
-                var buf = std.array_list.Managed(u8).init(arena);
-                defer buf.deinit();
-                try serializeMessage(&buf, msg);
-                try file.writeStreamingAll(io, buf.items);
+                const line = try serializeMessage(arena, msg);
+                try file.writeStreamingAll(io, line);
             }
         }
 
@@ -540,10 +537,8 @@ pub const Session = struct {
 
             try writeHeader(arena, self.io, file, self.name, self.model, self.parent_id, self._messages.items.len);
             for (self._messages.items) |msg| {
-                var buf = std.array_list.Managed(u8).init(arena);
-                defer buf.deinit();
-                try serializeMessage(&buf, msg);
-                try file.writeStreamingAll(self.io, buf.items);
+                const line = try serializeMessage(arena, msg);
+                try file.writeStreamingAll(self.io, line);
             }
         }
 
@@ -594,56 +589,6 @@ fn sanitizeFileName(allocator: std.mem.Allocator, name: []const u8) ![]const u8 
     return buf.toOwnedSlice(allocator);
 }
 
-fn appendEscapedJsonString(buf: *std.array_list.Managed(u8), s: []const u8) !void {
-    var i: usize = 0;
-    while (i < s.len) {
-        const c = s[i];
-        if (c < 0x80) {
-            switch (c) {
-                '"' => try buf.appendSlice("\\\""),
-                '\\' => try buf.appendSlice("\\\\"),
-                '\n' => try buf.appendSlice("\\n"),
-                '\r' => try buf.appendSlice("\\r"),
-                '\t' => try buf.appendSlice("\\t"),
-                0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
-                    var hex_buf: [6]u8 = undefined;
-                    const hex = try std.fmt.bufPrint(&hex_buf, "\\u00{x:0>2}", .{@as(u8, c)});
-                    try buf.appendSlice(hex);
-                },
-                else => try buf.append(c),
-            }
-            i += 1;
-        } else if (c >= 0xC0 and c <= 0xDF) {
-            if (i + 1 < s.len) {
-                try buf.appendSlice(s[i..i + 2]);
-                i += 2;
-            } else {
-                try buf.appendSlice("\\ufffd");
-                i += 1;
-            }
-        } else if (c >= 0xE0 and c <= 0xEF) {
-            if (i + 2 < s.len) {
-                try buf.appendSlice(s[i..i + 3]);
-                i += 3;
-            } else {
-                try buf.appendSlice("\\ufffd");
-                i += 1;
-            }
-        } else if (c >= 0xF0 and c <= 0xF4) {
-            if (i + 3 < s.len) {
-                try buf.appendSlice(s[i..i + 4]);
-                i += 4;
-            } else {
-                try buf.appendSlice("\\ufffd");
-                i += 1;
-            }
-        } else {
-            try buf.appendSlice("\\ufffd");
-            i += 1;
-        }
-    }
-}
-
 fn epochToISO8601(allocator: std.mem.Allocator, epoch_s: i64) ![]const u8 {
     const z = @divFloor(epoch_s, 86400) + 719468;
     const era = @divFloor(if (z >= 0) z else z - 146096, 146097);
@@ -665,30 +610,27 @@ fn epochToISO8601(allocator: std.mem.Allocator, epoch_s: i64) ![]const u8 {
 fn writeHeader(allocator: std.mem.Allocator, io: Io, file: Io.File, name: []const u8, model: []const u8, parent_id: ?[]const u8, msg_count: usize) !void {
     const clock_ts = Io.Clock.Timestamp.now(io, .real);
     const now = Io.Timestamp.toSeconds(clock_ts.raw);
-    var buf = std.array_list.Managed(u8).init(allocator);
-    defer buf.deinit();
-
-    try buf.appendSlice("{\"type\":\"header\",\"timestamp\":\"");
     const ts_iso = try epochToISO8601(allocator, now);
     defer allocator.free(ts_iso);
-    try buf.appendSlice(ts_iso);
-    try buf.appendSlice("\",\"model\":\"");
-    try appendEscapedJsonString(&buf, model);
-    try buf.appendSlice("\",\"name\":\"");
-    try appendEscapedJsonString(&buf, name);
-    if (parent_id) |pid| {
-        try buf.appendSlice("\",\"parent_id\":\"");
-        try appendEscapedJsonString(&buf, pid);
-    }
-    var cnt_buf: [24]u8 = undefined;
-    const cnt_str = try std.fmt.bufPrint(&cnt_buf, "\",\"msg_count\":{d}", .{msg_count});
-    try buf.appendSlice(cnt_str);
-    try buf.appendSlice("}\n");
 
-    try file.writeStreamingAll(io, buf.items);
+    var jw = jsonw.JsonWriter.init(allocator);
+    errdefer jw.deinit();
+    try jw.beginObject(null);
+    try jw.stringField("type", "header");
+    try jw.stringField("timestamp", ts_iso);
+    try jw.stringField("model", model);
+    try jw.stringField("name", name);
+    if (parent_id) |pid| try jw.stringField("parent_id", pid);
+    try jw.intField("msg_count", msg_count);
+    try jw.endValue();
+    try jw.rawBytes("\n");
+    var out = try jw.result();
+    defer out.deinit();
+
+    try file.writeStreamingAll(io, out.bytes);
 }
 
-/// Parse the flat "meta" object persisted by appendToolMetaJson back into
+/// Parse the flat "meta" object persisted by types.writeJson back into
 /// ToolMeta. All string fields arena-duped (persistence never borrows).
 /// Returns null on unknown name / missing fields (forward compat: a newer
 /// variant or truncated line degrades to no meta, never fails the load).
@@ -741,142 +683,6 @@ fn parseToolMetaVariant(arena: std.mem.Allocator, obj: std.json.ObjectMap, compt
     return null;
 }
 
-/// Serialize ToolMeta into session JSONL as a flat object with ALL fields
-/// (unlike sse.zig serializeMeta which is numeric-only for streaming display).
-/// JSON string values escaped via appendEscapedJsonString. Invariant: every
-/// ToolMeta variant must be covered here + parseToolMeta + sse serializeMeta.
-fn appendToolMetaJson(buf: *std.array_list.Managed(u8), meta: types.ToolMeta) !void {
-    try buf.appendSlice(",\"meta\":{");
-    switch (meta) {
-        .none => {
-            try buf.appendSlice("\"name\":\"none\"}");
-            return;
-        },
-        .write => |m| {
-            try buf.appendSlice("\"name\":\"write\",\"path\":\"");
-            try appendEscapedJsonString(buf, m.path);
-            try buf.appendSlice("\",\"existed\":");
-            try buf.appendSlice(if (m.existed) "true" else "false");
-            if (m.old_lines) |ol| {
-                try buf.appendSlice(",\"old_lines\":");
-                var nb: [24]u8 = undefined;
-                try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{ol}) catch unreachable);
-            }
-            try buf.appendSlice(",\"new_lines\":");
-            var nb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.new_lines}) catch unreachable);
-            try buf.appendSlice(",\"byte_count\":");
-            var cb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&cb, "{d}", .{m.byte_count}) catch unreachable);
-            try buf.appendSlice("}");
-        },
-        .read => |m| {
-            try buf.appendSlice("\"name\":\"read\",\"path\":\"");
-            try appendEscapedJsonString(buf, m.path);
-            try buf.appendSlice("\",\"is_directory\":");
-            try buf.appendSlice(if (m.is_directory) "true" else "false");
-            try buf.appendSlice(",\"total_lines\":");
-            var nb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.total_lines}) catch unreachable);
-            try buf.appendSlice(",\"byte_count\":");
-            var cb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&cb, "{d}", .{m.byte_count}) catch unreachable);
-            try buf.appendSlice(",\"truncated\":");
-            try buf.appendSlice(if (m.truncated) "true" else "false");
-            if (m.next_offset) |no| {
-                try buf.appendSlice(",\"next_offset\":");
-                var ob: [24]u8 = undefined;
-                try buf.appendSlice(std.fmt.bufPrint(&ob, "{d}", .{no}) catch unreachable);
-            }
-            try buf.appendSlice("}");
-        },
-        .grep => |m| {
-            try buf.appendSlice("\"name\":\"grep\",\"pattern\":\"");
-            try appendEscapedJsonString(buf, m.pattern);
-            try buf.appendSlice("\"");
-            if (m.path) |p| {
-                try buf.appendSlice(",\"path\":\"");
-                try appendEscapedJsonString(buf, p);
-                try buf.appendSlice("\"");
-            }
-            try buf.appendSlice(",\"match_count\":");
-            var nb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.match_count}) catch unreachable);
-            try buf.appendSlice(",\"files_scanned\":");
-            var fb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&fb, "{d}", .{m.files_scanned}) catch unreachable);
-            try buf.appendSlice(",\"truncated\":");
-            try buf.appendSlice(if (m.truncated) "true" else "false");
-            try buf.appendSlice("}");
-        },
-        .bash => |m| {
-            try buf.appendSlice("\"name\":\"bash\",\"command\":\"");
-            try appendEscapedJsonString(buf, m.command);
-            try buf.appendSlice("\",\"exit_code\":");
-            var nb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.exit_code}) catch unreachable);
-            try buf.appendSlice(",\"byte_count\":");
-            var cb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&cb, "{d}", .{m.byte_count}) catch unreachable);
-            try buf.appendSlice(",\"truncated\":");
-            try buf.appendSlice(if (m.truncated) "true" else "false");
-            try buf.appendSlice(",\"timed_out\":");
-            try buf.appendSlice(if (m.timed_out) "true" else "false");
-            try buf.appendSlice("}");
-        },
-        .glob => |m| {
-            try buf.appendSlice("\"name\":\"glob\",\"pattern\":\"");
-            try appendEscapedJsonString(buf, m.pattern);
-            try buf.appendSlice("\"");
-            if (m.path) |p| {
-                try buf.appendSlice(",\"path\":\"");
-                try appendEscapedJsonString(buf, p);
-                try buf.appendSlice("\"");
-            }
-            try buf.appendSlice(",\"file_count\":");
-            var nb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.file_count}) catch unreachable);
-            try buf.appendSlice(",\"truncated\":");
-            try buf.appendSlice(if (m.truncated) "true" else "false");
-            try buf.appendSlice("}");
-        },
-        .skill => |m| {
-            try buf.appendSlice("\"name\":\"skill\",\"skill\":\"");
-            try appendEscapedJsonString(buf, m.name);
-            try buf.appendSlice("\",\"file_count\":");
-            var nb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.file_count}) catch unreachable);
-            try buf.appendSlice("}");
-        },
-        .edit => |m| {
-            try buf.appendSlice("\"name\":\"edit\",\"path\":\"");
-            try appendEscapedJsonString(buf, m.path);
-            try buf.appendSlice("\",\"replacements\":");
-            var nb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&nb, "{d}", .{m.replacements}) catch unreachable);
-            try buf.appendSlice(",\"old_lines\":");
-            var ob: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&ob, "{d}", .{m.old_lines}) catch unreachable);
-            try buf.appendSlice(",\"new_lines\":");
-            var nb2: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&nb2, "{d}", .{m.new_lines}) catch unreachable);
-            try buf.appendSlice("}");
-        },
-        .webfetch => |m| {
-            try buf.appendSlice("\"name\":\"webfetch\",\"url\":\"");
-            try appendEscapedJsonString(buf, m.url);
-            try buf.appendSlice("\",\"byte_count\":");
-            var cb: [24]u8 = undefined;
-            try buf.appendSlice(std.fmt.bufPrint(&cb, "{d}", .{m.byte_count}) catch unreachable);
-            try buf.appendSlice(",\"format\":\"");
-            try appendEscapedJsonString(buf, m.format);
-            try buf.appendSlice("\",\"mime\":\"");
-            try appendEscapedJsonString(buf, m.mime);
-            try buf.appendSlice("\"}");
-        },
-    }
-}
-
 /// Deep-copy a ToolMeta's owned slices into the session arena. Persistence
 /// never holds borrows from ToolResult (types.zig zero-copy borrow rule).
 fn dupeToolMeta(arena: std.mem.Allocator, meta: types.ToolMeta) !types.ToolMeta {
@@ -903,89 +709,60 @@ fn dupeToolMeta(arena: std.mem.Allocator, meta: types.ToolMeta) !types.ToolMeta 
     return .none;
 }
 
-fn serializeMessage(buf: *std.array_list.Managed(u8), msg: types.Message) !void {
-    var id_buf: [24]u8 = undefined;
-    const id_str = try std.fmt.bufPrint(&id_buf, "{{\"id\":{d},\"role\":\"", .{msg.id});
-    try buf.appendSlice(id_str);
-    try buf.appendSlice(@tagName(msg.role));
-    try buf.appendSlice("\"");
+fn serializeMessage(allocator: std.mem.Allocator, msg: types.Message) ![]u8 {
+    var jw = jsonw.JsonWriter.init(allocator);
+    errdefer jw.deinit();
+    try jw.beginObject(null);
+    try jw.intField("id", msg.id);
+    try jw.stringField("role", @tagName(msg.role));
+    try jw.stringField("content", msg.content);
 
-    try buf.appendSlice(",\"content\":\"");
-    try appendEscapedJsonString(buf, msg.content);
-    try buf.appendSlice("\"");
-
-    if (msg.reasoning_content) |rc| {
-        try buf.appendSlice(",\"reasoning_content\":\"");
-        try appendEscapedJsonString(buf, rc);
-        try buf.appendSlice("\"");
-    }
+    if (msg.reasoning_content) |rc| try jw.stringField("reasoning_content", rc);
 
     if (msg.tool_calls) |tcs| {
-        try buf.appendSlice(",\"tool_calls\":[");
-        for (tcs, 0..) |tc, j| {
-            if (j > 0) try buf.appendSlice(",");
-            try buf.appendSlice("{\"id\":\"");
-            try appendEscapedJsonString(buf, tc.id);
-            try buf.appendSlice("\",\"name\":\"");
-            try appendEscapedJsonString(buf, tc.name);
-            try buf.appendSlice("\",\"arguments\":\"");
-            try appendEscapedJsonString(buf, tc.arguments);
-            try buf.appendSlice("\"}");
+        try jw.beginArray("tool_calls");
+        for (tcs) |tc| {
+            try jw.beginObject(null);
+            try jw.stringField("id", tc.id);
+            try jw.stringField("name", tc.name);
+            try jw.stringField("arguments", tc.arguments);
+            try jw.endValue();
         }
-        try buf.appendSlice("]");
+        try jw.endValue();
     }
 
-    if (msg.tool_call_id) |tci| {
-        try buf.appendSlice(",\"tool_call_id\":\"");
-        try appendEscapedJsonString(buf, tci);
-        try buf.appendSlice("\"");
-    }
+    if (msg.tool_call_id) |tci| try jw.stringField("tool_call_id", tci);
 
-    if (msg.model) |m| {
-        try buf.appendSlice(",\"model\":\"");
-        try appendEscapedJsonString(buf, m);
-        try buf.appendSlice("\"");
-    }
+    if (msg.model) |m| try jw.stringField("model", m);
 
-    if (msg.timestamp != 0) {
-        var ts_buf: [32]u8 = undefined;
-        const ts_str = try std.fmt.bufPrint(&ts_buf, ",\"timestamp\":{d}", .{msg.timestamp});
-        try buf.appendSlice(ts_str);
-    }
+    if (msg.timestamp != 0) try jw.intField("timestamp", msg.timestamp);
 
     if (msg.usage) |u| {
-        try buf.appendSlice(",\"usage\":{\"input\":");
-        var in_buf: [16]u8 = undefined;
-        const in_s = try std.fmt.bufPrint(&in_buf, "{d}", .{u.input});
-        try buf.appendSlice(in_s);
-        try buf.appendSlice(",\"output\":");
-        var out_buf: [16]u8 = undefined;
-        const out_s = try std.fmt.bufPrint(&out_buf, "{d}", .{u.output});
-        try buf.appendSlice(out_s);
-        try buf.appendSlice(",\"total\":");
-        var tot_buf: [16]u8 = undefined;
-        const tot_s = try std.fmt.bufPrint(&tot_buf, "{d}", .{u.total});
-        try buf.appendSlice(tot_s);
-        if (u.cache_hit) |ch| {
-            try buf.appendSlice(",\"cache_hit\":");
-            var ch_buf: [16]u8 = undefined;
-            const ch_s = try std.fmt.bufPrint(&ch_buf, "{d}", .{ch});
-            try buf.appendSlice(ch_s);
-        }
-        if (u.cache_miss) |cm| {
-            try buf.appendSlice(",\"cache_miss\":");
-            var cm_buf: [16]u8 = undefined;
-            const cm_s = try std.fmt.bufPrint(&cm_buf, "{d}", .{cm});
-            try buf.appendSlice(cm_s);
-        }
-        try buf.appendSlice("}");
+        try jw.beginObject("usage");
+        try jw.intField("input", u.input);
+        try jw.intField("output", u.output);
+        try jw.intField("total", u.total);
+        if (u.cache_hit) |ch| try jw.intField("cache_hit", ch);
+        if (u.cache_miss) |cm| try jw.intField("cache_miss", cm);
+        try jw.endValue();
     }
 
     if (msg.meta) |meta| {
-        try appendToolMetaJson(buf, meta);
+        var mjw = jsonw.JsonWriter.init(allocator);
+        errdefer mjw.deinit();
+        try types.writeJson(meta, &mjw);
+        var mout = try mjw.result();
+        defer mout.deinit();
+        try jw.rawField("meta", mout.bytes);
     }
 
-    try buf.appendSlice("}\n");
+    try jw.endValue();
+    try jw.rawBytes("\n");
+
+    // Ownership transfer: caller owns the returned slice. jw is consumed by
+    // result() (aw transferred); the Result wrapper is dropped without calling
+    // deinit so the slice escapes this frame alive.
+    return (try jw.result()).bytes;
 }
 
 pub const SessionInfo = types.SessionInfo;
@@ -1764,4 +1541,59 @@ test "session: load persisted ids preserved and bump next" {
     const new_id = loaded.messages()[2].id;
     try std.testing.expect(new_id > saved_ids[1]);
     try std.testing.expectEqual(loaded.messages()[2].id, new_id);
+}
+
+test "session: JSONL golden bytes stable" {
+    // 全字段代表性消息集 → serializeMessage 逐字节比对（F7 捕获基线，防序列化回归）。
+    // timestamp 固定值（非 now），header 单独验证含转义。
+    const allocator = std.testing.allocator;
+
+    {
+        var hjw = jsonw.JsonWriter.init(allocator);
+        errdefer hjw.deinit();
+        try hjw.beginObject(null);
+        try hjw.stringField("type", "header");
+        try hjw.stringField("timestamp", "2026-08-14T08:02:21Z");
+        try hjw.stringField("model", "deepseek/model");
+        try hjw.stringField("name", "Test \"Sess\"\n");
+        try hjw.intField("msg_count", 3);
+        try hjw.endValue();
+        try hjw.rawBytes("\n");
+        var hout = try hjw.result();
+        defer hout.deinit();
+        try std.testing.expectEqualStrings(
+            "{\"type\":\"header\",\"timestamp\":\"2026-08-14T08:02:21Z\",\"model\":\"deepseek/model\",\"name\":\"Test \\\"Sess\\\"\\n\",\"msg_count\":3}\n",
+            hout.bytes,
+        );
+    }
+
+    const msgs = [_]types.Message{
+        .{ .id = 1, .role = .user, .content = "hi \"quoted\"\n\t\\ and 中文", .timestamp = 1752062401 },
+        .{ .id = 2, .role = .assistant, .content = "thinking", .reasoning_content = "reason", .model = "deepseek/model", .timestamp = 1752062402, .tool_calls = &.{.{ .id = "call_1", .name = "bash", .arguments = "{\"command\":\"ls\"}" }} },
+        .{ .id = 3, .role = .tool, .content = "out", .tool_call_id = "call_1", .timestamp = 1752062403, .usage = .{ .input = 10, .output = 20, .total = 30, .cache_hit = 1, .cache_miss = 2 }, .meta = .{ .bash = .{ .command = "ls", .exit_code = 0, .byte_count = 3, .truncated = false, .timed_out = false } } },
+        .{ .id = 4, .role = .tool, .content = "w", .tool_call_id = "call_2", .timestamp = 1752062404, .meta = .{ .write = .{ .path = "a.txt", .existed = true, .old_lines = 2, .new_lines = 3, .byte_count = 7 } } },
+        .{ .id = 5, .role = .tool, .content = "r", .tool_call_id = "call_3", .timestamp = 1752062405, .meta = .{ .read = .{ .path = "b.zig", .is_directory = false, .total_lines = 99, .byte_count = 100, .truncated = true, .next_offset = 50 } } },
+        .{ .id = 6, .role = .tool, .content = "g", .tool_call_id = "call_4", .timestamp = 1752062406, .meta = .{ .grep = .{ .pattern = "fn.*foo", .path = "src", .match_count = 4, .files_scanned = 5, .truncated = false } } },
+        .{ .id = 7, .role = .tool, .content = "gl", .tool_call_id = "call_5", .timestamp = 1752062407, .meta = .{ .glob = .{ .pattern = "*.zig", .path = null, .file_count = 8, .truncated = false } } },
+        .{ .id = 8, .role = .tool, .content = "s", .tool_call_id = "call_6", .timestamp = 1752062408, .meta = .{ .skill = .{ .name = "memory", .file_count = 2 } } },
+        .{ .id = 9, .role = .tool, .content = "e", .tool_call_id = "call_7", .timestamp = 1752062409, .meta = .{ .edit = .{ .path = "c.zig", .replacements = 1, .old_lines = 2, .new_lines = 2 } } },
+        .{ .id = 10, .role = .tool, .content = "wf", .tool_call_id = "call_8", .timestamp = 1752062410, .meta = .{ .webfetch = .{ .url = "https://e.com", .byte_count = 100, .format = "markdown", .mime = "text/html" } } },
+    };
+    const expected = [_][]const u8{
+        "{\"id\":1,\"role\":\"user\",\"content\":\"hi \\\"quoted\\\"\\n\\t\\\\ and 中文\",\"timestamp\":1752062401}\n",
+        "{\"id\":2,\"role\":\"assistant\",\"content\":\"thinking\",\"reasoning_content\":\"reason\",\"tool_calls\":[{\"id\":\"call_1\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}],\"model\":\"deepseek/model\",\"timestamp\":1752062402}\n",
+        "{\"id\":3,\"role\":\"tool\",\"content\":\"out\",\"tool_call_id\":\"call_1\",\"timestamp\":1752062403,\"usage\":{\"input\":10,\"output\":20,\"total\":30,\"cache_hit\":1,\"cache_miss\":2},\"meta\":{\"name\":\"bash\",\"command\":\"ls\",\"exit_code\":0,\"byte_count\":3,\"truncated\":false,\"timed_out\":false}}\n",
+        "{\"id\":4,\"role\":\"tool\",\"content\":\"w\",\"tool_call_id\":\"call_2\",\"timestamp\":1752062404,\"meta\":{\"name\":\"write\",\"path\":\"a.txt\",\"existed\":true,\"old_lines\":2,\"new_lines\":3,\"byte_count\":7}}\n",
+        "{\"id\":5,\"role\":\"tool\",\"content\":\"r\",\"tool_call_id\":\"call_3\",\"timestamp\":1752062405,\"meta\":{\"name\":\"read\",\"path\":\"b.zig\",\"is_directory\":false,\"total_lines\":99,\"byte_count\":100,\"truncated\":true,\"next_offset\":50}}\n",
+        "{\"id\":6,\"role\":\"tool\",\"content\":\"g\",\"tool_call_id\":\"call_4\",\"timestamp\":1752062406,\"meta\":{\"name\":\"grep\",\"pattern\":\"fn.*foo\",\"path\":\"src\",\"match_count\":4,\"files_scanned\":5,\"truncated\":false}}\n",
+        "{\"id\":7,\"role\":\"tool\",\"content\":\"gl\",\"tool_call_id\":\"call_5\",\"timestamp\":1752062407,\"meta\":{\"name\":\"glob\",\"pattern\":\"*.zig\",\"file_count\":8,\"truncated\":false}}\n",
+        "{\"id\":8,\"role\":\"tool\",\"content\":\"s\",\"tool_call_id\":\"call_6\",\"timestamp\":1752062408,\"meta\":{\"name\":\"skill\",\"skill\":\"memory\",\"file_count\":2}}\n",
+        "{\"id\":9,\"role\":\"tool\",\"content\":\"e\",\"tool_call_id\":\"call_7\",\"timestamp\":1752062409,\"meta\":{\"name\":\"edit\",\"path\":\"c.zig\",\"replacements\":1,\"old_lines\":2,\"new_lines\":2}}\n",
+        "{\"id\":10,\"role\":\"tool\",\"content\":\"wf\",\"tool_call_id\":\"call_8\",\"timestamp\":1752062410,\"meta\":{\"name\":\"webfetch\",\"url\":\"https://e.com\",\"byte_count\":100,\"format\":\"markdown\",\"mime\":\"text/html\"}}\n",
+    };
+    for (msgs, 0..) |msg, i| {
+        const line = try serializeMessage(allocator, msg);
+        defer allocator.free(line);
+        try std.testing.expectEqualStrings(expected[i], line);
+    }
 }

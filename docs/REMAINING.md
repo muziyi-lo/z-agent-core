@@ -104,11 +104,11 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | 梯队 | 项 | 理由 |
 |------|----|------|
 | **P0 紧急**（正确性/稳定性，无依赖） | N13 → N14 → N19 → N18 | **✅ 全部已实施（2026-08-14，P0-FIXES）**：glob `**` bug；meta 悬垂 UB（先于一切 meta 相关改动）；SSE 断连无法恢复；压缩后无法继续 |
-| **P1 技术债/高价值** | F7（**先 N14**）→ N16 | JSON 模块重构（N14 修复并入 JsonWriter）；工具审批+预览（审批依赖权限基建可拆，预览独立） |
+| **P1 技术债/高价值** | ~~F7~~ → N16 | JSON 模块重构 **✅ 已实施（2026-08-14，JSON-WRITER）**；工具审批+预览（审批依赖权限基建可拆，预览独立） |
 | **P2 功能增强** | N17（依赖 N6）→ N15 → F8 → N4/N10 | 虚拟滚动先统一渲染契约；Web 待实现 5 件；title_model（subcall 基建已就绪）；响应式/skill 数组小改 |
 | **P3 长期/依赖未就绪** | N8/N9 → N6 → F3/F4/F9/F10/F11/F12 | 增量上下文（格式扩展）；契约统一（结构性）；MCP/记忆/事件总线等 |
 
-**依赖链（必须遵守）**：`N14(UB) → F7(JsonWriter)` · `N6(契约统一) → N17(虚拟滚动)` · `F2(subcall 基建,已完) → F8` · `N8 → N9(同 provider 缓存域)` · `F6 长期项 → N16 审批部分`
+**依赖链（必须遵守）**：`N14(UB) → F7(JsonWriter,✅)` · `N6(契约统一) → N17(虚拟滚动)` · `F2(subcall 基建,已完) → F8` · `N8 → N9(同 provider 缓存域)` · `F6 长期项 → N16 审批部分`
 
 ### 待办
 
@@ -176,12 +176,13 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | F4 | **分支摘要注入**（branch_summary）— **P3** | 借鉴 pi-repos `branch-summarization.ts`：离开分支/切回主线时 LLM 摘要注入（"用户探索了另一分支..."），告知模型分支探索内容。依赖 P4 LLM 基建（SESSION-SYSTEM-OPT P2 延后项，subcall 已就绪可评估） |
 | F5 | **会话崩溃恢复（消息层容错）** | **调研决策（2026-08-13）：不做 undo 持久化**——undo 是短暂撤销窗口（cap 20），持久化收益小、成本高（事件文件 + 重放 + compact 一致性）。崩溃恢复聚焦消息层：会话消息已 JSONL 原子落盘（`session.flush` tmp+rename），崩溃最多丢当前回合尾部；**tmp 残留清理已实施（SESSION-UI-FINAL D4，`init.zig` 启动删 `*.jsonl.tmp`）**；文件损坏容错（`load` 已跳坏行）。撤销窗口重启丢失可接受（对齐 opencode 内存 undo） |
 | F6 | **dsh 架构借鉴候选**（DeepSeek Harness 对比调研 2026-08-13，非 0.2.8 主题）— **P3 长期** | 因 dsh 突然发布而做的对比研究（文档：`C:\VibeCoding\Projects\zAgentCore\docs\deepseek-harness-vs-zagent-core.md`，仓库外不占发布周期）。低成本可采纳（按成本/收益排序）：① **request/header 请求快照**——每次请求把"系统提示词+工具 schema+请求配置"落盘为只读记录，获请求级审计/调试（无需完整事件溯源）；② **chunk 级持久化**——SSE 原始 chunk 追加进会话（trace 级即可），崩溃后 UI 可重放；③ **compaction 影子记录**——压缩时记录 shadowedRange/shadowedSeqs（哪怕仅日志），保留可审计性。长期：fail-closed 审批（unavailable=拒绝）、单调守卫（只能拒绝不能放行）、per-call 沙箱策略。详见对比文档第 10 节 |
-| F7 | **JSON 序列化统一模块**（手写拼接重构，2026-08-13 触发）— **P1，依赖 N14** | **出处**：`docs/0.2.4/PLAN-WEB-FIX-STREAMING.md` 后续待办（162 行）——"JSON 模块抽取—统一 jsonEscapeBuf/escapeJsonDynamic/手写拼 JSON 为单一 API"，**一直未排期未落地**（2026-08-13 被 LRN-20260813-019 重新触发）。**现状**：165 处手写 JSON 拼接（session.zig 127 + provider.zig 38 + handler.zig 若干），3 处 ToolMeta 序列化器各写各的（session/handler/sse）。**触发**：appendMetaJson 共享函数尾假设"末字段为字符串"→ bash 布尔结尾多输出引号 → Web API 非法 JSON → 前端解析失败（曾被误判为 429 限流）。**同源未做项**：`escapeJsonDynamic` 补充完整控制字符转义（NUL、ESC 等，PLAN-WEB-FIX-STREAMING 164 行）。**方案方向**：轻量 JSON 写出器（`JsonWriter`：appendString/appendInt/appendBool/appendRaw，自动转义含控制字符 + 闭合管理，杜绝共享尾部假设）+ 每变体序列化自平衡；parse 侧已有 std.json。**约束**：不引入依赖（零外部依赖原则）；重构范围仅序列化路径，不动 JSONL 格式；**必须**加全变体 roundtrip 测试（parse→serialize→parse）。列为独立重构计划，评估成本后定周期 |
+| F7 | **JSON 序列化统一模块**（手写拼接重构，2026-08-13 触发） | **✅ 已实施（2026-08-14，JSON-WRITER）**：新增 `src/util/jsonw.zig`（JsonWriter：自动逗号 + 完整转义 + 容器自平衡 + `Result` 终态持有者 + fixed→alloc 回退）；统一 4 份转义为 `escapeInto`/`escapeAlloc`（handler/sse 修复缺控制字符的既有 bug）；ToolMeta 全字段序列化收敛为 `types.writeJson`（session/handler 共用，字段集对齐）；session/provider/handler/sse 全部改用 JsonWriter（约 180 处手写拼接 → 声明式）；JSONL golden 基线测试（字节零差异）+ 8 变体 roundtrip（双遍）。**净删 167 行**。见 `docs/0.2.8/PLAN-JSON-WRITER.md` |
 | F8 | **small model（`title_model` 配置）**（登记声明落空，2026-08-13 审计发现）— **P2** | PLAN-LLM-AUTO-TITLE.md:86 自称"列入 REMAINING Future"但实际无条目。LLM 自动标题/压缩用低成本小模型（对齐 opencode），避免大模型开销。subcall 基建已就绪 |
 | F9 | **ToolEntry `prompt_hint` 愿景**（行为指导注入系统提示词）— **P3** | CORE-FRONTEND.md:550-569——validate 有字段但 9 工具零注册，架构愿景未实现未登记 |
 | F10 | **记忆系统 remember.zig/recall.zig 工具** — **P3** | CORE-FRONTEND.md:540-541 planned 工具——src/tool/ 无此二文件，REMAINING 无条目。注意：已有外部 memory-manager 技能（.opencode/skills），本项目内建 vs 外部技能需评估 |
 | F11 | **事件总线 EventBus** — **P3** | PLAN-LOGGING-SYSTEM.md:194"后续 UI/日志订阅扩展时再评估"+ OPT-5 流式事件系统同源未闭合 |
 | F12 | **千问自定义分组**（SB5，登记声明落空）— **P3** | PLAN-DEEPSEEK-STYLE.md:141 自称"记 REMAINING"实际未记。模型分组/说明（M5）同源 |
+| F13 | **JsonWriter pretty 输出选项**（调试可读性）— **未来** | F7 评审提出：当前紧凑格式（JSONL/API/SSE 依赖），未来调试可读性可在 `JsonWriter` 加 `pretty: bool`（begin 后写换行 + 按 depth 缩进 + 元素间换行）。因所有输出已收敛走 JsonWriter，启用点为单一配置，纯增量不改默认紧凑输出。见 `docs/0.2.8/PLAN-JSON-WRITER.md` |
 
 ## Architecture wishlist
 

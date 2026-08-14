@@ -2,6 +2,7 @@ const std = @import("std");
 const provider_mod = @import("../../io/provider.zig");
 const agent_mod = @import("../../core/agent.zig");
 const types = @import("../../types.zig");
+const jsonw = @import("../../util/jsonw.zig");
 
 const Io = std.Io;
 const PhaseWriterCb = provider_mod.PhaseWriterCb;
@@ -66,30 +67,46 @@ pub const SseState = struct {
     }
 
     fn writeTextDelta(self: *SseState, event: []const u8, text: []const u8) !void {
-        var buf: [8192]u8 = undefined;
-        const pos = try std.fmt.bufPrint(&buf, "event: {s}\ndata: {{\"text\":\"", .{event});
-        var pos2 = pos.len;
-        pos2 += (try jsonEscapeBuf(buf[pos2..], text)).len;
-        const end = try std.fmt.bufPrint(buf[pos2..], "\"}}\n\n", .{});
-        try self.w.writeAll(buf[0 .. pos2 + end.len]);
+        try self.sendTextFrame(event, text);
+    }
+
+    /// Fixed-first + alloc-fallback single-frame send. Hot path (short deltas)
+    /// is zero-alloc via the 8192 stack buffer; rare oversized deltas fall back
+    /// to one heap allocation instead of dropping the stream.
+    fn sendTextFrame(self: *SseState, event: []const u8, text: []const u8) !void {
+        var stack_buf: [8192]u8 = undefined;
+        var jw = jsonw.JsonWriter.initFixed(&stack_buf);
+        writeTextPayload(&jw, text) catch |err| {
+            if (err != error.WriteFailed) return err;
+            var ajw = jsonw.JsonWriter.init(std.heap.page_allocator);
+            errdefer ajw.deinit();
+            try writeTextPayload(&ajw, text);
+            var out = try ajw.result();
+            defer out.deinit();
+            var head_buf: [128]u8 = undefined;
+            const head = try std.fmt.bufPrint(&head_buf, "event: {s}\ndata: ", .{event});
+            try self.w.writeAll(head);
+            try self.w.writeAll(out.bytes);
+            try self.w.writeAll("\n\n");
+            try self.w.flush();
+            return;
+        };
+        var head_buf: [128]u8 = undefined;
+        const head = try std.fmt.bufPrint(&head_buf, "event: {s}\ndata: ", .{event});
+        try self.w.writeAll(head);
+        var out = try jw.result(); // fixed mode: borrowed view
+        defer out.deinit();        // no-op for fixed
+        try self.w.writeAll(out.bytes);
+        try self.w.writeAll("\n\n");
         try self.w.flush();
     }
 };
 
-fn jsonEscapeBuf(buf: []u8, s: []const u8) ![]u8 {
-    var pos: usize = 0;
-    for (s) |c| {
-        if (pos + 2 >= buf.len) return error.BufferTooSmall;
-        switch (c) {
-            '"' => { buf[pos] = '\\'; pos += 1; buf[pos] = '"'; pos += 1; },
-            '\\' => { buf[pos] = '\\'; pos += 1; buf[pos] = '\\'; pos += 1; },
-            '\n' => { buf[pos] = '\\'; pos += 1; buf[pos] = 'n'; pos += 1; },
-            '\r' => { buf[pos] = '\\'; pos += 1; buf[pos] = 'r'; pos += 1; },
-            '\t' => { buf[pos] = '\\'; pos += 1; buf[pos] = 't'; pos += 1; },
-            else => { buf[pos] = c; pos += 1; },
-        }
-    }
-    return buf[0..pos];
+/// Write the JSON payload `{"text":"<escaped>"}` into a JsonWriter.
+fn writeTextPayload(jw: *jsonw.JsonWriter, text: []const u8) !void {
+    try jw.beginObject(null);
+    try jw.stringField("text", text);
+    try jw.endValue();
 }
 
 pub fn createPhaseWriter(state: *SseState) PhaseWriterCb {
@@ -225,25 +242,79 @@ fn renderTool(
         }
 
         // serialize ToolMeta as tool_meta event
-        var meta_buf: [512]u8 = undefined;
-        const meta_json = serializeMeta(&meta_buf, meta) catch "";
-        if (meta_json.len > 0) {
-            s.writeFrame("tool_meta", meta_json) catch {};
+        var jw = jsonw.JsonWriter.init(std.heap.page_allocator);
+        defer jw.deinit();
+        serializeMeta(&jw, meta) catch return;
+        var meta_json = try jw.result();
+        defer meta_json.deinit();
+        if (meta_json.bytes.len > 0) {
+            s.writeFrame("tool_meta", meta_json.bytes) catch {};
         }
     }
 }
 
-fn serializeMeta(buf: []u8, meta: types.ToolMeta) ![]const u8 {
+/// Numeric-only ToolMeta summary for streaming display (no path/command etc).
+fn serializeMeta(jw: *jsonw.JsonWriter, meta: types.ToolMeta) !void {
     switch (meta) {
-        .bash => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"bash\",\"exit_code\":{d},\"byte_count\":{d},\"truncated\":{}}}", .{ m.exit_code, m.byte_count, m.truncated }),
-        .read => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"read\",\"total_lines\":{d},\"byte_count\":{d},\"truncated\":{}}}", .{ m.total_lines, m.byte_count, m.truncated }),
-        .grep => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"grep\",\"match_count\":{d},\"files_scanned\":{d},\"truncated\":{}}}", .{ m.match_count, m.files_scanned, m.truncated }),
-        .glob => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"glob\",\"file_count\":{d},\"truncated\":{}}}", .{ m.file_count, m.truncated }),
-        .edit => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"edit\",\"replacements\":{d}}}", .{m.replacements}),
-        .write => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"write\",\"byte_count\":{d},\"existed\":{}}}", .{ m.byte_count, m.existed }),
-        .skill => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"skill\",\"file_count\":{d}}}", .{m.file_count}),
-        .webfetch => |m| return try std.fmt.bufPrint(buf, "{{\"name\":\"webfetch\",\"byte_count\":{d},\"format\":\"{s}\",\"mime\":\"{s}\"}}", .{ m.byte_count, m.format, m.mime }),
-        .none => return &.{},
+        .bash => |m| {
+            try jw.beginObject(null);
+            try jw.stringField("name", "bash");
+            try jw.intField("exit_code", m.exit_code);
+            try jw.intField("byte_count", m.byte_count);
+            try jw.boolField("truncated", m.truncated);
+            try jw.endValue();
+        },
+        .read => |m| {
+            try jw.beginObject(null);
+            try jw.stringField("name", "read");
+            try jw.intField("total_lines", m.total_lines);
+            try jw.intField("byte_count", m.byte_count);
+            try jw.boolField("truncated", m.truncated);
+            try jw.endValue();
+        },
+        .grep => |m| {
+            try jw.beginObject(null);
+            try jw.stringField("name", "grep");
+            try jw.intField("match_count", m.match_count);
+            try jw.intField("files_scanned", m.files_scanned);
+            try jw.boolField("truncated", m.truncated);
+            try jw.endValue();
+        },
+        .glob => |m| {
+            try jw.beginObject(null);
+            try jw.stringField("name", "glob");
+            try jw.intField("file_count", m.file_count);
+            try jw.boolField("truncated", m.truncated);
+            try jw.endValue();
+        },
+        .edit => |m| {
+            try jw.beginObject(null);
+            try jw.stringField("name", "edit");
+            try jw.intField("replacements", m.replacements);
+            try jw.endValue();
+        },
+        .write => |m| {
+            try jw.beginObject(null);
+            try jw.stringField("name", "write");
+            try jw.intField("byte_count", m.byte_count);
+            try jw.boolField("existed", m.existed);
+            try jw.endValue();
+        },
+        .skill => |m| {
+            try jw.beginObject(null);
+            try jw.stringField("name", "skill");
+            try jw.intField("file_count", m.file_count);
+            try jw.endValue();
+        },
+        .webfetch => |m| {
+            try jw.beginObject(null);
+            try jw.stringField("name", "webfetch");
+            try jw.intField("byte_count", m.byte_count);
+            try jw.stringField("format", m.format);
+            try jw.stringField("mime", m.mime);
+            try jw.endValue();
+        },
+        .none => {},
     }
 }
 

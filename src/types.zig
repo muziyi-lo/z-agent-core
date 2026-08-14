@@ -1,4 +1,5 @@
 const std = @import("std");
+const jsonw = @import("util/jsonw.zig");
 
 pub const VERSION = @import("build_options").version;
 
@@ -118,6 +119,97 @@ pub const ToolMeta = union(enum) {
         mime: []const u8,
     },
 };
+
+/// Serialize ToolMeta as a flat object (same shape session.zig persisted).
+/// Full field set — single source of truth shared by session/handler. The
+/// legacy session.zig appendToolMetaJson was removed (F7); sse.zig keeps
+/// a numeric-only subset for streaming. Invariant: cover every variant here +
+/// parseToolMeta (session.zig) + sse serializeMeta.
+pub fn writeJson(self: ToolMeta, w: *jsonw.JsonWriter) !void {
+    switch (self) {
+        .none => {
+            try w.beginObject(null);
+            try w.stringField("name", "none");
+            try w.endValue();
+        },
+        .write => |m| {
+            try w.beginObject(null);
+            try w.stringField("name", "write");
+            try w.stringField("path", m.path);
+            try w.boolField("existed", m.existed);
+            if (m.old_lines) |ol| try w.intField("old_lines", ol);
+            try w.intField("new_lines", m.new_lines);
+            try w.intField("byte_count", m.byte_count);
+            try w.endValue();
+        },
+        .read => |m| {
+            try w.beginObject(null);
+            try w.stringField("name", "read");
+            try w.stringField("path", m.path);
+            try w.boolField("is_directory", m.is_directory);
+            try w.intField("total_lines", m.total_lines);
+            try w.intField("byte_count", m.byte_count);
+            try w.boolField("truncated", m.truncated);
+            if (m.next_offset) |no| try w.intField("next_offset", no);
+            try w.endValue();
+        },
+        .grep => |m| {
+            try w.beginObject(null);
+            try w.stringField("name", "grep");
+            try w.stringField("pattern", m.pattern);
+            if (m.path) |p| try w.stringField("path", p);
+            try w.intField("match_count", m.match_count);
+            try w.intField("files_scanned", m.files_scanned);
+            try w.boolField("truncated", m.truncated);
+            try w.endValue();
+        },
+        .bash => |m| {
+            try w.beginObject(null);
+            try w.stringField("name", "bash");
+            try w.stringField("command", m.command);
+            try w.intField("exit_code", m.exit_code);
+            try w.intField("byte_count", m.byte_count);
+            try w.boolField("truncated", m.truncated);
+            try w.boolField("timed_out", m.timed_out);
+            try w.endValue();
+        },
+        .glob => |m| {
+            try w.beginObject(null);
+            try w.stringField("name", "glob");
+            try w.stringField("pattern", m.pattern);
+            if (m.path) |p| try w.stringField("path", p);
+            try w.intField("file_count", m.file_count);
+            try w.boolField("truncated", m.truncated);
+            try w.endValue();
+        },
+        .skill => |m| {
+            try w.beginObject(null);
+            try w.stringField("name", "skill");
+            // skill 变体的 name 字段与顶层标签键 "name" 冲突——用 "skill" 键（与 session.zig 一致）
+            try w.stringField("skill", m.name);
+            try w.intField("file_count", m.file_count);
+            try w.endValue();
+        },
+        .edit => |m| {
+            try w.beginObject(null);
+            try w.stringField("name", "edit");
+            try w.stringField("path", m.path);
+            try w.intField("replacements", m.replacements);
+            try w.intField("old_lines", m.old_lines);
+            try w.intField("new_lines", m.new_lines);
+            try w.endValue();
+        },
+        .webfetch => |m| {
+            try w.beginObject(null);
+            try w.stringField("name", "webfetch");
+            try w.stringField("url", m.url);
+            try w.intField("byte_count", m.byte_count);
+            try w.stringField("format", m.format);
+            try w.stringField("mime", m.mime);
+            try w.endValue();
+        },
+    }
+}
 
 pub const ToolResult = struct {
     session_content: []const u8,
@@ -387,4 +479,97 @@ test "Message with reasoning_content" {
     };
     try @import("std").testing.expect(msg.reasoning_content != null);
     try @import("std").testing.expectEqualStrings("I'll read that file.", msg.content);
+}
+
+test "ToolMeta writeJson emits session-matching bytes for all variants" {
+    const variants = [_]ToolMeta{
+        .{ .none = {} },
+        .{ .write = .{ .path = "a.txt", .existed = true, .old_lines = 2, .new_lines = 3, .byte_count = 7 } },
+        .{ .read = .{ .path = "b.zig", .is_directory = false, .total_lines = 99, .byte_count = 100, .truncated = true, .next_offset = 50 } },
+        .{ .grep = .{ .pattern = "fn.*foo", .path = "src", .match_count = 4, .files_scanned = 5, .truncated = false } },
+        .{ .bash = .{ .command = "ls", .exit_code = 0, .byte_count = 3, .truncated = false, .timed_out = false } },
+        .{ .glob = .{ .pattern = "*.zig", .path = null, .file_count = 8, .truncated = false } },
+        .{ .skill = .{ .name = "memory", .file_count = 2 } },
+        .{ .edit = .{ .path = "c.zig", .replacements = 1, .old_lines = 2, .new_lines = 2 } },
+        .{ .webfetch = .{ .url = "https://e.com", .byte_count = 100, .format = "markdown", .mime = "text/html" } },
+    };
+    const expected = [_][]const u8{
+        "{\"name\":\"none\"}",
+        "{\"name\":\"write\",\"path\":\"a.txt\",\"existed\":true,\"old_lines\":2,\"new_lines\":3,\"byte_count\":7}",
+        "{\"name\":\"read\",\"path\":\"b.zig\",\"is_directory\":false,\"total_lines\":99,\"byte_count\":100,\"truncated\":true,\"next_offset\":50}",
+        "{\"name\":\"grep\",\"pattern\":\"fn.*foo\",\"path\":\"src\",\"match_count\":4,\"files_scanned\":5,\"truncated\":false}",
+        "{\"name\":\"bash\",\"command\":\"ls\",\"exit_code\":0,\"byte_count\":3,\"truncated\":false,\"timed_out\":false}",
+        "{\"name\":\"glob\",\"pattern\":\"*.zig\",\"file_count\":8,\"truncated\":false}",
+        "{\"name\":\"skill\",\"skill\":\"memory\",\"file_count\":2}",
+        "{\"name\":\"edit\",\"path\":\"c.zig\",\"replacements\":1,\"old_lines\":2,\"new_lines\":2}",
+        "{\"name\":\"webfetch\",\"url\":\"https://e.com\",\"byte_count\":100,\"format\":\"markdown\",\"mime\":\"text/html\"}",
+    };
+    for (variants, 0..) |meta, i| {
+        var jw = jsonw.JsonWriter.init(std.testing.allocator);
+        defer jw.deinit();
+        try writeJson(meta, &jw);
+        var out = try jw.result();
+        defer out.deinit();
+        try @import("std").testing.expectEqualStrings(expected[i], out.bytes);
+    }
+}
+
+test "ToolMeta writeJson roundtrip parse serialize parse" {
+    const variants = [_]ToolMeta{
+        .{ .write = .{ .path = "a.txt", .existed = false, .old_lines = null, .new_lines = 3, .byte_count = 7 } },
+        .{ .read = .{ .path = "b.zig", .is_directory = true, .total_lines = 99, .byte_count = 100, .truncated = true, .next_offset = null } },
+        .{ .grep = .{ .pattern = "fn", .path = null, .match_count = 2, .files_scanned = 3, .truncated = false } },
+        .{ .bash = .{ .command = "echo hi", .exit_code = 0, .byte_count = 3, .truncated = false, .timed_out = true } },
+        .{ .glob = .{ .pattern = "*.zig", .path = "src", .file_count = 4, .truncated = false } },
+        .{ .skill = .{ .name = "mem", .file_count = 5 } },
+        .{ .edit = .{ .path = "a.zig", .replacements = 1, .old_lines = 2, .new_lines = 2 } },
+        .{ .webfetch = .{ .url = "https://example.com", .byte_count = 100, .format = "markdown", .mime = "text/html" } },
+    };
+    for (variants) |meta| {
+        var jw = jsonw.JsonWriter.init(std.testing.allocator);
+        defer jw.deinit();
+        try writeJson(meta, &jw);
+        var out = try jw.result();
+        defer out.deinit();
+
+        // parse -> serialize -> parse: first parse proves valid JSON
+        var parsed = std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.bytes, .{}) catch |err| {
+            std.debug.print("invalid JSON for {s}: [{s}] err={s}\n", .{ @tagName(meta), out.bytes, @errorName(err) });
+            return err;
+        };
+        defer parsed.deinit();
+        const name = parsed.value.object.get("name").?.string;
+        try std.testing.expectEqualStrings(@tagName(meta), name);
+
+        // second serialize from the parsed value must equal the first output
+        var jw2 = jsonw.JsonWriter.init(std.testing.allocator);
+        defer jw2.deinit();
+        const parsed_meta = parseToolMetaValue(parsed.value);
+        if (parsed_meta) |pm| {
+            try writeJson(pm, &jw2);
+            var out2 = try jw2.result();
+            defer out2.deinit();
+            try std.testing.expectEqualStrings(out.bytes, out2.bytes);
+        }
+    }
+}
+
+/// Roundtrip helper: reconstruct ToolMeta from a parsed JSON value (mirrors
+/// session.zig parseToolMeta field mapping).
+fn parseToolMetaValue(v: std.json.Value) ?ToolMeta {
+    const obj = v.object;
+    const name = obj.get("name").?.string;
+    const t: ToolMeta = blk: {
+        if (std.mem.eql(u8, name, "none")) break :blk .none;
+        if (std.mem.eql(u8, name, "write")) break :blk .{ .write = .{ .path = obj.get("path").?.string, .existed = obj.get("existed").?.bool, .old_lines = if (obj.get("old_lines")) |x| @intCast(x.integer) else null, .new_lines = @intCast(obj.get("new_lines").?.integer), .byte_count = @intCast(obj.get("byte_count").?.integer) } };
+        if (std.mem.eql(u8, name, "read")) break :blk .{ .read = .{ .path = obj.get("path").?.string, .is_directory = obj.get("is_directory").?.bool, .total_lines = @intCast(obj.get("total_lines").?.integer), .byte_count = @intCast(obj.get("byte_count").?.integer), .truncated = obj.get("truncated").?.bool, .next_offset = if (obj.get("next_offset")) |x| @intCast(x.integer) else null } };
+        if (std.mem.eql(u8, name, "grep")) break :blk .{ .grep = .{ .pattern = obj.get("pattern").?.string, .path = if (obj.get("path")) |x| x.string else null, .match_count = @intCast(obj.get("match_count").?.integer), .files_scanned = @intCast(obj.get("files_scanned").?.integer), .truncated = obj.get("truncated").?.bool } };
+        if (std.mem.eql(u8, name, "bash")) break :blk .{ .bash = .{ .command = obj.get("command").?.string, .exit_code = @intCast(obj.get("exit_code").?.integer), .byte_count = @intCast(obj.get("byte_count").?.integer), .truncated = obj.get("truncated").?.bool, .timed_out = obj.get("timed_out").?.bool } };
+        if (std.mem.eql(u8, name, "glob")) break :blk .{ .glob = .{ .pattern = obj.get("pattern").?.string, .path = if (obj.get("path")) |x| x.string else null, .file_count = @intCast(obj.get("file_count").?.integer), .truncated = obj.get("truncated").?.bool } };
+        if (std.mem.eql(u8, name, "skill")) break :blk .{ .skill = .{ .name = obj.get("skill").?.string, .file_count = @intCast(obj.get("file_count").?.integer) } };
+        if (std.mem.eql(u8, name, "edit")) break :blk .{ .edit = .{ .path = obj.get("path").?.string, .replacements = @intCast(obj.get("replacements").?.integer), .old_lines = @intCast(obj.get("old_lines").?.integer), .new_lines = @intCast(obj.get("new_lines").?.integer) } };
+        if (std.mem.eql(u8, name, "webfetch")) break :blk .{ .webfetch = .{ .url = obj.get("url").?.string, .byte_count = @intCast(obj.get("byte_count").?.integer), .format = obj.get("format").?.string, .mime = obj.get("mime").?.string } };
+        return null;
+    };
+    return t;
 }
