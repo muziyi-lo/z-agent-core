@@ -31,6 +31,9 @@
 - **context overflow 自动恢复**（N18）: API 溢出错误导致会话卡死。修复: provider 新增 `error.ContextOverflow`（SSE error 帧 + error_body 双识别），重试循环跳过 overflow（零退避）；agent runTurn catch → compactSession 重试一次（`overflow_retried` 防循环），三条文案区分失败形态（compaction insufficient / auto-compaction failed），Web error 帧透传
 - **魔法值提取（待办 #5 局部触达）**: `handler.zig` `SESSION_PAGE_LIMIT=50`（3 处分页共享）/`UNDO_CAP=20`；`app.js` `?limit=50` 两处复用既有 `SESSIONS_PAGE`
 - **侧边栏新分组位置错乱**（用户实测）: 增量 patch 的组创建用 `lastNode` 追踪插入点，但 `lastNode` 只在遇到非空组时更新——today 组原本不存在时新建会话，today 组被 `appendChild` 追加到末尾（older 之后）而非最前；reload 后 today 组已存在走正确分支故"reload 后正常"。修复: 提取 `ensureGroupsInOrder` 纯函数，创建组时以"GROUP_KEYS 中下一个已存在组的 header"为插入锚点 `insertBefore` 到其前。新增 4 条 `test-group-sessions.mjs` 用例
+- **thinking 块点击收起崩溃**（用户实测）: `addMessage` 内 setTimeout 用 `for (var i)` 闭包给 thinking-block 重绑 onclick——`var i` 是共享变量，循环结束后 `i===tbs.length`，点击时 `tbs[i].classList` 读 undefined 崩溃（TypeError）。且与 buildSegment:1112 的正确绑定重复。修复: 删除冗余坏闭包重绑，折叠绑定统一由 buildSegment 负责（唯一创建点）
+- **thinking 展开/收起图标适配**: 折叠图标此前硬编码 `&#9654;` 于 JS 三处（buildSegment/thinking_start/thinking_end），收起后不随状态变化。修复: 图标改由 CSS `.header::before` 接管，`.open` 时 `▶`→`▼`，任意状态正确
+- **tool-card 折叠重复绑定**: done 路径 `querySelectorAll('.tool-card')` 重绑 onclick 与 buildSegment 冗余（逻辑等价但多余）。修复: 删除重绑，done 只保留 markdown 渲染；折叠绑定统一 buildSegment
 
 ## [0.2.7] — 2026-08-12
 

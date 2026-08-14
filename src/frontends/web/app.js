@@ -1104,7 +1104,7 @@ function buildSegment(seg) {
   if (seg.type === 'reasoning') {
     el = document.createElement('div');
     el.className = 'thinking-block' + (seg.open ? ' open' : '');
-    el.innerHTML = '<div class="header">&#9654; Thinking</div>';
+    el.innerHTML = '<div class="header">Thinking</div>';
     var content = document.createElement('div');
     content.className = 'content';
     content.innerHTML = renderMd(seg.text || '');
@@ -1180,11 +1180,6 @@ function addMessage(m, index, toolName, noScroll) {
       meta.innerHTML = metaParts.join(' &middot; ');
       div.appendChild(meta);
     }
-    // add click handler for thinking blocks
-    setTimeout(function() {
-      var tbs = div.querySelectorAll('.thinking-block');
-      for (var i = 0; i < tbs.length; i++) tbs[i].onclick = function() { tbs[i].classList.toggle('open'); };
-    }, 0);
     // code block copy buttons + syntax highlight
     setTimeout(function() {
       var pres = div.querySelectorAll('pre');
@@ -1328,7 +1323,7 @@ function sendPrompt(prompt) {
     var seg = { type: 'reasoning', text: '', complete: false, el: null };
     curSegments.push(seg);
     seg.el = buildSegment(seg);
-    seg.el.querySelector('.header').innerHTML = '&#9654; Thinking <span class="spinner"></span>';
+    seg.el.querySelector('.header').innerHTML = 'Thinking <span class="spinner"></span>';
     asst.appendChild(seg.el);
     currentThinking = seg;
     scrollToBottom(msgs);
@@ -1346,7 +1341,7 @@ function sendPrompt(prompt) {
     if (currentThinking) {
       var d = JSON.parse(e.data);
       var dur = d.duration_ms ? (d.duration_ms / 1000).toFixed(0) + 's' : '';
-      currentThinking.el.querySelector('.header').innerHTML = '&#9654; Thinking (' + dur + ')';
+      currentThinking.el.querySelector('.header').innerHTML = 'Thinking (' + dur + ')';
       currentThinking.el.querySelector('.content').innerHTML = renderMd(currentThinking.text);
       currentThinking.complete = true;
       currentThinking = null;
@@ -1494,13 +1489,11 @@ function sendPrompt(prompt) {
     setStreaming(false);
     var spinners = asst.querySelectorAll('.spinner');
     for (var j = 0; j < spinners.length; j++) spinners[j].remove();
-    // markdown render tool outputs + collapse + expand-all
+    // markdown render tool outputs (streamed plain text → markdown). Fold
+    // toggle is bound once in buildSegment — do NOT rebind onclick here
+    // (duplicate binding, and a for/var closure here broke thinking-block).
     var tools = asst.querySelectorAll('.tool-card');
     tools.forEach(function(tc) {
-      tc.onclick = function(e) {
-        if (e.target.closest('.output')) return;
-        tc.classList.toggle('open');
-      };
       var out = tc.querySelector('.output');
       if (out && !out.querySelector('pre')) {
         out.innerHTML = renderMd(out.textContent);

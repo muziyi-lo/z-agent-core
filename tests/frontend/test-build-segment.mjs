@@ -9,7 +9,6 @@ function makeEl(tag) {
     children: [],
     textContent: "",
     _html: "",
-    classList: { add() {}, remove() {}, toggle() {} },
     appendChild(c) { this.children.push(c); return c; },
     querySelector(sel) {
       if (sel === ".content") return this.children.find((c) => c.className === "content") ?? null
@@ -23,6 +22,14 @@ function makeEl(tag) {
     get innerHTML() { return this._html },
     set onclick(v) { this._onclick = v },
     get onclick() { return this._onclick },
+  }
+  el.classList = {
+    add(c) { if (el.className.indexOf(c) === -1) el.className += " " + c },
+    remove(c) { el.className = el.className.replace(new RegExp("\\s*" + c), "") },
+    toggle(c) {
+      if (el.className.indexOf(c) === -1) { el.className += " " + c; return true }
+      el.className = el.className.replace(new RegExp("\\s*" + c), ""); return false
+    },
   }
   return el
 }
@@ -66,6 +73,19 @@ console.log("buildSegment: reasoning")
   const c = el.querySelector(".content")
   check("has .content child", c !== null)
   check("content md", c && c.innerHTML === "[md:think hard]")
+}
+
+console.log("buildSegment: reasoning onclick toggles open")
+{
+  // Regression: a broken `for (var i)` closure made clicking any thinking block
+  // read undefined.classList. buildSegment must bind onclick to THIS element.
+  const el = buildSegment({ type: "reasoning", text: "x" })
+  check("onclick bound", typeof el.onclick === "function")
+  check("starts closed (no 'open')", el.className.indexOf("open") === -1)
+  el.onclick({ target: el })
+  check("click adds 'open'", el.className.indexOf("open") !== -1)
+  el.onclick({ target: el })
+  check("second click removes 'open'", el.className.indexOf("open") === -1)
 }
 
 console.log("buildSegment: text")
