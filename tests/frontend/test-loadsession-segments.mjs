@@ -19,16 +19,21 @@ function extract(fnName) {
 
 function makeEl(tag) {
   return {
-    tag, className: "", style: {}, children: [], textContent: "", _html: "", id: "",
+    tag, className: "", style: {}, children: [], textContent: "", _html: "", id: "", _attrs: {},
     classList: { add() {}, remove() {}, toggle() {} },
     appendChild(c) { this.children.push(c); return c },
     insertBefore(n, ref) { const i = this.children.indexOf(ref); if (i < 0) this.children.push(n); else this.children.splice(i, 0, n); return n },
+    setAttribute(k, v) { this._attrs[k] = v },
     querySelector(sel) {
-      const cls = sel.slice(1)
-      const c = this.children.find((x) => x.className === cls)
-      if (c) return c
-      if (this._html && this._html.includes('class="' + cls + '"')) return makeEl("div")
-      return null
+      const cls = sel.startsWith(".") ? sel.slice(1) : sel
+      const walk = (node) => {
+        for (const c of node.children || []) {
+          if (c.className && c.className.indexOf(cls) !== -1) return c
+          const r = walk(c); if (r) return r
+        }
+        return null
+      }
+      return walk(this)
     },
     querySelectorAll() { return [] },
     closest() { return null },
@@ -108,6 +113,7 @@ globalThis.currentHasMore = false
 globalThis.currentOldestId = null
 globalThis.SESSIONS_PAGE = 50
 
+globalThis.makeCard = eval(`(${extract("makeCard")})`)
 globalThis.buildSegment = eval(`(${extract("buildSegment")})`)
 globalThis.renderAssistantMessage = eval(`(${extract("renderAssistantMessage")})`)
 globalThis.addMessage = eval(`(${extract("addMessage")})`)
@@ -150,14 +156,14 @@ check("6 top-level msgs", messages.children.length === 7 &&
 
 const t1 = messages.children[3]  // tool-use assistant #1 (call_1)
 check("tool-assistant1 [thinking,tool]",
-  segCls(t1)[0].startsWith("thinking-block") && segCls(t1)[1].startsWith("tool-card open"))
+  segCls(t1)[0].indexOf("thinking-block") !== -1 && segCls(t1)[1].indexOf("tool-card") !== -1)
 check("tool1 name + output filled", t1.children[1]._toolName === "bash" &&
   segCls(t1)[1].includes("tool-bash") && t1.children[1]._toolName === "bash")
 check("thinking1 open (reload preserves expanded)", t1.children[0].className.includes("open"))
 
 const t2 = messages.children[4]  // tool-use assistant #2 (call_2)
-check("tool-assistant2 [thinking,tool]", segCls(t2)[0].startsWith("thinking-block") && segCls(t2)[1].startsWith("tool-card open"))
-check("tool2 output filled", childHtml(t2.children[1], "output") !== null && segCls(t2)[1].includes("tool-bash"))
+check("tool-assistant2 [thinking,tool]", segCls(t2)[0].indexOf("thinking-block") !== -1 && segCls(t2)[1].indexOf("tool-card") !== -1)
+check("tool2 output filled", t2.children[1].querySelector(".output") !== null && segCls(t2)[1].includes("tool-bash"))
 
 const final = messages.children[5]
 check("final answer is text-only msg", segCls(final).length === 1 && segCls(final)[0] === "content-block")

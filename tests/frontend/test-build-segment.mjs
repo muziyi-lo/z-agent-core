@@ -9,12 +9,19 @@ function makeEl(tag) {
     children: [],
     textContent: "",
     _html: "",
+    _attrs: {},
     appendChild(c) { this.children.push(c); return c; },
+    setAttribute(k, v) { this._attrs[k] = v },
     querySelector(sel) {
-      if (sel === ".content") return this.children.find((c) => c.className === "content") ?? null
-      if (sel === ".output") return this.children.find((c) => c.className === "output") ?? null
-      if (sel === ".name-row") return this.children.find((c) => c.className === "name-row") ?? null
-      return null
+      const cls = sel.startsWith(".") ? sel.slice(1) : sel
+      const walk = (node) => {
+        for (const c of node.children || []) {
+          if (c.className && c.className.indexOf(cls) !== -1) return c
+          const r = walk(c); if (r) return r
+        }
+        return null
+      }
+      return walk(this)
     },
     querySelectorAll() { return [] },
     closest() { return null },
@@ -55,6 +62,8 @@ function extract(fnName) {
   return src.slice(start, i + 1)
 }
 const fnSrc = `${extract("buildSegment")}\n${extract("renderAssistantMessage")}`
+// CARD-UNIFY: buildSegment 委托 makeCard，需一并提取注入
+globalThis.makeCard = eval(`(${extract("makeCard")})`)
 const buildSegment = eval(`(${extract("buildSegment")})`)
 const renderAssistantMessage = eval(`(${extract("renderAssistantMessage")})`)
 
@@ -68,24 +77,13 @@ function check(name, cond) {
 console.log("buildSegment: reasoning")
 {
   const el = buildSegment({ type: "reasoning", text: "think hard" })
-  check("className thinking-block", el.className === "thinking-block")
-  check("header innerHTML", el.innerHTML.includes("Thinking"))
+  check("className has thinking-block", el.className.indexOf("thinking-block") !== -1)
+  check("className has card", el.className.indexOf("card") !== -1)
+  const h = el.querySelector(".card-head")
+  check("has .card-head", h !== null && h.innerHTML.includes("Thinking"))
   const c = el.querySelector(".content")
   check("has .content child", c !== null)
   check("content md", c && c.innerHTML === "[md:think hard]")
-}
-
-console.log("buildSegment: reasoning onclick toggles open")
-{
-  // Regression: a broken `for (var i)` closure made clicking any thinking block
-  // read undefined.classList. buildSegment must bind onclick to THIS element.
-  const el = buildSegment({ type: "reasoning", text: "x" })
-  check("onclick bound", typeof el.onclick === "function")
-  check("starts closed (no 'open')", el.className.indexOf("open") === -1)
-  el.onclick({ target: el })
-  check("click adds 'open'", el.className.indexOf("open") !== -1)
-  el.onclick({ target: el })
-  check("second click removes 'open'", el.className.indexOf("open") === -1)
 }
 
 console.log("buildSegment: text")
@@ -100,11 +98,14 @@ console.log("buildSegment: text")
 console.log("buildSegment: tool")
 {
   const el = buildSegment({ type: "tool", name: "bash", output: "out" })
-  check("className tool-card open", el.className === "tool-card open")
+  check("className has tool-card", el.className.indexOf("tool-card") !== -1)
+  check("className has open (default)", el.className.indexOf("open") !== -1)
   check("_toolName", el._toolName === "bash")
   const o = el.querySelector(".output")
   check("has .output child", o !== null)
   check("output md", o && o.innerHTML === "[md:out]")
+  // CARD-UNIFY: 折叠交互由 #messages 委托 handleCardClick 承担，卡片自身不绑 onclick
+  check("no onclick bound on card", el.onclick == null)
 }
 
 console.log("buildSegment: unknown type")
@@ -125,8 +126,8 @@ console.log("renderAssistantMessage: order preserved")
   })
   check("3 children", container.children.length === 3)
   check("order [reasoning,tool,text]",
-    container.children[0].className === "thinking-block" &&
-    container.children[1].className === "tool-card open" &&
+    container.children[0].className.indexOf("thinking-block") !== -1 &&
+    container.children[1].className.indexOf("tool-card") !== -1 &&
     container.children[2].className === "content-block")
 }
 

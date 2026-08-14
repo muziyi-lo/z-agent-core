@@ -72,32 +72,32 @@ body{font-family:var(--font-ui);background:var(--bg-base);color:var(--text-base)
 .msg p{margin:4px 0}
 .msg h1,.msg h2,.msg h3,.msg h4{color:var(--text-strong);margin:12px 0 4px}
 #system-prompt{border-bottom:1px solid var(--border-muted);margin-bottom:8px}
-.msg.system{background:var(--bg-layer-01);font-size:var(--text-xs);color:var(--text-muted);max-height:60px;overflow-y:auto;cursor:pointer;padding:8px 16px;scrollbar-width:thin;scrollbar-color:var(--text-faint) transparent;white-space:pre-line}
-.msg.system:hover{max-height:none}
-.msg.system::-webkit-scrollbar{width:6px}
-.msg.system::-webkit-scrollbar-thumb{background:var(--text-faint);border-radius:3px}
-.msg.system::before{content:'System prompt';display:block;font-weight:600;margin-bottom:4px;color:var(--text-faint)}
+.msg.system{font-size:var(--text-xs);color:var(--text-muted);white-space:pre-line}
+/* CARD-UNIFY: 卡片视觉迁移到内部 .card（容器只留分隔线 + margin）*/
+.msg.system .card{background:var(--bg-layer-01);padding:8px 16px;scrollbar-width:thin;scrollbar-color:var(--text-faint) transparent}
+.msg.system .card::-webkit-scrollbar{width:6px}
+.msg.system .card::-webkit-scrollbar-thumb{background:var(--text-faint);border-radius:3px}
 .msg.system .sys-block{white-space:pre-wrap;font-family:var(--font-code);margin:6px 0;padding:6px 8px;background:var(--bg-deep);border-left:2px solid var(--border-focus);border-radius:var(--radius-sm);color:var(--text-muted)}
 .msg.system p,.msg.system h1,.msg.system h2,.msg.system h3{margin:6px 0}
 .msg.system pre{margin:4px 0}
-.thinking-block{margin:4px 0;padding:10px 12px;background:var(--bg-layer-01);border-radius:12px;font-size:var(--text-sm);color:var(--text-muted);cursor:pointer}
+/* CARD-UNIFY: 可折叠卡片骨架（.card-head 点击 toggle，.card-body 随 .open 显隐）*/
+.card{position:relative}
+.card-head{display:flex;align-items:center;gap:6px;user-select:none;cursor:pointer}
+.card-head::before{content:"\25BC";font-size:9px;display:inline-block;transition:transform var(--transition-fast);color:var(--text-faint);margin-right:2px}
+.card:not(.open) .card-head::before{transform:rotate(-90deg)}
+.card.open .card-head::before{transform:rotate(0deg)}
+.card > .card-body{display:none;margin-top:6px;user-select:text;cursor:auto}
+.card.open > .card-body{display:block}
 .content-block{margin:4px 0}
-.thinking-block .header{display:flex;align-items:center;gap:4px;color:var(--text-muted);user-select:none}
-.thinking-block .header::before{content:"\25B6";font-size:9px;display:inline-block;transition:transform var(--transition-fast)}
-.thinking-block.open .header::before{content:"\25BC"}
-.thinking-block .content{display:none;margin-top:6px;white-space:pre-wrap;color:var(--text-faint);line-height:1.5;max-height:300px;overflow-y:auto;user-select:text;cursor:auto}
-.thinking-block.open .content{display:block}
+/* CARD-UNIFY: thinking 特化样式（折叠骨架由 .card-head/.card-body 承担）*/
+.thinking-block{margin:4px 0;padding:10px 12px;background:var(--bg-layer-01);border-radius:12px;font-size:var(--text-sm);color:var(--text-muted);cursor:pointer}
+.thinking-block .card-head{color:var(--text-muted)}
+.thinking-block .content{white-space:pre-wrap;color:var(--text-faint);line-height:1.5;max-height:300px;overflow-y:auto;user-select:text;cursor:auto}
 .tool-card{margin:4px 0;padding:8px 12px;border:none;border-radius:12px;background:var(--bg-layer-01);font-size:var(--text-xs);cursor:pointer;transition:background var(--transition-fast)}
 .tool-card:hover{background:var(--bg-layer-02)}
-.tool-card .name-row{display:flex;align-items:center;gap:6px}
 .tool-card .name{color:var(--text-base);font-weight:500}
-.tool-card .output{display:none;margin-top:6px;border-top:0.5px solid var(--border-muted);padding-top:6px;color:var(--text-muted);white-space:pre-wrap;max-height:200px;overflow-y:auto;font-family:var(--font-code)}
-.tool-card.open .output{display:block}
-.tool-card .name-row{cursor:pointer}
+.tool-card .output{white-space:pre-wrap;border-top:0.5px solid var(--border-muted);margin-top:6px;padding-top:6px;color:var(--text-muted);max-height:200px;overflow-y:auto;font-family:var(--font-code)}
 .tool-label{color:var(--text-faint);margin-right:2px}
-.toggle-icon{display:inline-block;transition:transform var(--transition-fast);font-size:10px;color:var(--text-faint);margin-right:2px}
-.tool-card.open .toggle-icon{transform:rotate(0deg)}
-.tool-card:not(.open) .toggle-icon{transform:rotate(-90deg)}
 .tool-toggle-all{padding:2px 10px;background:var(--bg-layer-02);border:0.5px solid var(--border-base);border-radius:var(--radius-sm);color:var(--text-muted);font-size:var(--text-xs);cursor:pointer;margin-bottom:4px;font-family:var(--font-ui)}
 .tool-toggle-all:hover{color:var(--text-strong);border-color:var(--border-focus)}
 .copy-cmd{padding:1px 6px;background:var(--bg-layer-03);border:0.5px solid var(--border-base);border-radius:var(--radius-sm);color:var(--text-muted);font-size:var(--text-xs);cursor:pointer;margin-left:6px;font-family:var(--font-ui)}

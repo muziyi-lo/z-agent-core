@@ -16,10 +16,22 @@ function extract(fnName) {
 
 function makeEl(tag) {
   const el = {
-    tag, className: "", children: [], parentNode: null, textContent: "", _html: "", _toolName: undefined,
+    tag, className: "", children: [], parentNode: null, textContent: "", _html: "", _toolName: undefined, _attrs: {},
     classList: { add() {}, remove() {}, toggle() {} },
     appendChild(c) { c.parentNode = this; this.children.push(c); return c },
     insertBefore(n, ref) { n.parentNode = this; const i = this.children.indexOf(ref); if (i < 0) this.children.push(n); else this.children.splice(i, 0, n); return n },
+    setAttribute(k, v) { this._attrs[k] = v },
+    querySelector(sel) {
+      const cls = sel.startsWith(".") ? sel.slice(1) : sel
+      const walk = (node) => {
+        for (const c of node.children || []) {
+          if (c.className && c.className.indexOf(cls) !== -1) return c
+          const r = walk(c); if (r) return r
+        }
+        return null
+      }
+      return walk(this)
+    },
     querySelectorAll(sel) {
       if (sel !== ".tool-card") return []
       const out = []
@@ -44,6 +56,7 @@ globalThis.esc = (s) => String(s)
 globalThis.hljs = { highlightAll() {}, highlightElement() {} }
 globalThis.highlightNewCode = () => {}
 
+const makeCard = eval(`(${extract("makeCard")})`)
 const buildSegment = eval(`(${extract("buildSegment")})`)
 globalThis.isContextTool = eval(`(${extract("isContextTool")})`)
 globalThis.wrapContextToolGroups = eval(`(${extract("wrapContextToolGroups")})`)
@@ -61,8 +74,8 @@ console.log("scenario 1: [read, glob, bash]")
   asst.appendChild(read); asst.appendChild(glob); asst.appendChild(bash)
   wrapContextToolGroups(asst)
   const cls = asst.children.map((c) => c.className)
-  check("group wraps read+glob", cls[0] === "context-tool-group" && cls[1] === "tool-card open")
-  check("bash stays outside", cls[1] === "tool-card open")
+  check("group wraps read+glob", cls[0] === "context-tool-group" && cls[1].indexOf("tool-card") !== -1)
+  check("bash stays outside", cls[1].indexOf("tool-card") !== -1)
   const group = asst.children[0]
   check("group contains read+glob", group.children.some((c) => c._toolName === "read") && group.children.some((c) => c._toolName === "glob"))
   check("group summary", group.children[0].textContent.includes("read: 1") && group.children[0].textContent.includes("glob: 1"))

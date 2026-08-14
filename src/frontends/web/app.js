@@ -973,6 +973,12 @@ async function loadOlder() {
 
 function renderSystemPrompt(content) {
   var el = document.getElementById('system-prompt');
+  // CARD-UNIFY: .open 状态在 makeCard 的 card 子元素上，不在 el 外层——查 .card
+  var wasOpen = false;
+  if (el) {
+    var oldCard = el.querySelector('.card');
+    if (oldCard) wasOpen = oldCard.classList.contains('open');
+  }
   if (!el) {
     el = document.createElement('div');
     el.id = 'system-prompt';
@@ -980,8 +986,17 @@ function renderSystemPrompt(content) {
     msgs.insertBefore(el, msgs.firstChild);
   }
   if (!content) { el.style.display = 'none'; return; }
+  el.innerHTML = '';
   el.className = 'msg system';
-  el.innerHTML = renderSystemBlocks(content);
+  // renderSystemBlocks 返回 HTML 字符串，包成 body 节点
+  var bodyWrap = document.createElement('div');
+  bodyWrap.innerHTML = renderSystemBlocks(content);
+  var card = makeCard({
+    head: 'System prompt',
+    body: bodyWrap,
+    defaultOpen: !!wasOpen,
+  });
+  el.appendChild(card);
   el.style.display = '';
 }
 
@@ -1110,18 +1125,63 @@ function updateMarkdownBlocks(container, content) {
   });
 }
 
+// --- collapsible card abstraction (CARD-UNIFY) ---
+// makeCard: 纯 DOM 构造，不绑定事件——折叠交互由 #messages 上的统一委托 handler
+// 承担。head 契约：必须是已转义的 HTML（调用方对用户/模型数据用 esc()）。
+function makeCard(opts) {
+  var el = document.createElement('div');
+  el.className = 'card' + (opts.defaultOpen ? ' open' : '');
+  el.setAttribute('aria-expanded', opts.defaultOpen ? 'true' : 'false');
+  var head = document.createElement('div');
+  head.className = 'card-head';
+  head.innerHTML = opts.head;
+  var body = document.createElement('div');
+  body.className = 'card-body';
+  body.appendChild(opts.body);
+  el.appendChild(head);
+  el.appendChild(body);
+  return el;
+}
+
+// 统一卡片状态写入口：所有 .open 修改收敛于此（委托 handler、expand-all、程序化控制）。
+// aria-expanded 同步（与项目既有 aria 先例对齐）。
+function setCardOpen(card, open) {
+  if (open) card.classList.add('open');
+  else card.classList.remove('open');
+  card.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+// 顶层函数（test-card.mjs 按函数名提取）。守卫规则：
+// body 内不 toggle（保护选中文本）；head 内交互控件不 toggle（复制按钮等）。
+function handleCardClick(e) {
+  var card = e.target.closest('.card');
+  if (!card) return;
+  var t = e.target;
+  if (t.closest('.card-body')) return;
+  if (t.closest('.card-head') && (t.closest('button') || t.closest('a') || t.closest('[data-no-toggle]'))) return;
+  setCardOpen(card, !card.classList.contains('open'));
+}
+
+// 页面加载时绑一次（与 #messages scroll 委托同容器）。#messages 是 index.html 静态
+// 容器且 script 注入在 body 末尾（DOM 已解析）；null 守卫为结构变化的防御。
+var messagesEl = document.getElementById('messages');
+if (messagesEl) {
+  messagesEl.addEventListener('click', handleCardClick);
+}
+
 function buildSegment(seg) {
   var el;
   if (seg.type === 'reasoning') {
-    el = document.createElement('div');
-    el.className = 'thinking-block' + (seg.open ? ' open' : '');
-    el.innerHTML = '<div class="header">Thinking</div>';
     var content = document.createElement('div');
-    content.className = 'content';
+    content.className = 'card-body content';
     content.innerHTML = renderMd(seg.text || '');
-    el.appendChild(content);
-    el.onclick = function() { el.classList.toggle('open'); };
-    return el;
+    var card = makeCard({
+      head: 'Thinking',
+      body: content,
+      defaultOpen: !!seg.open,
+    });
+    card.className += ' thinking-block';
+    return card;
   }
   if (seg.type === 'text') {
     el = document.createElement('div');
@@ -1133,19 +1193,18 @@ function buildSegment(seg) {
     return el;
   }
   if (seg.type === 'tool') {
-    el = document.createElement('div');
-    el.className = 'tool-card open';
-    el._toolName = seg.name;
-    el.innerHTML = '<div class="name-row"><span class="toggle-icon">&#9660;</span> <span class="tool-label">&#9881;</span> <span class="name">' + esc(seg.name || 'tool') + '</span></div>';
+    var headHtml = '<span class="tool-label">&#9881;</span><span class="name">' + esc(seg.name || 'tool') + '</span>';
     var output = document.createElement('div');
-    output.className = 'output';
+    output.className = 'card-body output';
     output.innerHTML = renderMd(seg.output || '');
-    el.appendChild(output);
-    el.onclick = function(e) {
-      if (e.target.closest('.output')) return;
-      el.classList.toggle('open');
-    };
-    return el;
+    var card = makeCard({
+      head: headHtml,
+      body: output,
+      defaultOpen: true,
+    });
+    card._toolName = seg.name;
+    card.className += ' tool-card';
+    return card;
   }
   return document.createElement('div');
 }
@@ -1334,7 +1393,13 @@ function sendPrompt(prompt) {
     var seg = { type: 'reasoning', text: '', complete: false, el: null };
     curSegments.push(seg);
     seg.el = buildSegment(seg);
-    seg.el.querySelector('.header').innerHTML = 'Thinking <span class="spinner"></span>';
+    // CARD-UNIFY: card-head 由 makeCard 构造（含 ::before 图标），追加 spinner
+    var headEl = seg.el.querySelector('.card-head');
+    if (headEl) {
+      var spin = document.createElement('span');
+      spin.className = 'spinner';
+      headEl.appendChild(spin);
+    }
     asst.appendChild(seg.el);
     currentThinking = seg;
     scrollToBottom(msgs);
@@ -1352,7 +1417,18 @@ function sendPrompt(prompt) {
     if (currentThinking) {
       var d = JSON.parse(e.data);
       var dur = d.duration_ms ? (d.duration_ms / 1000).toFixed(0) + 's' : '';
-      currentThinking.el.querySelector('.header').innerHTML = 'Thinking (' + dur + ')';
+      // CARD-UNIFY: 更新 card-head 文本 + 移除 spinner
+      var headEl = currentThinking.el.querySelector('.card-head');
+      if (headEl) {
+        var spinEl = headEl.querySelector('.spinner');
+        if (spinEl) spinEl.remove();
+        if (!headEl.querySelector('.dur')) {
+          var durSpan = document.createElement('span');
+          durSpan.className = 'dur';
+          headEl.appendChild(durSpan);
+        }
+        headEl.querySelector('.dur').textContent = dur ? ' (' + dur + ')' : '';
+      }
       currentThinking.el.querySelector('.content').innerHTML = renderMd(currentThinking.text);
       currentThinking.complete = true;
       currentThinking = null;
@@ -1389,7 +1465,13 @@ function sendPrompt(prompt) {
     curSegments.push(seg);
     seg.el = buildSegment(seg);
     seg.el._toolData = d;
-    seg.el.querySelector('.name-row').innerHTML = '<span class="toggle-icon">&#9660;</span> <span class="tool-label">&#9881;</span> <span class="name">' + esc(d.name) + '</span><span class="spinner"></span>';
+    // CARD-UNIFY: card-head 由 makeCard 构造（含 ::before 图标），这里只追加 spinner
+    var headEl = seg.el.querySelector('.card-head');
+    if (headEl) {
+      var spin = document.createElement('span');
+      spin.className = 'spinner';
+      headEl.appendChild(spin);
+    }
     asst.appendChild(seg.el);
     currentTool = seg;
     scrollToBottom(msgs);
@@ -1425,12 +1507,18 @@ function sendPrompt(prompt) {
     try {
       var d = JSON.parse(e.data);
       currentTool.el.classList.add('error');
-      var nameRow = currentTool.el.querySelector('.name-row');
-      if (nameRow) nameRow.innerHTML = '<span class="toggle-icon">&#9660;</span> <span class="tool-label">&#9881;</span> <span class="name">' + esc(d.name || 'tool') + '</span>';
+      // CARD-UNIFY: card-head 由 makeCard 构造，只更新 name 文本 + 移除 spinner
+      var nameEl = currentTool.el.querySelector('.card-head .name');
+      if (nameEl) nameEl.textContent = d.name || 'tool';
+      var spinEl = currentTool.el.querySelector('.card-head .spinner');
+      if (spinEl) spinEl.remove();
       var errOut = document.createElement('div');
       errOut.className = 'output';
       errOut.textContent = d.error || 'unknown error';
-      currentTool.el.appendChild(errOut);
+      // CARD-UNIFY: 错误输出进 card-body（骨架控制显隐），而非 card 直接子级
+      var cardBody = currentTool.el.querySelector('.card-body');
+      if (cardBody) cardBody.appendChild(errOut);
+      else currentTool.el.appendChild(errOut);
     } catch(ex) { console.error('tool_error handler:', ex); }
     scrollToBottom(msgs);
   });
@@ -1877,8 +1965,9 @@ function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
 var ToolRegistry = {
   bash: function(toolDiv, d) {
     setToolIcon(toolDiv, '&#128190;');
-    var nameRow = toolDiv.querySelector('.name-row');
-    if (nameRow && !toolDiv.querySelector('.copy-cmd')) {
+    // CARD-UNIFY: name-row 改 card-head（copy-cmd 插入 head）
+    var headEl = toolDiv.querySelector('.card-head');
+    if (headEl && !toolDiv.querySelector('.copy-cmd')) {
       var copyCmd = document.createElement('button');
       copyCmd.className = 'copy-cmd';
       copyCmd.textContent = 'Copy cmd';
@@ -1886,7 +1975,7 @@ var ToolRegistry = {
         e.stopPropagation();
         if (d.input) copyText(d.input, copyCmd, 'Copied!');
       };
-      nameRow.appendChild(copyCmd);
+      headEl.appendChild(copyCmd);
     }
     // Bash output: wrap in pre/code (幂等：已包则跳过)
     var out = toolDiv.querySelector('.output');
@@ -1986,9 +2075,11 @@ function setToolMeta(toolDiv, parts) {
   if (!meta) {
     meta = document.createElement('div');
     meta.className = 'tool-meta';
-    var nr = toolDiv.querySelector('.name-row');
-    if (nr && nr.nextSibling) nr.parentNode.insertBefore(meta, nr.nextSibling);
-    else nr.parentNode.appendChild(meta);
+    // CARD-UNIFY: name-row 改 card-head——meta 插到 head 后、body 前
+    var headEl = toolDiv.querySelector('.card-head');
+    var bodyEl = toolDiv.querySelector('.card-body');
+    if (headEl && bodyEl) headEl.parentNode.insertBefore(meta, bodyEl);
+    else if (headEl) headEl.parentNode.appendChild(meta);
   }
   meta.textContent = parts.join(' | ');
 }

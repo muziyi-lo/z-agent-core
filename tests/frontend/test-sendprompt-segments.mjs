@@ -18,16 +18,22 @@ function extract(fnName) {
 // --- DOM stub ---
 function makeEl(tag) {
   return {
-    tag, className: "", style: {}, children: [], textContent: "", _html: "",
+    tag, className: "", style: {}, children: [], textContent: "", _html: "", _attrs: {},
     classList: { add() {}, remove() {}, toggle() {} },
     appendChild(c) { this.children.push(c); return c },
     insertBefore(n, ref) { const i = this.children.indexOf(ref); if (i < 0) this.children.push(n); else this.children.splice(i, 0, n); return n },
+    setAttribute(k, v) { this._attrs[k] = v },
+    remove() { const p = this.parentNode; if (p) { const i = p.children.indexOf(this); if (i >= 0) p.children.splice(i, 1) } },
     querySelector(sel) {
-      const cls = sel.slice(1)
-      const c = this.children.find((x) => x.className === cls)
-      if (c) return c
-      if (this._html && this._html.includes('class="' + cls + '"')) return makeEl("div")
-      return null
+      const cls = sel.startsWith(".") ? sel.slice(1) : sel
+      const walk = (node) => {
+        for (const c of node.children || []) {
+          if (c.className && c.className.indexOf(cls) !== -1) return c
+          const r = walk(c); if (r) return r
+        }
+        return null
+      }
+      return walk(this)
     },
     querySelectorAll() { return [] },
     closest() { return null },
@@ -89,7 +95,8 @@ globalThis.setStreaming = () => {}
 // is exercised by dedicated tests, here we only need no-crash + phase bookkeeping)
 globalThis.conn = { phase: "idle", go: () => {} }
 
-// sendPrompt depends on buildSegment (already in app.js); extract + eval both
+// sendPrompt depends on buildSegment + makeCard (already in app.js); extract + eval all
+globalThis.makeCard = eval(`(${extract("makeCard")})`)
 globalThis.buildSegment = eval(`(${extract("buildSegment")})`)
 globalThis.sendPrompt = eval(`(${extract("sendPrompt")})`)
 
@@ -126,15 +133,15 @@ fire("done", {})
 
 const clsA = flatChildren(asstA)
 check("order [thinking,text,tool,thinking,tool,text]",
-  clsA[0] === "thinking-block" &&
+  clsA[0].indexOf("thinking-block") !== -1 &&
   clsA[1] === "content-block" &&
-  clsA[2] === "tool-card open" &&
-  clsA[3] === "thinking-block" &&
-  clsA[4] === "tool-card open" &&
+  clsA[2].indexOf("tool-card") !== -1 &&
+  clsA[3].indexOf("thinking-block") !== -1 &&
+  clsA[4].indexOf("tool-card") !== -1 &&
   clsA[5] === "content-block")
 check("narration text in 2nd child", childText(asstA.children[1], "content") === "Let me check the time")
 check("final text in last child", childHtml(asstA.children[5], "content") === "[md:It is 13:08.]")
-check("tool1 output", childText(asstA.children[2], "output") === "2026-08-07 13:08:57")
+check("tool1 output", asstA.children[2].querySelector(".output").textContent === "2026-08-07 13:08:57")
 
 // --- scenario B: tools then final content (regular tool round) ---
 console.log("scenario B: tools first, content last")
@@ -157,10 +164,10 @@ fire("done", {})
 
 const clsB = flatChildren(asstB)
 check("order [thinking,tool,thinking,tool,text]",
-  clsB[0] === "thinking-block" &&
-  clsB[1] === "tool-card open" &&
-  clsB[2] === "thinking-block" &&
-  clsB[3] === "tool-card open" &&
+  clsB[0].indexOf("thinking-block") !== -1 &&
+  clsB[1].indexOf("tool-card") !== -1 &&
+  clsB[2].indexOf("thinking-block") !== -1 &&
+  clsB[3].indexOf("tool-card") !== -1 &&
   clsB[4] === "content-block")
 check("content last", childHtml(asstB.children[4], "content") === "[md:Final answer here.]")
 

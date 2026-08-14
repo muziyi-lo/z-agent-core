@@ -28,16 +28,21 @@ function extractToolRegistry() {
 
 function makeEl(tag) {
   const el = {
-    tag, className: "", children: [], parentNode: null, textContent: "", _html: "", _toolName: undefined,
+    tag, className: "", children: [], parentNode: null, textContent: "", _html: "", _toolName: undefined, _attrs: {},
     appendChild(c) { c.parentNode = this; this.children.push(c); return c },
     insertBefore(n, ref) { n.parentNode = this; const i = this.children.indexOf(ref); if (i < 0) this.children.push(n); else this.children.splice(i, 0, n); return n },
     removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c },
+    setAttribute(k, v) { this._attrs[k] = v },
     querySelector(sel) {
-      const cls = sel.slice(1)
-      const c = this.children.find((x) => x.className === cls || (x._cls && x._cls.includes(cls)))
-      if (c) return c
-      if (this._html && this._html.includes('class="' + cls + '"')) return makeEl("div")
-      return null
+      const cls = sel.startsWith(".") ? sel.slice(1) : sel
+      const walk = (node) => {
+        for (const c of node.children || []) {
+          if (c.className && c.className.indexOf(cls) !== -1) return c
+          const r = walk(c); if (r) return r
+        }
+        return null
+      }
+      return walk(this)
     },
     querySelectorAll() { return [] },
     closest() { return null },
@@ -70,13 +75,21 @@ function check(name, cond) { if (cond) { pass++; console.log("  ok " + name) } e
 
 function buildToolCard(name, output) {
   const card = makeEl("div")
-  card.className = "tool-card open"
+  card.className = "card tool-card open"
   card._toolName = name
-  const nr = makeEl("div")
-  nr.className = "name-row"
-  card.appendChild(nr)
+  const head = makeEl("div")
+  head.className = "card-head"
+  const label = makeEl("span")
+  label.className = "tool-label"
+  label.innerHTML = "&#9881;"
+  const nameSpan = makeEl("span")
+  nameSpan.className = "name"
+  nameSpan.textContent = name || ""
+  head.appendChild(label)
+  head.appendChild(nameSpan)
+  card.appendChild(head)
   const out = makeEl("div")
-  out.className = "output"
+  out.className = "card-body output"
   out.textContent = output || ""
   out.innerHTML = "[md:" + (output || "") + "]"
   card.appendChild(out)
@@ -128,8 +141,8 @@ console.log("bash: Copy-cmd button copies command")
   globalThis.copyText = (text, btn, label) => { copied = text; if (btn) btn.textContent = label }
   const card = buildToolCard("bash", "out")
   applyToolType(card, "bash", { exit_code: 0, input: "echo hi" })
-  const nameRow = card.querySelector(".name-row")
-  const btn = nameRow && nameRow.children.find((c) => c.className === "copy-cmd")
+  const headEl = card.querySelector(".card-head")
+  const btn = headEl && headEl.children.find((c) => c.className === "copy-cmd")
   check("copy-cmd button created", btn !== null)
   if (btn && btn.onclick) btn.onclick({ stopPropagation() {} })
   check("click copies command", copied === "echo hi")
