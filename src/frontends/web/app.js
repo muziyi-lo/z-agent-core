@@ -924,7 +924,16 @@ function renderMessages(msgs, insertBeforeNode) {
             // the bash Copy-cmd button gets `.input` on reload too.
             ts.el._toolData = ts.data;
             var out = ts.el.querySelector('.output');
-            if (out) out.innerHTML = outHtml;
+            if (out) {
+              // reload: server persists only tool output, NOT the ```input args
+              // header (that's stream-injected). Rebuild it from the assistant's
+              // tool_calls arguments so the command input block matches streaming.
+              var inputBlock = '';
+              if (ts.args && ts.args !== '{}') {
+                inputBlock = '```input\n' + ts.args + '\n```\n\n';
+              }
+              out.innerHTML = renderMd(inputBlock + (m.content || ''));
+            }
             if (ts.name) applyToolType(ts.el, ts.name, ts.data);
             break;
           }
@@ -1173,7 +1182,7 @@ function buildSegment(seg) {
   var el;
   if (seg.type === 'reasoning') {
     var content = document.createElement('div');
-    content.className = 'card-body content';
+    content.className = 'content';
     content.innerHTML = renderMd(seg.text || '');
     var card = makeCard({
       head: 'Thinking',
@@ -1195,7 +1204,7 @@ function buildSegment(seg) {
   if (seg.type === 'tool') {
     var headHtml = '<span class="tool-label">&#9881;</span><span class="name">' + esc(seg.name || 'tool') + '</span>';
     var output = document.createElement('div');
-    output.className = 'card-body output';
+    output.className = 'output';
     output.innerHTML = renderMd(seg.output || '');
     var card = makeCard({
       head: headHtml,

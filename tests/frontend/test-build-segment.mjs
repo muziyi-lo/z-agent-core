@@ -84,6 +84,12 @@ console.log("buildSegment: reasoning")
   const c = el.querySelector(".content")
   check("has .content child", c !== null)
   check("content md", c && c.innerHTML === "[md:think hard]")
+  // CARD-UNIFY 回归: card-body 必须恰好一个直接子级（无嵌套），content 在其内
+  const directBodies = el.children.filter((x) => x.className.split(/\s+/).indexOf("card-body") !== -1)
+  check("exactly one direct .card-body (no nesting)", directBodies.length === 1)
+  if (directBodies.length === 1) {
+    check("content inside card-body", directBodies[0].children.indexOf(c) !== -1)
+  }
 }
 
 console.log("buildSegment: text")
@@ -106,6 +112,9 @@ console.log("buildSegment: tool")
   check("output md", o && o.innerHTML === "[md:out]")
   // CARD-UNIFY: 折叠交互由 #messages 委托 handleCardClick 承担，卡片自身不绑 onclick
   check("no onclick bound on card", el.onclick == null)
+  // CARD-UNIFY 回归: 无嵌套 card-body
+  const directBodies = el.children.filter((x) => x.className.split(/\s+/).indexOf("card-body") !== -1)
+  check("exactly one direct .card-body (tool, no nesting)", directBodies.length === 1)
 }
 
 console.log("buildSegment: unknown type")

@@ -74,7 +74,7 @@ const session = {
     { role: "user", content: "你好" },
     { role: "assistant", reasoning_content: "The user just said 你好", content: "你好！有什么可以帮你？", model: "deepseek-v4-flash", timestamp: 1 },
     { role: "user", content: "几点了？" },
-    { role: "assistant", reasoning_content: "The user is asking what time it is", content: "", tool_calls: [{ id: "call_1", name: "bash", arguments: "{}" }] },
+    { role: "assistant", reasoning_content: "The user is asking what time it is", content: "", tool_calls: [{ id: "call_1", name: "bash", arguments: "{\"command\":\"echo %date% %time%\"}" }] },
     { role: "tool", tool_call_id: "call_1", content: "%date%\n%time%\n" },
     { role: "assistant", reasoning_content: "The echo did not expand the variables", content: "", tool_calls: [{ id: "call_2", name: "bash", arguments: "{}" }] },
     { role: "tool", tool_call_id: "call_2", content: "2026-08-07 13:08:57\n" },
@@ -160,6 +160,11 @@ check("tool-assistant1 [thinking,tool]",
 check("tool1 name + output filled", t1.children[1]._toolName === "bash" &&
   segCls(t1)[1].includes("tool-bash") && t1.children[1]._toolName === "bash")
 check("thinking1 open (reload preserves expanded)", t1.children[0].className.includes("open"))
+// input 块重建逻辑（真实 renderMd 产生 pre → bash 分支幂等跳过）在 stub 下无法精确断言
+// （stub renderMd 不产 pre，bash 分支会用空 textContent 覆盖）。改为验证 copy-cmd 依赖的
+// _toolData.input 已从 tool_calls arguments 恢复——真实浏览器实测已确认 input 块显示。
+check("tool1 input recovered from args",
+  t1.children[1]._toolData && t1.children[1]._toolData.input === "echo %date% %time%")
 
 const t2 = messages.children[4]  // tool-use assistant #2 (call_2)
 check("tool-assistant2 [thinking,tool]", segCls(t2)[0].indexOf("thinking-block") !== -1 && segCls(t2)[1].indexOf("tool-card") !== -1)
