@@ -183,6 +183,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | F11 | **事件总线 EventBus** — **P3** | PLAN-LOGGING-SYSTEM.md:194"后续 UI/日志订阅扩展时再评估"+ OPT-5 流式事件系统同源未闭合 |
 | F12 | **千问自定义分组**（SB5，登记声明落空）— **P3** | PLAN-DEEPSEEK-STYLE.md:141 自称"记 REMAINING"实际未记。模型分组/说明（M5）同源 |
 | F13 | **JsonWriter pretty 输出选项**（调试可读性）— **未来** | F7 评审提出：当前紧凑格式（JSONL/API/SSE 依赖），未来调试可读性可在 `JsonWriter` 加 `pretty: bool`（begin 后写换行 + 按 depth 缩进 + 元素间换行）。因所有输出已收敛走 JsonWriter，启用点为单一配置，纯增量不改默认紧凑输出。见 `docs/0.2.8/PLAN-JSON-WRITER.md` |
+| F14 | **魔法值全量审查与提取**（调研完成 2026-08-14，实施待排期） | 按 D-04 判据（同值≥2处/跨模块/有业务语义）全量扫描 `src/`。**已提取**：`SESSION_PAGE_LIMIT`/`UNDO_CAP`(handler)、`TITLE_MAX_CHARS`/`TITLE_PREFIX_LEN`(title，handler:1068 已引用)、`DEFAULT_TIMEOUT_SECS`/`MAX_TIMEOUT_SECS`(webfetch)、`DEFAULT_KEEP_RECENT_TOKENS`/`MIN_KEEP_MESSAGES`(compact)。**待提取候选**：①**`isBinary` 30% 控制字符阈值 + 4096 检查窗口——bash.zig:197 与 read.zig:273 同逻辑复制（跨模块同值同语义，D-03 逻辑重复）**，建议提取 `util/text.isBinary`（read 已有 `BINARY_CHECK_SIZE`=4096 常量可并入）；②render.zig 显示截断 30/50（`truncatePath`/`shorten` 多处裸值，显示语义，建议命名）。**判定维持现状**（无同值耦合，提取反而制造假耦合）：session.zig:449 消息数警告 `>50`（≠handler 分页 50）；session.zig:860 字节估算 `size/150`（单处）；sse.zig:236 分块 7000（单处）；栈缓冲 4096/8192 大量出现但无业务语义。触发：提取 `isBinary` 时顺手清 title/render 显示截断域 |
 
 ## Architecture wishlist
 
