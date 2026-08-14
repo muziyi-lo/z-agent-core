@@ -34,6 +34,7 @@
 - **thinking 块点击收起崩溃**（用户实测）: `addMessage` 内 setTimeout 用 `for (var i)` 闭包给 thinking-block 重绑 onclick——`var i` 是共享变量，循环结束后 `i===tbs.length`，点击时 `tbs[i].classList` 读 undefined 崩溃（TypeError）。且与 buildSegment:1112 的正确绑定重复。修复: 删除冗余坏闭包重绑，折叠绑定统一由 buildSegment 负责（唯一创建点）
 - **thinking 展开/收起图标适配**: 折叠图标此前硬编码 `&#9654;` 于 JS 三处（buildSegment/thinking_start/thinking_end），收起后不随状态变化。修复: 图标改由 CSS `.header::before` 接管，`.open` 时 `▶`→`▼`，任意状态正确
 - **tool-card 折叠重复绑定**: done 路径 `querySelectorAll('.tool-card')` 重绑 onclick 与 buildSegment 冗余（逻辑等价但多余）。修复: 删除重绑，done 只保留 markdown 渲染；折叠绑定统一 buildSegment
+- **bash 卡片 Copy-cmd 按钮无效**（用户实测）: 复制按钮读 `d.input`，但 bash 命令从未结构化传给前端——流式 tool_start 只发 `{id,name}`、tool_meta 只发 exit_code/byte_count，args（含 command）走 tool_delta 的 ` ```input` 代码块但前端只当纯文本显示；reload 路径 meta 也无 command → `d.input` 恒 undefined，按钮成死按钮。修复: 流式 tool_delta 首次检测 ` ```input` 块解析 command 存 `_toolData.input`；reload 路径从 assistant tool_calls arguments 提取 command。新增 Copy-cmd 回归断言（test-tool-registry，19 全过）
 
 ## [0.2.7] — 2026-08-12
 

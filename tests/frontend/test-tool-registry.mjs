@@ -120,6 +120,25 @@ console.log("bash: idempotent pre/code wrap")
   check("meta has exit code", m && m.includes("exit: 0"))
 }
 
+// --- bash Copy-cmd button: created once, copies d.input on click ---
+console.log("bash: Copy-cmd button copies command")
+{
+  let copied = null
+  const orig = globalThis.copyText
+  globalThis.copyText = (text, btn, label) => { copied = text; if (btn) btn.textContent = label }
+  const card = buildToolCard("bash", "out")
+  applyToolType(card, "bash", { exit_code: 0, input: "echo hi" })
+  const nameRow = card.querySelector(".name-row")
+  const btn = nameRow && nameRow.children.find((c) => c.className === "copy-cmd")
+  check("copy-cmd button created", btn !== null)
+  if (btn && btn.onclick) btn.onclick({ stopPropagation() {} })
+  check("click copies command", copied === "echo hi")
+  // Note: real DOM querySelector is recursive (dedupes copy-cmd); the stub is
+  // shallow, so dedup is verified by the `!toolDiv.querySelector('.copy-cmd')`
+  // guard in the bash branch — here we only assert the button works once.
+  globalThis.copyText = orig
+}
+
 // --- meta idempotency: cumulative _toolData across two calls ---
 console.log("bash: cumulative meta across partial tool_meta events")
 {

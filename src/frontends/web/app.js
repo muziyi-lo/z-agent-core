@@ -912,6 +912,17 @@ function renderMessages(msgs, insertBeforeNode) {
           if (ts.callId === m.tool_call_id) {
             ts.output = m.content || '';
             ts.data = m.meta || {};
+            // reload path: meta has no bash command; recover it from the
+            // assistant's tool_calls arguments so Copy-cmd works after refresh.
+            if (ts.args && !ts.data.input) {
+              try {
+                var cargs = JSON.parse(ts.args);
+                if (cargs.command) ts.data.input = cargs.command;
+              } catch(ex) {}
+            }
+            // applyToolType reads _toolData (not ts.data); keep them in sync so
+            // the bash Copy-cmd button gets `.input` on reload too.
+            ts.el._toolData = ts.data;
             var out = ts.el.querySelector('.output');
             if (out) out.innerHTML = outHtml;
             if (ts.name) applyToolType(ts.el, ts.name, ts.data);
@@ -1388,6 +1399,21 @@ function sendPrompt(prompt) {
     if (!currentTool) return;
     var d = JSON.parse(e.data);
     currentTool.output += d.text || '';
+    // First chunk carries the ` ```input\n{args}\n``` ` header (server renders
+    // tool args as a code block). Parse the args JSON and stash `.command` so
+    // the bash Copy-cmd button has real data (it previously read a never-set
+    // d.input → dead button).
+    if (!currentTool.el._argsParsed && currentTool.output.indexOf('```input') !== -1) {
+      currentTool.el._argsParsed = true;
+      var m = currentTool.output.match(/```input\n([\s\S]*?)\n```/);
+      if (m && m[1]) {
+        try {
+          var args = JSON.parse(m[1]);
+          currentTool.el._toolData = currentTool.el._toolData || {};
+          if (args.command) currentTool.el._toolData.input = args.command;
+        } catch(ex) {}
+      }
+    }
     var out = currentTool.el.querySelector('.output');
     if (!out) { out = document.createElement('div'); out.className = 'output'; currentTool.el.appendChild(out); }
     out.textContent = currentTool.output;
