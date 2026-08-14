@@ -106,6 +106,7 @@ globalThis.scrollToBottom = () => {}
 globalThis.showStatus = () => {}
 globalThis.currentHasMore = false
 globalThis.currentOldestId = null
+globalThis.SESSIONS_PAGE = 50
 
 globalThis.buildSegment = eval(`(${extract("buildSegment")})`)
 globalThis.renderAssistantMessage = eval(`(${extract("renderAssistantMessage")})`)

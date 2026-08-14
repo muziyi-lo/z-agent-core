@@ -98,7 +98,7 @@ fn walkDir(ctx: types.ToolContext, buf: *std.ArrayListAligned(u8, null), dir: Io
             try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ prefix, entry.name });
         defer ctx.allocator.free(full_path);
 
-        if (globMatch(entry.name, pattern)) {
+        if (matchEntry(entry.name, pattern)) {
             count.* += 1;
             try buf.appendSlice(ctx.allocator, full_path);
             try buf.append(ctx.allocator, '\n');
@@ -114,6 +114,15 @@ fn walkDir(ctx: types.ToolContext, buf: *std.ArrayListAligned(u8, null), dir: Io
             }
         }
     }
+}
+
+/// Unified matching entry: a `**/` prefix matches at any depth under the
+/// recursive walk, so it reduces to matching `rest` against the single-level
+/// name. walkDir and the fixture test share this — the prefix handling lives
+/// only here.
+fn matchEntry(name: []const u8, pattern: []const u8) bool {
+    const effective = if (std.mem.startsWith(u8, pattern, "**/")) pattern[3..] else pattern;
+    return globMatch(name, effective);
 }
 
 fn globMatch(name: []const u8, pattern: []const u8) bool {
@@ -153,8 +162,7 @@ fn testExec(ctx: types.ToolContext, args_json: []const u8) !types.ToolResult {
         const msg = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
         return types.ToolResult{ .session_content = msg };
     };
-    defer parsed.deinit();
-    return execute(ctx, parsed.value);
+    return types.ToolResult.finishExec(execute, ctx, parsed.value, parsed);
 }
 
 test "glob: finds files by extension" {
@@ -209,4 +217,117 @@ test "glob: no matches" {
     var result = try testExec(ctx, "{\"pattern\":\"*.xyz\",\"path\":\".\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "No files") != null);
+}
+
+const MatchCase = struct {
+    name: []const u8,
+    pattern: []const u8,
+    file: []const u8,
+    want: bool,
+};
+
+// Data-driven: adding a glob pattern = adding one row. Covers existing
+// behavior (regression), the new `**/` prefix family, and an explicit
+// out-of-scope probe for mid-pattern `**`.
+const match_cases = [_]MatchCase{
+    .{ .name = "bare-star",    .pattern = "*",       .file = "any.txt", .want = true },
+    .{ .name = "exact",        .pattern = "a.zig",   .file = "a.zig",   .want = true },
+    .{ .name = "ext",          .pattern = "*.zig",   .file = "a.zig",   .want = true },
+    .{ .name = "ext-reject",   .pattern = "*.zig",   .file = "b.txt",   .want = false },
+    .{ .name = "double-star",  .pattern = "**/*",    .file = "any.txt", .want = true },
+    .{ .name = "dstar-ext",    .pattern = "**/*.md", .file = "doc.md",  .want = true },
+    .{ .name = "dstar-reject", .pattern = "**/*.md", .file = "doc.zig", .want = false },
+    .{ .name = "dstar-name",   .pattern = "**/foo",  .file = "foo",     .want = true },
+    .{ .name = "mid-dstar-out-of-scope", .pattern = "a/**/b", .file = "b", .want = false },
+};
+
+test "glob: fixture-driven matchEntry" {
+    inline for (match_cases) |c| {
+        const got = matchEntry(c.file, c.pattern);
+        if (got != c.want) {
+            std.debug.print("FAIL {s}: pattern={s} file={s} got={} want={}\n", .{ c.name, c.pattern, c.file, got, c.want });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "glob: recursive **/* finds files in nested dirs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-glob-dstar";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    // test_root 是字符串字面量，不需 allocator.free
+
+    // a/root.txt, a/sub/nested.zig
+    {
+        const sub = try std.fs.path.join(allocator, &.{ test_root, "sub" });
+        defer allocator.free(sub);
+        try Io.Dir.cwd().createDirPath(io, sub);
+    }
+    {
+        const p = try std.fs.path.join(allocator, &.{ test_root, "root.txt" });
+        defer allocator.free(p);
+        (try Io.Dir.cwd().createFile(io, p, .{})).close(io);
+    }
+    {
+        const p = try std.fs.path.join(allocator, &.{ test_root, "sub", "nested.zig" });
+        defer allocator.free(p);
+        (try Io.Dir.cwd().createFile(io, p, .{})).close(io);
+    }
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_root,
+    };
+
+    var result = try testExec(ctx, "{\"pattern\":\"**/*\",\"path\":\".\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "root.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "nested.zig") != null);
+}
+
+test "glob: **/*.md matches md at any depth" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-glob-dstar-md";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    // test_root 是字符串字面量，不需 allocator.free
+
+    {
+        const sub = try std.fs.path.join(allocator, &.{ test_root, "deep" });
+        defer allocator.free(sub);
+        try Io.Dir.cwd().createDirPath(io, sub);
+    }
+    {
+        const p = try std.fs.path.join(allocator, &.{ test_root, "top.md" });
+        defer allocator.free(p);
+        (try Io.Dir.cwd().createFile(io, p, .{})).close(io);
+    }
+    {
+        const p = try std.fs.path.join(allocator, &.{ test_root, "deep", "doc.md" });
+        defer allocator.free(p);
+        (try Io.Dir.cwd().createFile(io, p, .{})).close(io);
+    }
+    {
+        const p = try std.fs.path.join(allocator, &.{ test_root, "deep", "other.zig" });
+        defer allocator.free(p);
+        (try Io.Dir.cwd().createFile(io, p, .{})).close(io);
+    }
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_root,
+    };
+
+    var result = try testExec(ctx, "{\"pattern\":\"**/*.md\",\"path\":\".\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "top.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "doc.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "other.zig") == null);
 }

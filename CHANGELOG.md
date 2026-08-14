@@ -24,6 +24,14 @@
 - **工具调用上限无前端渲染 + 提示用词模型忽略**（用户实测）: max_rounds 注入的 system 消息被前端过滤不显示；且措辞 `[max tool rounds reached - further tool calls prevented]` 是陈述句，模型误当历史遗留。修复: 前端按 `[Notice:` 前缀渲染警告 system + 措辞改为 `[Notice: tool call limit reached (N rounds this turn). Stop calling tools now. Report your completed work...]`（对齐 StormBreaker 的 [Notice: ...] 指令式措辞，含轮数）
 - **Web API 非法 JSON 致前端 loadSession 解析失败**（用户实测，LRN-20260813-019）: `appendMetaJson` 函数尾 `\"}` 假设"末字段为字符串需闭引号"——bash/read/grep/glob 等布尔/数字结尾分支多输出一个引号（`"timed_out":false"}}`）→ Web API 返回非法 JSON → 前端 `JSON.parse` 失败被 catch 吞 → 聊天看似无响应（曾被误判为 DeepSeek 429 限流）。修复: 函数尾只写 `}`、webfetch 分支自补闭引号（每分支自平衡，禁止共享尾部假设）。新增回归测试: 遍历全部 8 个 ToolMeta 变体序列化后 JSON parse 验证（handler 测试）
 
+### Fixed（P0 四件套，`docs/0.2.8/PLAN-P0-FIXES.md`，2026-08-14）:
+- **glob `**` 递归匹配未实现**（N13）: `globMatch` 无 `**/` 前缀处理，`**/*` 恒 false。修复: 提取 `matchEntry` 统一入口（`**/` 前缀去前缀 + globMatch），walkDir 与测试共用；fixture 驱动 9 条单测（含 `a/**/b` out-of-scope 探针）+ 2 集成测试
+- **ToolMeta 借用 args Value 悬垂 UB**（N14）: meta 字符串借用 `registry.execute` 内 parse 的 args Value，`defer parsed.deinit()` 先于 meta 消费 → 悬垂。修复: `ToolResult.args_owned` 持有 parsed 所有权（不可浅拷贝契约）+ `finishExec` 单点转移方法，registry/8 工具 testExec 委托；修复 defer→errdefer 泄漏（unknown/validate 路径手动 deinit）。**F7 前置解除**
+- **Web 错误边界 + SSE 断连恢复**（N19）: JS 报错白屏；断连只能手动刷新。修复: 全局错误边界（error/unhandledrejection → 横幅非白屏）+ `conn` 状态机（idle/streaming/recovering/degraded 单点分发，含 recovering--send 兜底 + 恢复横幅闭环）+ api_error finish 透传 error 帧 + 恢复失败降级（1.5s 重试一次）
+- **context overflow 自动恢复**（N18）: API 溢出错误导致会话卡死。修复: provider 新增 `error.ContextOverflow`（SSE error 帧 + error_body 双识别），重试循环跳过 overflow（零退避）；agent runTurn catch → compactSession 重试一次（`overflow_retried` 防循环），三条文案区分失败形态（compaction insufficient / auto-compaction failed），Web error 帧透传
+- **魔法值提取（待办 #5 局部触达）**: `handler.zig` `SESSION_PAGE_LIMIT=50`（3 处分页共享）/`UNDO_CAP=20`；`app.js` `?limit=50` 两处复用既有 `SESSIONS_PAGE`
+- **侧边栏新分组位置错乱**（用户实测）: 增量 patch 的组创建用 `lastNode` 追踪插入点，但 `lastNode` 只在遇到非空组时更新——today 组原本不存在时新建会话，today 组被 `appendChild` 追加到末尾（older 之后）而非最前；reload 后 today 组已存在走正确分支故"reload 后正常"。修复: 提取 `ensureGroupsInOrder` 纯函数，创建组时以"GROUP_KEYS 中下一个已存在组的 header"为插入锚点 `insertBefore` 到其前。新增 4 条 `test-group-sessions.mjs` 用例
+
 ## [0.2.7] — 2026-08-12
 
 ### Added

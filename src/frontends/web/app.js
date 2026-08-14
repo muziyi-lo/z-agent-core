@@ -5,6 +5,86 @@ let currentModel = null;
 let evtSrc = null;
 let isStreaming = false;
 
+// Global error boundary: a thrown error must not white-screen the page.
+// Show a recoverable banner instead of letting the exception kill rendering.
+window.addEventListener('error', function(e) {
+  console.error('uncaught error:', e.error || e.message);
+  showStatusBanner('发生错误: ' + (e.message || 'unknown'), 'error');
+});
+window.addEventListener('unhandledrejection', function(e) {
+  console.error('unhandled rejection:', e.reason);
+  showStatusBanner('异步操作失败: ' + (e.reason && e.reason.message ? e.reason.message : 'unknown'), 'error');
+});
+
+// SSE connection state machine (single dispatch point, no callback nesting).
+// phase: idle | streaming | recovering | degraded. All async callbacks funnel
+// through conn.go(event); retry timer is the only pending side effect.
+var conn = {
+  phase: 'idle',
+  retry: 0,
+  timer: null,
+  banner: null,
+  RETRY_DELAY_MS: 1500,
+  MAX_RETRY: 1,
+  go: function(event) {
+    console.debug('conn', this.phase, '->', event);
+    switch (this.phase) {
+      case 'idle':
+        if (event === 'send') this.phase = 'streaming';
+        break;
+      case 'streaming':
+        if (event === 'done') { this.phase = 'idle'; }
+        else if (event === 'disconnect') { this.retry = 0; this.phase = 'recovering'; this.recover(); }
+        break;
+      case 'recovering':
+        if (event === 'recover_success') { this.cancelRetry(); this.clearBanner(); this.phase = 'idle'; }
+        else if (event === 'recover_fail') {
+          if (this.retry < this.MAX_RETRY) {
+            this.retry++;
+            this.timer = setTimeout(function() { conn.recover(); }, conn.RETRY_DELAY_MS);
+          } else {
+            this.phase = 'degraded';
+            showStatusBanner('连接中断，请刷新页面恢复', 'error');
+          }
+        }
+        else if (event === 'send') { this.cancelRetry(); this.clearBanner(); this.retry = 0; this.phase = 'streaming'; }
+        break;
+      case 'degraded':
+        if (event === 'send') { this.clearBanner(); this.retry = 0; this.phase = 'streaming'; }
+        break;
+    }
+  },
+  cancelRetry: function() {
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+  },
+  clearBanner: function() {
+    if (this.banner && this.banner.parentNode) this.banner.parentNode.removeChild(this.banner);
+    this.banner = null;
+  },
+  recover: function() {
+    if (!currentId) return;
+    this.clearBanner();
+    this.banner = showStatusBanner('连接中断，正在恢复会话…', 'warn');
+    loadSession(currentId).then(
+      function() { conn.go('recover_success'); },
+      function() { conn.go('recover_fail'); }
+    );
+  }
+};
+
+function showStatusBanner(msg, kind) {
+  var el = document.createElement('div');
+  el.className = 'status-msg ' + (kind || 'info');
+  el.textContent = msg;
+  var msgs = document.getElementById('messages');
+  if (msgs && msgs.firstChild) {
+    msgs.insertBefore(el, msgs.firstChild);
+  } else if (msgs) {
+    msgs.appendChild(el);
+  }
+  return el;
+}
+
 function groupSessions(list, pinnedIds, now) {
   now = now || new Date();
   var todayStart = Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000);
@@ -20,6 +100,36 @@ function groupSessions(list, pinnedIds, now) {
     else older.push(s);
   });
   return { pinned: pinned, today: today, yesterday: yesterday, week: week, older: older };
+}
+
+// Ensure all non-empty groups exist in GROUP_KEYS order. A newly created group
+// (e.g. Today when only Older existed) must land BEFORE the later group —
+// plain appendChild would put it at the very end (bug: today group appeared
+// last until reload). Insert anchor = next existing group header after key.
+function ensureGroupsInOrder(el, groups, findHeader, makeHeader, makeContainer) {
+  var GROUP_KEYS = ['pinned', 'today', 'yesterday', 'week', 'older'];
+  GROUP_KEYS.forEach(function(key, idx) {
+    if (!groups[key] || groups[key].length === 0) return;
+    var header = findHeader(key);
+    if (!header) {
+      header = makeHeader(key);
+      var cont = makeContainer();
+      var anchor = null;
+      for (var k = idx + 1; k < GROUP_KEYS.length; k++) {
+        if (groups[GROUP_KEYS[k]] && groups[GROUP_KEYS[k]].length > 0) {
+          anchor = findHeader(GROUP_KEYS[k]);
+          if (anchor) break;
+        }
+      }
+      if (anchor && anchor.parentNode) {
+        anchor.parentNode.insertBefore(header, anchor);
+        anchor.parentNode.insertBefore(cont, anchor);
+      } else {
+        el.appendChild(header);
+        el.appendChild(cont);
+      }
+    }
+  });
 }
 
 function getPinnedIds() {
@@ -670,23 +780,10 @@ async function loadSessions() {
   });
 
   // Ensure all non-empty groups exist in order (create missing, keep order).
-  var lastNode = null;
-  GROUP_KEYS.forEach(function(key) {
-    if (!groups[key] || groups[key].length === 0) return;
-    var header = findGroupHeader(key);
-    if (!header) {
-      header = makeGroupHeader(key);
-      var cont = makeGroupContainer();
-      if (lastNode) {
-        lastNode.after(header, cont);
-      } else {
-        el.appendChild(header);
-        el.appendChild(cont);
-      }
-    }
-    lastNode = header ? header.nextElementSibling : null;
-    if (lastNode) lastNode = lastNode.nextElementSibling; // after container
-  });
+  // Insert anchor: the next existing group header in GROUP_KEYS order, so a
+  // newly created group (e.g. Today when only Older existed) lands BEFORE the
+  // later group — appendChild alone would put it at the very end.
+  ensureGroupsInOrder(el, groups, findGroupHeader, makeGroupHeader, makeGroupContainer);
 
   // --- per-group session diff ---
   GROUP_KEYS.forEach(function(key) {
@@ -768,7 +865,7 @@ function toggleCollapse(id) {
 
 async function loadSession(id) {
   var sess;
-  try { sess = await api('/session/' + id + '?limit=50'); }
+  try { sess = await api('/session/' + id + '?limit=' + SESSIONS_PAGE); }
   catch(e) { console.error('loadSession error', e); return; }
   currentId = id;
   currentName = sess.name;
@@ -850,7 +947,7 @@ async function loadOlder() {
   if (!currentId || historyLoading || !currentHasMore || isStreaming) return;
   historyLoading = true;
   try {
-    var d = await api('/session/' + currentId + '/message?before=' + currentOldestId + '&limit=50');
+    var d = await api('/session/' + currentId + '/message?before=' + currentOldestId + '&limit=' + SESSIONS_PAGE);
     if (!d || !d.messages || d.messages.length === 0) { currentHasMore = false; return; }
     // Anchor preservation: prepending shifts content down, restore the viewport.
     var prevH = msgs.scrollHeight;
@@ -1191,6 +1288,7 @@ function addMessage(m, index, toolName, noScroll) {
 
 // --- SSE streaming ---
 function sendPrompt(prompt) {
+  conn.go('send');
   if (!currentId) {
     currentId = genUuidV4();
   }
@@ -1344,12 +1442,13 @@ function sendPrompt(prompt) {
   });
 
   evtSrc.onerror = function() {
+    if (evtSrc) { evtSrc.close(); evtSrc = null; }
     abortPrompt();
-    var spinners = asst.querySelectorAll('.spinner');
-    for (var j = 0; j < spinners.length; j++) spinners[j].remove();
+    conn.go('disconnect');
   };
 
   evtSrc.addEventListener('done', function(e) {
+    conn.go('done');
     if (evtSrc) { evtSrc.close(); evtSrc = null; }
     isStreaming = false;
     setStreaming(false);

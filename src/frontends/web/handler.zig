@@ -18,6 +18,11 @@ const timing = @import("../../util/timing.zig");
 const AlignedU8 = std.ArrayListAligned(u8, null);
 const Io = std.Io;
 
+/// Default page size for session/message pagination (3 处共享，D-04 提取）。
+const SESSION_PAGE_LIMIT: usize = 50;
+/// Per-session undo stack cap（与 :35 注释契约值耦合，D-04 提取）。
+const UNDO_CAP: usize = 20;
+
 const INDEX_HTML = @embedFile("index.html");
 const APP_CSS = @embedFile("app.css");
 const APP_JS = @embedFile("app.js");
@@ -279,7 +284,7 @@ fn handleSessionList(ctx: *Context, request: *std.http.Server.Request, a: std.me
     const limit_opt = extractQueryValue(request.head.target, "limit", a);
     defer if (limit_opt) |v| a.free(v);
     if (limit_opt) |lim_str| {
-        const limit = std.fmt.parseUnsigned(usize, lim_str, 10) catch 50;
+        const limit = std.fmt.parseUnsigned(usize, lim_str, 10) catch SESSION_PAGE_LIMIT;
         const after_opt = extractQueryValue(request.head.target, "after", a);
         defer if (after_opt) |v| a.free(v);
         const after_ts: ?i64 = if (after_opt) |ats| std.fmt.parseInt(i64, ats, 10) catch null else null;
@@ -382,7 +387,7 @@ fn handleSessionGet(ctx: *Context, request: *std.http.Server.Request, id: []cons
     const limit_opt = extractQueryValue(target, "limit", a);
     defer if (limit_opt) |v| a.free(v);
     if (limit_opt) |lim_str| {
-        const limit = std.fmt.parseUnsigned(usize, lim_str, 10) catch 50;
+        const limit = std.fmt.parseUnsigned(usize, lim_str, 10) catch SESSION_PAGE_LIMIT;
         return respondPagedSession(request, a, &session, computePage(session.messages(), null, limit));
     }
 
@@ -470,7 +475,7 @@ fn handleSessionMessages(ctx: *Context, request: *std.http.Server.Request, id: [
     const before_opt = extractQueryValue(target, "before", a);
     defer if (before_opt) |v| a.free(v);
 
-    const limit = if (limit_opt) |ls| std.fmt.parseUnsigned(usize, ls, 10) catch 50 else 50;
+    const limit = if (limit_opt) |ls| std.fmt.parseUnsigned(usize, ls, 10) catch SESSION_PAGE_LIMIT else SESSION_PAGE_LIMIT;
     const before_id: ?u64 = if (before_opt) |bs| std.fmt.parseUnsigned(u64, bs, 10) catch null else null;
     return respondPagedSession(request, a, &session, computePage(session.messages(), before_id, limit));
 }
@@ -1019,7 +1024,7 @@ fn pushUndo(ctx: *Context, session_id: []const u8, op: UndoOp) !void {
         list = new_list;
     }
     try list.?.append(al, op);
-    if (list.?.items.len > 20) _ = list.?.orderedRemove(0);
+    if (list.?.items.len > UNDO_CAP) _ = list.?.orderedRemove(0);
 }
 
 fn popUndo(ctx: *Context, session_id: []const u8) ?UndoOp {
@@ -1167,6 +1172,13 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
     agent.setSession(def_session);
 
     var done_buf: [4096]u8 = undefined;
+    // N19/N18: api_error finish 透传 error_msg 给前端（否则用户只见"流结束"无错误信息）
+    if (result.finish == .api_error) {
+        var ebuf: [256]u8 = undefined;
+        const emsg = result.error_msg orelse "api_error";
+        const epayload = std.fmt.bufPrint(&ebuf, "{{\"code\":\"api_error\",\"message\":\"{s}\"}}", .{emsg}) catch "{}";
+        sse_state.writeFrame("error", epayload) catch {};
+    }
     const msg = buildDonePayload(ctx.allocator, &done_buf, @as(u32, @intCast(result.new_message_count)), session.messages(), session.model, session_id) catch
         try std.fmt.bufPrint(&done_buf, "{{\"new_messages\":{d},\"session_id\":\"{s}\"}}", .{ result.new_message_count, session_id });
     log.dbg(ctx.thread_id, ctx.request_id, "sse_pre_done", "msgs={d}", .{result.new_message_count});

@@ -155,7 +155,7 @@ pub const Provider = struct {
             return chatCompletionStreamingOnce(self, arena, io, messages, tools, phase_writer) catch |err| {
                 if (attempt >= max_retries) return err;
                 switch (err) {
-                    error.Interrupted, error.ApiError => return err,
+                    error.Interrupted, error.ApiError, error.ContextOverflow => return err,
                     else => {
                         log.dbg(0, 0, "provider_retry", "attempt={d} err={s}", .{ attempt + 1, @errorName(err) });
                         continue;
@@ -287,6 +287,7 @@ pub const Provider = struct {
             };
 
             if (parsed.object.get("error")) |err_val| {
+                if (isContextOverflowError(err_val)) return error.ContextOverflow;
                 if (isRetryableError(err_val)) return error.ApiRateLimited;
                 return error.ApiError;
             }
@@ -447,6 +448,9 @@ pub const Provider = struct {
                 stderr_writer.interface.flush() catch {};
                 return error.ApiError;
             }
+            if (isContextOverflowBody(error_body_buf.items)) {
+                return error.ContextOverflow;
+            }
             if (isRetryableBody(error_body_buf.items)) {
                 return error.ApiRateLimited;
             }
@@ -466,6 +470,9 @@ pub const Provider = struct {
             }
             if (isAuthError(error_body_buf.items)) {
                 return error.ApiKeyNotSet;
+            }
+            if (isContextOverflowBody(error_body_buf.items)) {
+                return error.ContextOverflow;
             }
             if (isRetryableBody(error_body_buf.items)) {
                 return error.ApiRateLimited;
@@ -728,6 +735,36 @@ fn parseFinishReason(s: []const u8) types.FinishReason {
         if (std.mem.eql(u8, s, @tagName(tag))) return tag;
     }
     return .unknown;
+}
+
+/// Context-overflow keywords (context_length_exceeded / maximum context length /
+/// token limit). Single-purpose array — no cross-module reuse, kept inline.
+const overflow_kw = [_][]const u8{ "context_length_exceeded", "maximum context length", "context length", "token limit", "too long for the requested model" };
+
+/// Detect overflow from the SSE error JSON frame: type `context_length_exceeded`
+/// or message containing overflow keywords.
+fn isContextOverflowError(err_val: std.json.Value) bool {
+    if (err_val == .object) {
+        if (err_val.object.get("type")) |typ| {
+            if (typ == .string) {
+                for (overflow_kw) |kw| if (containsIgnoreCase(typ.string, kw)) return true;
+            }
+        }
+        if (err_val.object.get("message")) |msg| {
+            if (msg == .string) {
+                for (overflow_kw) |kw| if (containsIgnoreCase(msg.string, kw)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Detect overflow from a non-SSE error body (curl exit + error body).
+fn isContextOverflowBody(body: []const u8) bool {
+    for (overflow_kw) |kw| {
+        if (containsIgnoreCase(body, kw)) return true;
+    }
+    return false;
 }
 
 fn isRetryableError(err_val: std.json.Value) bool {
@@ -1284,4 +1321,24 @@ test "isRetryableBody fatal errors" {
     try std.testing.expect(!isRetryableBody("{\"error\":{\"message\":\"Invalid API key\"}}"));
     try std.testing.expect(!isRetryableBody("{\"error\":{\"type\":\"invalid_request_error\"}}"));
     try std.testing.expect(!isRetryableBody(""));
+}
+
+test "isContextOverflowBody keywords" {
+    try std.testing.expect(isContextOverflowBody("{\"error\":{\"message\":\"This model's maximum context length is 128000 tokens.\"}}"));
+    try std.testing.expect(isContextOverflowBody("{\"error\":{\"type\":\"context_length_exceeded\"}}"));
+    try std.testing.expect(isContextOverflowBody("token limit exceeded"));
+    try std.testing.expect(!isContextOverflowBody("Rate limit exceeded"));
+    try std.testing.expect(!isContextOverflowBody(""));
+}
+
+test "isContextOverflowError JSON frame" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ov = std.json.parseFromSliceLeaky(std.json.Value, a, "{\"error\":{\"type\":\"context_length_exceeded\"}}", .{}) catch unreachable;
+    try std.testing.expect(isContextOverflowError(ov.object.get("error").?));
+    const rl = std.json.parseFromSliceLeaky(std.json.Value, a, "{\"error\":{\"type\":\"rate_limit_error\"}}", .{}) catch unreachable;
+    try std.testing.expect(!isContextOverflowError(rl.object.get("error").?));
+    const empty = std.json.parseFromSliceLeaky(std.json.Value, a, "{\"error\":{\"message\":\"boom\"}}", .{}) catch unreachable;
+    try std.testing.expect(!isContextOverflowError(empty.object.get("error").?));
 }

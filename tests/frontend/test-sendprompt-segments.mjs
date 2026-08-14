@@ -85,6 +85,10 @@ globalThis.loadModels = () => {}
 globalThis.loadSessions = () => {}
 globalThis.setStreaming = () => {}
 
+// sendPrompt calls conn.go('send'); provide a minimal stub (full state machine
+// is exercised by dedicated tests, here we only need no-crash + phase bookkeeping)
+globalThis.conn = { phase: "idle", go: () => {} }
+
 // sendPrompt depends on buildSegment (already in app.js); extract + eval both
 globalThis.buildSegment = eval(`(${extract("buildSegment")})`)
 globalThis.sendPrompt = eval(`(${extract("sendPrompt")})`)

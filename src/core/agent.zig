@@ -269,6 +269,9 @@ pub const AgentLoop = struct {
 
         var tool_rounds: u32 = 0;
         var new_msgs: usize = 0;
+        // N18: one overflow-compact retry per turn. Loop-wide so a second
+        // overflow after compaction degrades to api_error instead of looping.
+        var overflow_retried = false;
 
         while (true) {
             if (self._aborted.load(.acquire)) {
@@ -334,6 +337,21 @@ pub const AgentLoop = struct {
                     error.Interrupted => {
                         signal.reset();
                         return finishTurn(self, new_msgs, .interrupted, err_name);
+                    },
+                    error.ContextOverflow => {
+                        if (!overflow_retried) {
+                            overflow_retried = true;
+                            const compacted = compact_mod.compactSession(self.provider_ref, self.session_ref, self.allocator, self.io, compact_mod.DEFAULT_KEEP_RECENT_TOKENS) catch {
+                                log.biz_error(0, 0, "agent_compact_failed", "err={s}", .{@errorName(err)});
+                                return finishTurn(self, new_msgs, .api_error, "context overflow: auto-compaction failed");
+                            };
+                            if (compacted) {
+                                log.biz_info(0, 0, "agent_overflow_retry", "retry=1", .{});
+                                continue; // 重试（循环顶重新评估中断/轮次上限）
+                            }
+                        }
+                        log.biz_info(0, 0, "agent_overflow_retry_fail", "retry=2", .{});
+                        return finishTurn(self, new_msgs, .api_error, "context overflow: compaction insufficient");
                     },
                     else => finishTurn(self, new_msgs, .api_error, err_name),
                 };
@@ -628,6 +646,7 @@ const MockChatter = struct {
     responses: []const types.ProviderResponse,
     index: usize,
     error_on_call: ?usize = null,
+    overflow_on_call: ?usize = null,
 };
 
 fn mockChat(
@@ -643,6 +662,9 @@ fn mockChat(
     const self: *MockChatter = @ptrCast(@alignCast(ctx.?));
     defer self.index += 1;
 
+    if (self.overflow_on_call) |oc| {
+        if (self.index == oc) return error.ContextOverflow;
+    }
     if (self.error_on_call) |eoc| {
         if (self.index == eoc) return error.ApiError;
     }
@@ -1050,6 +1072,97 @@ test "agent: runTurn api_error" {
 
     try std.testing.expectEqual(TurnFinish.api_error, result.finish);
     try std.testing.expectEqual(@as(usize, 0), result.new_message_count);
+}
+
+// N18: overflow but compactSession finds nothing compressible (few messages)
+// → "compaction insufficient" without attempting an LLM call. This also proves
+// the overflow branch fires at all (network-free, deterministic).
+test "agent: runTurn overflow with nothing compressible" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+
+    var p = provider.Provider{
+        .config = .{
+            .base_url = "https://api.test.com",
+            .api_key = "",
+            .model = "test-model",
+            .max_tokens = 1000,
+            .vendor = .standard,
+            .compat = .{},
+        },
+    };
+    const reg = registry_mod.buildRegistry();
+
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
+
+    var mock = MockChatter{
+        .responses = &.{},
+        .index = 0,
+        .overflow_on_call = 0,
+    };
+    agent.chat_fn = mockChat;
+    agent.chat_ctx = &mock;
+
+    // Too few messages → compactSession returns false without LLM call.
+    try sess.append(.{ .role = .system, .content = "sys" });
+    try sess.append(.{ .role = .user, .content = "hi" });
+
+    const result = try agent.runTurn(null, null);
+
+    try std.testing.expectEqual(TurnFinish.api_error, result.finish);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg orelse "", "compaction insufficient") != null);
+}
+
+// N18: overflow retry path when compactSession itself throws (LLM failure).
+// Test-only: inject via compactSession against a provider whose summarization
+// call fails immediately (empty api_key → ApiKeyNotSet) — no network needed.
+test "agent: runTurn overflow compact failure surfaces message" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+
+    // Unreachable endpoint → provider summarization fails fast (conn refused,
+    // no DNS wait, no network dependency).
+    var p = provider.Provider{
+        .config = .{
+            .base_url = "http://127.0.0.1:1",
+            .api_key = "test",
+            .model = "test-model",
+            .max_tokens = 1000,
+            .vendor = .standard,
+            .compat = .{},
+        },
+    };
+    const reg = registry_mod.buildRegistry();
+
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
+
+    var mock = MockChatter{
+        .responses = &.{},
+        .index = 0,
+        .overflow_on_call = 0,
+    };
+    agent.chat_fn = mockChat;
+    agent.chat_ctx = &mock;
+
+    // Enough + big enough messages (30 × ~1250 tokens > 20k budget) so
+    // compactSession passes the keep_start check and attempts a summarization
+    // call against the unreachable endpoint → throws → agent surfaces message.
+    const big = "a" ** 5000;
+    try sess.append(.{ .role = .system, .content = "sys" });
+    for (0..30) |_| {
+        try sess.append(.{ .role = .user, .content = big });
+    }
+
+    const result = try agent.runTurn(null, null);
+
+    try std.testing.expectEqual(TurnFinish.api_error, result.finish);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg orelse "", "auto-compaction failed") != null);
 }
 
 test "agent: runTurn appends to session" {

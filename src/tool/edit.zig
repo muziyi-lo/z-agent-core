@@ -206,8 +206,7 @@ fn testExec(ctx: types.ToolContext, args_json: []const u8) !types.ToolResult {
         const msg = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON: {s}", .{args_json});
         return types.ToolResult{ .session_content = msg };
     };
-    defer parsed.deinit();
-    return execute(ctx, parsed.value);
+    return types.ToolResult.finishExec(execute, ctx, parsed.value, parsed);
 }
 
 test "edit: replaces single occurrence" {

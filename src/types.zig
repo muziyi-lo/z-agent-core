@@ -125,10 +125,32 @@ pub const ToolResult = struct {
     /// Zero-copy view into session_content — NOT freed by deinit.
     user_output: ?[]const u8 = null,
     meta: ToolMeta = .none,
+    /// Owned parsed args JSON tree; keeps zero-copy meta borrows alive
+    /// until deinit (N14 fix: transferred via finishExec — single point).
+    /// CONTRACT: ToolResult must NOT be shallow-copied — args_owned carries a
+    /// pointer to a shared arena; a copy would double-deinit. Pass by pointer
+    /// or move; deep-copy (re-parse) if caching is ever needed.
+    args_owned: ?std.json.Parsed(std.json.Value) = null,
 
     pub fn deinit(self: *ToolResult, allocator: std.mem.Allocator) void {
         allocator.free(self.session_content);
         if (self.err_msg) |e| allocator.free(e);
+        if (self.args_owned) |*p| p.deinit();
+    }
+
+    /// Single ownership-transfer point: keeps `parsed` alive inside the result
+    /// so zero-copy meta borrows stay valid until deinit. All callers
+    /// (registry.execute, every tool's testExec) must delegate here — never
+    /// assign args_owned by hand.
+    pub fn finishExec(
+        exec: anytype,
+        ctx: ToolContext,
+        parsed: std.json.Value,
+        owned: std.json.Parsed(std.json.Value),
+    ) !ToolResult {
+        var result = try exec(ctx, parsed);
+        result.args_owned = owned;
+        return result;
     }
 };
 

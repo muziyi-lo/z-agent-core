@@ -103,7 +103,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 
 | 梯队 | 项 | 理由 |
 |------|----|------|
-| **P0 紧急**（正确性/稳定性，无依赖） | N13 → N14 → N19 → N18 | glob `**` bug；meta 悬垂 UB（先于一切 meta 相关改动）；SSE 断连无法恢复；压缩后无法继续 |
+| **P0 紧急**（正确性/稳定性，无依赖） | N13 → N14 → N19 → N18 | **✅ 全部已实施（2026-08-14，P0-FIXES）**：glob `**` bug；meta 悬垂 UB（先于一切 meta 相关改动）；SSE 断连无法恢复；压缩后无法继续 |
 | **P1 技术债/高价值** | F7（**先 N14**）→ N16 | JSON 模块重构（N14 修复并入 JsonWriter）；工具审批+预览（审批依赖权限基建可拆，预览独立） |
 | **P2 功能增强** | N17（依赖 N6）→ N15 → F8 → N4/N10 | 虚拟滚动先统一渲染契约；Web 待实现 5 件；title_model（subcall 基建已就绪）；响应式/skill 数组小改 |
 | **P3 长期/依赖未就绪** | N8/N9 → N6 → F3/F4/F9/F10/F11/F12 | 增量上下文（格式扩展）；契约统一（结构性）；MCP/记忆/事件总线等 |
@@ -126,13 +126,13 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | N10 | 多 skill 目录数组（`skills_dir = ["...", "..."]`） | 索引与 tool 按顺序查找同名 skill，前者优先（CONTEXT-ASSEMBLY F5）— **P2 小改** |
 | N11 | 会话系统优化（消息 ID 模型 + 按 ID 操作 + 分页/compact/history） | **一期 P1-P5 + 二期 OPT2 已实施（2026-08-12）**：一期=消息 id + 按 id 操作 + `(fork #N)` 分支（自动重答 + parent_id 分支树）+ 滚动状态机 + 三层流式防护 + `/active` + 游标分页 + `POST /compact` + undo 栈；二期=自动压缩触发（token 预算/迭代摘要/`last_compact_id`）+ CLI `/delete` + `sessions_subdir` + 删除保护/级联。见 `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT.md` + `PLAN-SESSION-SYSTEM-OPT2.md` |
 | N12 | 前端工具渲染优化（0.2.8 周期第二项） | **✅ 已实施（2026-08-13）**：工具卡片类型化渲染（ToolRegistry 纯函数化：webfetch url/format/mime 视图 + edit diff 高亮 + bash pre/code 幂等 + fallback 兜底）+ 服务端 ToolMeta 全字段持久化（Message.meta 挂 role=tool 消息，session serialize/parse/append + handler 透出）+ reload 路径挂载 applyToolType（meta 从 API 传入）。附带修复：system prompt 重复渲染（renderMessages 滤 system）+ 侧边栏高亮失效（增量 diff 刷 active 类）。见 `docs/0.2.8/PLAN-TOOL-CARD-TYPED.md` |
-| N13 | **glob `**` 递归匹配未实现**（0.2.6 计划搁浅，2026-08-13 审计发现）— **P0** | `docs/0.2.6/PLAN-GLOB-DOUBLE-STAR.md` 状态停在"计划中"，从未同步 REMAINING。实查 `src/tool/glob.zig:119-147` globMatch 无 `**/` 前缀处理——`**/*` 对任意文件名仍 false，与工具描述"Supports recursive search with **"矛盾。**与 JSON 模块同型被埋没（审计教训）**。修复 + 补 `**` 用例测试 |
-| N14 | **ToolMeta 借用 args Value 悬垂 UB**（0.2.0 标注延后，2026-08-13 审计升级）— **P0** | `docs/0.2.0/PLAN-OPT-3.1-TECHDEBT.md` B4：`meta.bash.command = cmd_val.string` 仍为借用（bash.zig:97/170），`registry.zig:30` `defer parsed.deinit()` 先于 meta 消费 → UB 侥幸运行。**0.2.8 meta 落盘持久化后风险升级**（借用进 JSONL）。修复：meta 字符串字段改为 owned dupe 或缩短生命周期。**F7 前置** |
+| N13 | **glob `**` 递归匹配未实现**（0.2.6 计划搁浅，2026-08-13 审计发现） | **✅ 已实施（2026-08-14，P0-FIXES）**：提取 `matchEntry` 统一入口（`**/` 前缀去前缀 + globMatch），walkDir 与 fixture 测试共用；fixture 驱动 9 条单测（含 `a/**/b` out-of-scope 探针）+ 2 集成测试。见 `docs/0.2.8/PLAN-P0-FIXES.md` |
+| N14 | **ToolMeta 借用 args Value 悬垂 UB**（0.2.0 标注延后，2026-08-13 审计升级） | **✅ 已实施（2026-08-14，P0-FIXES）**：`ToolResult.args_owned` 持有 parsed 所有权（不可浅拷贝契约）+ `finishExec` 单点转移方法；registry/8 工具 testExec 委托；修复 defer→errdefer 泄漏（unknown/validate 路径手动 deinit）。**F7 前置已解除**。见 `docs/0.2.8/PLAN-P0-FIXES.md` |
 | N15 | Web 待实现 5 件（DESIGN-WEB-RENDER §待实现表，2026-08-13 审计发现）— **P2** | 全部未登记：**输入历史**（上下箭头，app.js 无 inputHistory）、**导出对话**（`GET /api/session/:id/export`，handler 无端点）、**多会话标签页**、**消息编辑**（双击 inline + PATCH /message/:index）、**输入框响应式高度**（lh/vh） |
 | N16 | 工具审批 + 文件/图片预览（PARTS"高价值三件"剩余，2026-08-13 审计发现）— **P1** | PLAN-STREAM-ORDER-PARTS.md:272-275 明确"另立计划"但从未立。审批=ApprovalModal（危险命令确认，opencode 参考，依赖权限基建可拆独立做）；预览=file.tsx/file-media 内联渲染（读文件/看图，独立） |
 | N17 | 虚拟滚动（长会话卡顿）— **P2** | PLAN-STREAM-ORDER-PARTS.md:266——全量渲染，tanstack-virtual 类方案（对齐 opencode）。**依赖 N6 渲染契约统一** |
-| N18 | context overflow 自动恢复 — **P0** | PLAN-SESSION-SYSTEM-OPT2.md:231"列入后续"——压缩后模型继续正常输出 |
-| N19 | 错误边界 + SSE 重连/心跳 — **P0** | PLAN-STREAM-ORDER-PARTS.md:278-280——一个 JS 报错整页白屏；断开只能手动刷新 |
+| N18 | context overflow 自动恢复 | **✅ 已实施（2026-08-14，P0-FIXES）**：provider 新增 `error.ContextOverflow`（SSE error 帧 + error_body 双识别），重试循环跳过 overflow（零退避）；agent runTurn catch → compactSession 重试一次（`overflow_retried` 防循环），三条文案区分失败形态，Web error 帧透传。见 `docs/0.2.8/PLAN-P0-FIXES.md` |
+| N19 | 错误边界 + SSE 断连恢复 | **✅ 已实施（2026-08-14，P0-FIXES）**：全局错误边界（error/unhandledrejection → 横幅非白屏）+ `conn` 状态机（idle/streaming/recovering/degraded，单点分发，含 recovering--send 兜底 + 横幅闭环）+ api_error error 帧透传 + 恢复失败降级（1.5s 重试一次）。心跳留待后续。见 `docs/0.2.8/PLAN-P0-FIXES.md` |
 | N20 | **grep 正则支持**（OPT-3 采纳项未落地，2026-08-13 审计发现）— **P2** | `docs/0.2.0/PLAN-OPT-3-RENDER-TOOLS.md:415` 明确"采纳 `std.regex.Regex` 替代子串匹配"（✅ 标记）但**从未落地**——grep.zig:134/208 仍是 `std.mem.indexOf`（纯子串），LLM 写 `fn.*foo` 期望正则语义得到零匹配（OPT-3:405-409 已记录该痛点）。**根因**：计划基于旧 Zig 假设 `std.regex` 可用，**0.16 已移除该模块**（AGENTS.md 陷阱表确认）→ 替代方案未定 → 计划搁浅。**方案方向**：自实现轻量正则（项目已有 htmlToMarkdown 等手写解析先例）或评估子串+通配符增强（glob 模式复用）满足 LLM 常见需求 |
 
 ## Deferred (explicitly skipped)

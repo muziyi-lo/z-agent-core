@@ -64,5 +64,70 @@ console.log("groupSessions: null list")
   check("all empty for null", g.pinned.length === 0 && g.older.length === 0)
 }
 
+// --- ensureGroupsInOrder: group insertion order in incremental patch ---
+const ensureGroupsInOrder = eval(`(${extract("ensureGroupsInOrder")})`)
+
+// Minimal DOM: el holds [header, container, ...] flat; parentNode = el.
+function makeEl(tag, groupKey) {
+  const n = { tag, children: [], parentNode: null, _key: groupKey }
+  n.appendChild = (c) => { c.parentNode = n; n.children.push(c); return c }
+  n.insertBefore = (c, ref) => {
+    c.parentNode = n
+    const i = n.children.indexOf(ref)
+    if (i < 0) n.children.push(c); else n.children.splice(i, 0, c)
+    return c
+  }
+  return n
+}
+const el = makeEl("div")
+function findHeader(key) { return el.children.find((c) => c._key === key) || null }
+function makeHeader(key) { const h = makeEl("div"); h._key = key; return h }
+function makeContainer() { return makeEl("div") }
+
+console.log("ensureGroupsInOrder: today inserted before older (the bug)")
+{
+  // Only Older group exists in DOM; a new session makes Today non-empty.
+  const hdr = makeEl("div"); hdr._key = "older"; el.appendChild(hdr)
+  const cont = makeEl("div"); el.appendChild(cont)
+  const groups = { pinned: [], today: [1], yesterday: [], week: [], older: [2] }
+  ensureGroupsInOrder(el, groups, findHeader, makeHeader, makeContainer)
+  const keys = el.children.map((c) => c._key)
+  // today header + container must precede older header; container has no _key
+  check("today before older", keys.indexOf("today") < keys.indexOf("older"))
+  check("today header present", keys.filter((k) => k === "today").length === 1)
+  // today header's following sibling is its container (session-group)
+  const ti = keys.indexOf("today")
+  check("today container follows header", el.children[ti + 1] && !el.children[ti + 1]._key)
+}
+
+console.log("ensureGroupsInOrder: all groups empty appends nothing")
+{
+  el.children.length = 0
+  const g0 = { pinned: [], today: [], yesterday: [], week: [], older: [] }
+  ensureGroupsInOrder(el, g0, findHeader, makeHeader, makeContainer)
+  check("no groups created when empty", el.children.length === 0)
+}
+
+console.log("ensureGroupsInOrder: existing groups untouched, order preserved")
+{
+  el.children.length = 0
+  const h = makeEl("div"); h._key = "today"; el.appendChild(h)
+  const c = makeEl("div"); el.appendChild(c)
+  const g1 = { pinned: [], today: [1], yesterday: [], week: [], older: [] }
+  ensureGroupsInOrder(el, g1, findHeader, makeHeader, makeContainer)
+  check("today kept, no dup", el.children.filter((x) => x._key === "today").length === 1)
+}
+
+console.log("ensureGroupsInOrder: middle gap — yesterday when older exists")
+{
+  el.children.length = 0
+  const h = makeEl("div"); h._key = "older"; el.appendChild(h)
+  const c = makeEl("div"); el.appendChild(c)
+  const g2 = { pinned: [], today: [], yesterday: [1], week: [], older: [2] }
+  ensureGroupsInOrder(el, g2, findHeader, makeHeader, makeContainer)
+  const keys = el.children.map((x) => x._key)
+  check("yesterday before older", keys.indexOf("yesterday") < keys.indexOf("older"))
+}
+
 console.log(`\nresult: ${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

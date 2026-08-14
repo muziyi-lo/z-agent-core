@@ -22,24 +22,26 @@ pub const Registry = struct {
     handlers: []const ToolEntry,
 
     pub fn execute(self: Registry, ctx: types.ToolContext, name: []const u8, args_json: []const u8) anyerror!types.ToolResult {
-        const parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
+        var parsed = std.json.parseFromSlice(std.json.Value, ctx.allocator, args_json, .{ .ignore_unknown_fields = true }) catch {
             const msg = try std.fmt.allocPrint(ctx.allocator, "Error: invalid arguments JSON", .{});
             return types.ToolResult{ .session_content = msg };
         };
-        defer parsed.deinit();
+        errdefer parsed.deinit();
 
         for (self.handlers) |h| {
             if (std.mem.eql(u8, h.name, name)) {
                 if (h.validate) |v| {
                     if (v(parsed.value)) |err| {
                         const msg = try std.fmt.allocPrint(ctx.allocator, "{s}", .{err});
+                        parsed.deinit(); // validate 拦截：parsed 未转移，手动释放
                         return types.ToolResult{ .session_content = msg, .err_msg = err };
                     }
                 }
-                return h.execute(ctx, parsed.value);
+                return types.ToolResult.finishExec(h.execute, ctx, parsed.value, parsed);
             }
         }
         const msg = try std.fmt.allocPrint(ctx.allocator, "Error: unknown tool '{s}'", .{name});
+        parsed.deinit(); // 正常返回路径（非 finishExec）：parsed 未转移，手动释放
         return types.ToolResult{ .session_content = msg };
     }
 
