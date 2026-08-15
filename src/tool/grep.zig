@@ -207,8 +207,53 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, include: 
     var truncated = false;
     var files_scanned: usize = 0;
 
+    try walkDir(ctx, dir, &pat, include, steps, "", &buf, &matches, &truncated, &files_scanned);
+
+    if (matches == 0) {
+        return .{
+            .content = try std.fmt.allocPrint(ctx.allocator, "No matches found for '{s}'", .{pattern}),
+            .match_count = 0,
+            .files_scanned = files_scanned,
+            .truncated = false,
+        };
+    }
+    if (truncated and matches <= MAX_MATCHES) {
+        try buf.appendSlice(ctx.allocator, "[truncated: output limit reached]\n");
+    }
+
+    return .{
+        .content = try buf.toOwnedSlice(ctx.allocator),
+        .match_count = matches,
+        .files_scanned = files_scanned,
+        .truncated = truncated,
+    };
+}
+
+/// Recursively scan dir; rel_prefix is the "/"-joined path from the search
+/// root to this directory ("" for the root itself). Nested files are printed
+/// with their relative path so results stay usable by read/edit.
+/// *truncated doubles as a stop flag: once set (limit/max-matches/complexity
+/// reached) every level bails out so recursion halts across the whole tree.
+fn walkDir(ctx: types.ToolContext, dir: Io.Dir, pat: *const regex.Pattern, include: ?[]const u8, steps: *usize, rel_prefix: []const u8, buf: *std.ArrayListAligned(u8, null), matches: *usize, truncated: *bool, files_scanned: *usize) !void {
     var iter = dir.iterate();
-    outer: while (try iter.next(ctx.io)) |entry| {
+    while (try iter.next(ctx.io)) |entry| {
+        if (truncated.*) return;
+
+        if (entry.kind == .directory) {
+            if (dir.openDir(ctx.io, entry.name, .{ .iterate = true })) |subdir| {
+                defer subdir.close(ctx.io);
+                const sub_prefix = if (rel_prefix.len == 0)
+                    ctx.allocator.dupe(u8, entry.name) catch continue
+                else
+                    std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ rel_prefix, entry.name }) catch continue;
+                defer ctx.allocator.free(sub_prefix);
+                try walkDir(ctx, subdir, pat, include, steps, sub_prefix, buf, matches, truncated, files_scanned);
+            } else |err| switch (err) {
+                error.FileNotFound, error.NotDir, error.AccessDenied => {},
+                else => return err,
+            }
+            continue;
+        }
         if (entry.kind != .file) continue;
 
         if (include) |inc| {
@@ -216,11 +261,11 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, include: 
         }
 
         if (buf.items.len >= text_util.TOOL_COLLECT_LIMIT) {
-            truncated = true;
-            break;
+            truncated.* = true;
+            return;
         }
 
-        files_scanned += 1;
+        files_scanned.* += 1;
 
         const file = dir.openFile(ctx.io, entry.name, .{ .mode = .read_only }) catch continue;
         defer file.close(ctx.io);
@@ -232,6 +277,12 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, include: 
         defer ctx.allocator.free(file_content);
         const n = file.readPositionalAll(ctx.io, file_content, 0) catch continue;
 
+        const rel_path = if (rel_prefix.len == 0)
+            ctx.allocator.dupe(u8, entry.name) catch continue
+        else
+            std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ rel_prefix, entry.name }) catch continue;
+        defer ctx.allocator.free(rel_path);
+
         var file_has_match = false;
         var lines = std.mem.splitScalar(u8, file_content[0..n], '\n');
         var line_num: usize = 1;
@@ -240,27 +291,22 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, include: 
             const matched = pat.match(line, steps, ctx.allocator) catch {
                 // step budget exhausted: abort the whole directory scan
                 try buf.appendSlice(ctx.allocator, "... (match complexity limit reached)\n");
-                truncated = true;
-                break :outer;
+                truncated.* = true;
+                return;
             };
             if (matched) {
-                matches += 1;
-                if (matches > MAX_MATCHES) {
+                matches.* += 1;
+                if (matches.* > MAX_MATCHES) {
                     try buf.appendSlice(ctx.allocator, "... (max matches reached)\n");
-                    truncated = true;
-                    return .{
-                        .content = try buf.toOwnedSlice(ctx.allocator),
-                        .match_count = matches,
-                        .files_scanned = files_scanned,
-                        .truncated = truncated,
-                    };
+                    truncated.* = true;
+                    return;
                 }
                 if (buf.items.len >= text_util.TOOL_COLLECT_LIMIT) {
-                    truncated = true;
-                    break;
+                    truncated.* = true;
+                    return;
                 }
                 if (!file_has_match) {
-                    try buf.appendSlice(ctx.allocator, entry.name);
+                    try buf.appendSlice(ctx.allocator, rel_path);
                     try buf.appendSlice(ctx.allocator, ":\n");
                     file_has_match = true;
                 }
@@ -274,25 +320,6 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, include: 
             }
         }
     }
-
-    if (matches == 0) {
-        return .{
-            .content = try std.fmt.allocPrint(ctx.allocator, "No matches found for '{s}'", .{pattern}),
-            .match_count = 0,
-            .files_scanned = files_scanned,
-            .truncated = false,
-        };
-    }
-    if (truncated) {
-        try buf.appendSlice(ctx.allocator, "[truncated: output limit reached]\n");
-    }
-
-    return .{
-        .content = try buf.toOwnedSlice(ctx.allocator),
-        .match_count = matches,
-        .files_scanned = files_scanned,
-        .truncated = truncated,
-    };
 }
 
 fn globMatch(name: []const u8, pattern: []const u8) bool {
@@ -368,6 +395,61 @@ test "grep: no matches" {
     var result = try testExec(ctx, "{\"pattern\":\"xyzzy\",\"path\":\"search.txt\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "No matches") != null);
+}
+
+test "grep: directory search recurses into subdirs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-grep-dirrec";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    const test_path = try std.fs.path.join(allocator, &.{ test_root });
+    defer allocator.free(test_path);
+
+    {
+        const fp = try std.fs.path.join(allocator, &.{ test_root, "top.txt" });
+        defer allocator.free(fp);
+        const f = try Io.Dir.cwd().createFile(io, fp, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "no match here\n");
+    }
+    {
+        const sub = try std.fs.path.join(allocator, &.{ test_root, "sub" });
+        defer allocator.free(sub);
+        try Io.Dir.cwd().createDirPath(io, sub);
+    }
+    {
+        const fp = try std.fs.path.join(allocator, &.{ test_root, "sub", "nested.txt" });
+        defer allocator.free(fp);
+        const f = try Io.Dir.cwd().createFile(io, fp, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "def add_expense\n");
+    }
+    {
+        const deep = try std.fs.path.join(allocator, &.{ test_root, "sub", "deep" });
+        defer allocator.free(deep);
+        try Io.Dir.cwd().createDirPath(io, deep);
+    }
+    {
+        const fp = try std.fs.path.join(allocator, &.{ test_root, "sub", "deep", "leaf.md" });
+        defer allocator.free(fp);
+        const f = try Io.Dir.cwd().createFile(io, fp, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, "def leaf\n");
+    }
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_path,
+    };
+
+    var result = try testExec(ctx, "{\"pattern\":\"def\",\"path\":\".\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "sub/nested.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "sub/deep/leaf.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "top.txt") == null);
 }
 
 test "grep: regex pattern matches" {

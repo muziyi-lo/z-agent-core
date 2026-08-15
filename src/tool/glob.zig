@@ -92,7 +92,9 @@ fn walkDir(ctx: types.ToolContext, buf: *std.ArrayListAligned(u8, null), dir: Io
             return;
         }
 
-        const full_path = if (std.mem.eql(u8, prefix, ".") or std.mem.endsWith(u8, prefix, "/") or std.mem.endsWith(u8, prefix, "\\"))
+        const full_path = if (prefix.len == 0 or std.mem.eql(u8, prefix, "."))
+            try ctx.allocator.dupe(u8, entry.name)
+        else if (std.mem.endsWith(u8, prefix, "/") or std.mem.endsWith(u8, prefix, "\\"))
             try std.fmt.allocPrint(ctx.allocator, "{s}{s}", .{ prefix, entry.name })
         else
             try std.fmt.allocPrint(ctx.allocator, "{s}/{s}", .{ prefix, entry.name });
@@ -196,6 +198,44 @@ test "glob: finds files by extension" {
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "a.zig") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "b.txt") == null);
+}
+
+test "glob: dot path yields unprefixed top-level names" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-glob-prefix";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {}; // best-effort cleanup
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    {
+        const p = try std.fs.path.join(allocator, &.{ test_root, "a.zig" });
+        defer allocator.free(p);
+        (try Io.Dir.cwd().createFile(io, p, .{})).close(io);
+    }
+    {
+        const sub = try std.fs.path.join(allocator, &.{ test_root, "sub" });
+        defer allocator.free(sub);
+        try Io.Dir.cwd().createDirPath(io, sub);
+        const p = try std.fs.path.join(allocator, &.{ test_root, "sub", "b.zig" });
+        defer allocator.free(p);
+        (try Io.Dir.cwd().createFile(io, p, .{})).close(io);
+    }
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_root,
+    };
+
+    var result = try testExec(ctx, "{\"pattern\":\"**/*.zig\",\"path\":\".\"}");
+    defer result.deinit(allocator);
+    // top-level name must NOT carry a "." prefix (".a.zig" regression)
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, ".a.zig") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "a.zig") != null);
+    // nested path must be "sub/b.zig", not ".sub/b.zig" nor "./sub/b.zig"
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "sub/b.zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, ".sub/b.zig") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "./sub/b.zig") == null);
 }
 
 test "glob: no matches" {
