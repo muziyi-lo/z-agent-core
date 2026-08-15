@@ -3,6 +3,9 @@
 ## [Unreleased] - 0.2.8 周期（未发布）
 
 ### Added
+- **Web 输入历史 + 导出对话**（`docs/0.2.8/PLAN-N15-WEB-FEATURES.md`，N15 2/5）:
+  - **输入历史**: 上下箭头导航已发送 prompt。`promptHistory` 三纯函数（push/up/down，immutable 状态机：`cursor=-1` 新输入位、首次 Up 存 draft、Down 回底恢复 draft、尾连续重复去重）；keydown 集成保持 slash popover 优先；`historyNavGuard` 防程序赋值触发 input 事件误退出导航（setTimeout 双保险防 stale guard 吞键）；手动编辑即退出导航；发送记录挂 `sendPrompt`（slash 命令不记录）。新增 `tests/frontend/test-history-nav.mjs`（21 断言：push 空/去重、Up 边界、Down 回 draft、不可变性）
+  - **导出对话**: `GET /api/session/:id/export` 全量会话 JSON（`{name,model,exported_at,messages[]}`，复用 `writeMessagesRange`+`formatMessageJson` 与消息获取字节一致，name/model 走 `escapeAlloc`）；侧边栏 more-menu 新增 Export 按钮（两处渲染点），Blob + `<a download>` 触发下载，失败 `showStatus` 提示。实机验证: 57 条真实会话导出 JSON 合法 + 与 `GET /api/session/:id` 逐消息字节一致
 - **grep 正则支持**（`docs/0.2.8/PLAN-GREP-REGEX.md`，N20）: 新增 `src/util/regex.zig` 轻量正则引擎，替代 `std.regex`（0.16 已移除）。关键变更:
   - **语法子集**: 字面量/`.`/`^$` 锚点/字符类（POSIX 边界语义：首 `]` 字面量、首尾 `-` 字面量、降序范围报错）/分组/交替/量词（`*+?{n,m}` ≤1000）/类转义（`\d\w\s` ASCII）`\b`/字面转义；不支持构造（反向引用/前瞻/`(?i)`/`\p{}`）编译期报错
   - **next 链 AST**: 节点数组 + `next` 顺序连接（无 Sequence 变体），组/交替引用首节点，全部后向引用无悬空；`Pattern` 独占所有权（禁止浅拷贝，nodes 数组可整块 dupe 深拷贝）

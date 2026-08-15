@@ -99,6 +99,7 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
                 if (std.mem.eql(u8, sub_path, "message")) return handleSessionMessages(ctx, request, id, a);
                 if (std.mem.eql(u8, sub_path, "prompt")) return handlePrompt(ctx, request, id);
                 if (std.mem.eql(u8, sub_path, "history")) return handleHistory(ctx, request, id, a);
+                if (std.mem.eql(u8, sub_path, "export")) return handleSessionExport(ctx, request, id, a);
             } else {
                 const id = if (std.mem.indexOfScalar(u8, rest, '?')) |qm| rest[0..qm] else rest;
                 return handleSessionGet(ctx, request, id, a);
@@ -459,6 +460,33 @@ fn respondPagedSession(request: *std.http.Server.Request, a: std.mem.Allocator, 
     const tail = try std.fmt.allocPrint(a, "],\"has_more\":{s}}}", .{more_str});
     defer a.free(tail);
     try buf.appendSlice(a, tail);
+    try respondJson(request, buf.items);
+}
+
+/// GET /api/session/:id/export — full session dump for download (no paging).
+/// Mirrors handleSessionGet serialization (writeMessagesRange + formatMessageJson)
+/// so exported messages are byte-identical to what the UI renders.
+fn handleSessionExport(ctx: *Context, request: *std.http.Server.Request, id: []const u8, a: std.mem.Allocator) !void {
+    var session = loadSession(ctx, id) catch |err| {
+        if (err == error.InvalidSessionId) return err_mod.respondError(request, .bad_request, "invalid session id", a);
+        if (err == error.FileNotFound) return err_mod.respondError(request, .session_not_found, "session not found", a);
+        return err_mod.respondError(request, .internal_error, "failed to load session", a);
+    };
+    defer session.deinit();
+
+    const display_name = if (uuid_mod.isUuid(session.name)) "New Session" else session.name;
+    const name_esc = try jsonw.escapeAlloc(a, display_name);
+    defer a.free(name_esc);
+    const model_esc = try jsonw.escapeAlloc(a, session.model);
+    defer a.free(model_esc);
+    const clock_ts = Io.Clock.Timestamp.now(ctx.io, .real);
+    const hdr = try std.fmt.allocPrint(a, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"exported_at\":{d},\"messages\":[", .{ name_esc, model_esc, @as(i64, @intCast(Io.Timestamp.toSeconds(clock_ts.raw))) });
+    defer a.free(hdr);
+    var buf: AlignedU8 = .empty;
+    try buf.appendSlice(a, hdr);
+    const msgs = session.messages();
+    try writeMessagesRange(a, &buf, msgs, 0, msgs.len);
+    try buf.appendSlice(a, "]}");
     try respondJson(request, buf.items);
 }
 

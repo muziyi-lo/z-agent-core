@@ -90,6 +90,8 @@ globalThis.addCopyButton = () => {}
 globalThis.loadModels = () => {}
 globalThis.loadSessions = () => {}
 globalThis.setStreaming = () => {}
+globalThis.promptHistory = { entries: [], cursor: -1, draft: null }
+globalThis.promptHistoryPush = (state, text) => ({ entries: state.entries.concat(text), cursor: -1, draft: null })
 
 // sendPrompt calls conn.go('send'); provide a minimal stub (full state machine
 // is exercised by dedicated tests, here we only need no-crash + phase bookkeeping)

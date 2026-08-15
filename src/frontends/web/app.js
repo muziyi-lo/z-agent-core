@@ -579,7 +579,7 @@ function makeSessionNode(s, isPinned) {
     + '<button class="pin-btn' + (isPinned ? ' pinned' : '') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>'
     + '<button class="more-btn" title="More actions">&#8942;</button>'
     + '<span class="delete-btn">&times;</span>'
-    + '<div class="more-menu"><div class="more-item" data-act="rename">Rename</div><div class="more-item" data-act="fork">Fork</div><div class="more-item danger" data-act="reset">Reset</div><div class="more-item" data-act="pin">' + (isPinned ? 'Unpin' : 'Pin') + '</div><div class="more-item danger" data-act="delete">Delete</div></div>';
+    + '<div class="more-menu"><div class="more-item" data-act="rename">Rename</div><div class="more-item" data-act="fork">Fork</div><div class="more-item" data-act="export">Export</div><div class="more-item danger" data-act="reset">Reset</div><div class="more-item" data-act="pin">' + (isPinned ? 'Unpin' : 'Pin') + '</div><div class="more-item danger" data-act="delete">Delete</div></div>';
   div.querySelector('.pin-btn').onclick = function(e) { e.stopPropagation(); togglePin(s.id); loadSessions(); };
   div.querySelector('.delete-btn').onclick = function(e) { e.stopPropagation(); deleteSession(s.id); };
   div.querySelector('.more-btn').onclick = function(e) { e.stopPropagation(); closeAllMoreMenus(); div.querySelector('.more-menu').classList.toggle('open'); };
@@ -590,6 +590,7 @@ function makeSessionNode(s, isPinned) {
       var act = item.getAttribute('data-act');
       if (act === 'rename') { var ns = div.querySelector('.name'); ns.dispatchEvent(new MouseEvent('dblclick')); }
       else if (act === 'fork') { forkSession(s); }
+      else if (act === 'export') { exportSession(s); }
       else if (act === 'reset') { resetSession(s); }
       else if (act === 'pin') { togglePin(s.id); loadSessions(); }
       else if (act === 'delete') { deleteSession(s.id); }
@@ -678,7 +679,7 @@ async function loadSessions() {
       + '<button class="pin-btn' + (isPinned ? ' pinned' : '') + '" title="' + (isPinned ? 'Unpin' : 'Pin') + '">&#128204;</button>'
       + '<button class="more-btn" title="More actions">&#8942;</button>'
       + '<span class="delete-btn">&times;</span>'
-      + '<div class="more-menu"><div class="more-item" data-act="rename">Rename</div><div class="more-item" data-act="fork">Fork</div><div class="more-item danger" data-act="reset">Reset</div><div class="more-item" data-act="pin">' + (isPinned ? 'Unpin' : 'Pin') + '</div><div class="more-item danger" data-act="delete">Delete</div></div>';
+      + '<div class="more-menu"><div class="more-item" data-act="rename">Rename</div><div class="more-item" data-act="fork">Fork</div><div class="more-item" data-act="export">Export</div><div class="more-item danger" data-act="reset">Reset</div><div class="more-item" data-act="pin">' + (isPinned ? 'Unpin' : 'Pin') + '</div><div class="more-item danger" data-act="delete">Delete</div></div>';
 
     var collapseBtnEl = div.querySelector('.collapse-btn');
     if (collapseBtnEl) {
@@ -712,6 +713,7 @@ async function loadSessions() {
         var act = item.getAttribute('data-act');
         if (act === 'rename') { nameSpan.dispatchEvent(new MouseEvent('dblclick')); }
         else if (act === 'fork') { forkSession(s); }
+        else if (act === 'export') { exportSession(s); }
         else if (act === 'reset') { resetSession(s); }
         else if (act === 'pin') { togglePin(s.id); loadSessions(); }
         else if (act === 'delete') { deleteSession(s.id); }
@@ -1389,6 +1391,7 @@ function addMessage(m, index, toolName, noScroll) {
 
 // --- SSE streaming ---
 function sendPrompt(prompt) {
+  promptHistory = promptHistoryPush(promptHistory, prompt);
   conn.go('send');
   if (!currentId) {
     currentId = genUuidV4();
@@ -1685,6 +1688,57 @@ async function loadCwd() {
   } catch(e) { /* health fetch is best-effort; hide hint on failure */ }
 }
 
+// --- input history (N15): arrow-key navigation over sent prompts ---
+// State: { entries:[...sent prompts], cursor: -1 (=new-input position), draft }
+// Pure functions only — tested via tests/frontend/test-history-nav.mjs.
+var promptHistory = { entries: [], cursor: -1, draft: null };
+// Set while programmatically assigning input.value; the input event must not
+// treat that assignment as user editing (which would exit history navigation).
+var historyNavGuard = false;
+
+function promptHistoryPush(state, text) {
+  var t = String(text).trim();
+  if (!t) return state;
+  var entries = state.entries;
+  if (entries.length > 0 && entries[entries.length - 1] === t) return state;
+  return { entries: entries.concat(t), cursor: -1, draft: null };
+}
+
+function promptHistoryUp(state, currentValue) {
+  var n = state.entries.length;
+  if (n === 0) return { state: state, value: null };
+  if (state.cursor === -1) {
+    var last = n - 1;
+    return { state: { entries: state.entries, cursor: last, draft: currentValue }, value: state.entries[last] };
+  }
+  if (state.cursor === 0) return { state: state, value: state.entries[0] };
+  var next = state.cursor - 1;
+  return { state: { entries: state.entries, cursor: next, draft: state.draft }, value: state.entries[next] };
+}
+
+function promptHistoryDown(state) {
+  var n = state.entries.length;
+  if (n === 0 || state.cursor === -1) return { state: state, value: null };
+  var last = n - 1;
+  if (state.cursor === last) {
+    var draft = state.draft;
+    return { state: { entries: state.entries, cursor: -1, draft: null }, value: draft === null || draft === '' ? null : draft };
+  }
+  var next = state.cursor + 1;
+  return { state: { entries: state.entries, cursor: next, draft: state.draft }, value: state.entries[next] };
+}
+
+function applyHistoryValue(inp, value) {
+  historyNavGuard = true;
+  // Clear the guard on the next task even if the browser skips the input
+  // event for this assignment (e.g. same-value set), so a real keystroke is
+  // never swallowed by a stale guard.
+  setTimeout(function() { historyNavGuard = false; }, 0);
+  inp.value = value;
+  inp.style.height = '';
+  inp.style.height = Math.min(inp.scrollHeight, 200) + 'px';
+}
+
 document.getElementById('send-btn').onclick = function() {
   if (isStreaming) { abortPrompt(); return; }
   var inp = document.getElementById('prompt-input');
@@ -1704,14 +1758,31 @@ document.getElementById('prompt-input').onkeydown = function(e) {
     document.getElementById('send-btn').click();
   } else if (e.key === 'ArrowDown') {
     if (slashVisible) { e.preventDefault(); slashMove(1); }
+    else if (promptHistory.cursor !== -1) {
+      e.preventDefault();
+      var dn = promptHistoryDown(promptHistory);
+      promptHistory = dn.state;
+      if (dn.value !== null) applyHistoryValue(this, dn.value);
+    }
   } else if (e.key === 'ArrowUp') {
     if (slashVisible) { e.preventDefault(); slashMove(-1); }
+    else {
+      var up = promptHistoryUp(promptHistory, this.value);
+      if (up.value !== null) {
+        e.preventDefault();
+        promptHistory = up.state;
+        applyHistoryValue(this, up.value);
+      }
+    }
   } else if (e.key === 'Escape') {
     if (slashVisible) { e.preventDefault(); slashHide(); }
   }
 };
 
 document.getElementById('prompt-input').addEventListener('input', function() {
+  if (historyNavGuard) { historyNavGuard = false; return; }
+  // manual edit exits history navigation (returns to the new-input position)
+  if (promptHistory.cursor !== -1) promptHistory = { entries: promptHistory.entries, cursor: -1, draft: null };
   this.style.height = '';
   this.style.height = Math.min(this.scrollHeight, 200) + 'px';
   slashUpdate();
@@ -1929,6 +2000,26 @@ async function deleteSession(id) {
     }
     await loadSessions();
   } catch(e) { console.error(e); }
+}
+
+// Download the full session as a JSON file (GET /api/session/:id/export).
+function exportSession(s) {
+  fetch(A + '/session/' + s.id + '/export')
+    .then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.blob();
+    })
+    .then(function(blob) {
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'session-' + s.id + '.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    })
+    .catch(function(err) { showStatus('export failed: ' + err.message, true); });
 }
 
 function copyText(text, btn, doneLabel) {
