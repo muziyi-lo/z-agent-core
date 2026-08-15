@@ -2003,13 +2003,18 @@ async function deleteSession(id) {
 }
 
 // Download the full session as a JSON file (GET /api/session/:id/export).
+// The wire format is compact; pretty-printing happens here (browser JSON
+// engine) so the downloaded file is human-readable without touching the
+// server-side serializer (jsonw is compact-only, F7).
 function exportSession(s) {
   fetch(A + '/session/' + s.id + '/export')
     .then(function(r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.blob();
+      return r.text();
     })
-    .then(function(blob) {
+    .then(function(text) {
+      var pretty = JSON.stringify(JSON.parse(text), null, 2);
+      var blob = new Blob([pretty], { type: 'application/json' });
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
