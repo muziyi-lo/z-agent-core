@@ -45,17 +45,17 @@ pub const Level = enum(u8) {
     trace,
 };
 
-var current_level: std.atomic.Value(Level) = std.atomic.Value(Level).init(.debug);
+var current_level: std.atomic.Value(Level) = std.atomic.Value(Level).init(.info);
 
 /// Parse a level name from `ZAGENT_LOG_LEVEL` env (trace/debug/info/warn/error).
-/// Unknown or empty values fall back to debug.
+/// Unknown or empty values fall back to info.
 pub fn parseLevel(s: []const u8) Level {
     if (std.mem.eql(u8, s, "trace")) return .trace;
     if (std.mem.eql(u8, s, "debug")) return .debug;
     if (std.mem.eql(u8, s, "info")) return .info;
     if (std.mem.eql(u8, s, "warn")) return .warn;
     if (std.mem.eql(u8, s, "error")) return .error_;
-    return .debug;
+    return .info;
 }
 
 /// Log file settings (P2/P2.5 of PLAN-LOGGING-SYSTEM).
@@ -269,6 +269,6 @@ test "log: parseLevel maps names" {
     try std.testing.expectEqual(Level.info, parseLevel("info"));
     try std.testing.expectEqual(Level.warn, parseLevel("warn"));
     try std.testing.expectEqual(Level.error_, parseLevel("error"));
-    try std.testing.expectEqual(Level.debug, parseLevel("bogus"));
-    try std.testing.expectEqual(Level.debug, parseLevel(""));
+    try std.testing.expectEqual(Level.info, parseLevel("bogus"));
+    try std.testing.expectEqual(Level.info, parseLevel(""));
 }
