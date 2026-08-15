@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("../types.zig");
 const path_util = @import("../util/path.zig");
+const text_util = @import("../util/text.zig");
 
 pub const tool_name = "read";
 pub const tool_description = "Read a file or list a directory from the filesystem. For text files, returns content with optional offset/limit. For directories, lists entries.";
@@ -10,7 +11,6 @@ pub const tool_params =
 
 const MAX_BYTES: usize = 50 * 1024;
 const MAX_DIR_FILES: usize = 100;
-const BINARY_CHECK_SIZE: usize = 4096;
 const MAX_LINE_LEN: usize = 2000;
 const EXTENSION_BLACKLIST = [_][]const u8{ ".zip", ".exe", ".dll", ".so", ".dylib", ".bin", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".mp3", ".mp4", ".avi", ".mov", ".mkv", ".wav", ".flac", ".ogg", ".tar", ".gz", ".bz2", ".xz", ".7z" };
 
@@ -188,7 +188,7 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
         };
     }
 
-    const check_size = @min(file_size, BINARY_CHECK_SIZE);
+    const check_size = @min(file_size, text_util.BINARY_CHECK_SIZE);
     const head_buf = try ctx.allocator.alloc(u8, check_size);
     defer ctx.allocator.free(head_buf);
     _ = file.readPositionalAll(ctx.io, head_buf, 0) catch |err| {
@@ -196,7 +196,7 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
         return types.ToolResult{ .session_content = msg };
     };
 
-    if (isBinary(head_buf)) {
+    if (text_util.isBinary(head_buf)) {
         const msg = try std.fmt.allocPrint(ctx.allocator, "Error: cannot read binary file '{s}'", .{path_val.string});
         return types.ToolResult{ .session_content = msg };
     }
@@ -260,19 +260,6 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
         }},
     };
 }
-
-fn isBinary(data: []const u8) bool {
-    if (data.len == 0) return false;
-    var control: usize = 0;
-    for (data) |b| {
-        if (b == 0) return true;
-        if (b < 0x20 and b != '\n' and b != '\r' and b != '\t') {
-            control += 1;
-        }
-    }
-    return control * 100 / data.len > 30;
-}
-
 
 const Io = std.Io;
 

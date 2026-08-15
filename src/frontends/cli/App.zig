@@ -145,7 +145,7 @@ pub const App = struct {
             const f = Io.Dir.cwd().openFile(io, ap, .{ .mode = .read_only }) catch break :readAgents;
             defer f.close(io);
             const s = f.stat(io) catch break :readAgents;
-            if (s.size <= 0 or s.size > 65536) break :readAgents;
+            if (s.size <= 0 or s.size > types.FILE_READ_LIMIT) break :readAgents;
             const sz = @as(usize, @intCast(s.size));
             const content = allocator.alloc(u8, sz) catch break :readAgents;
             const n = f.readPositionalAll(io, content, 0) catch {

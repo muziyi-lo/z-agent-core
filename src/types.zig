@@ -3,6 +3,10 @@ const jsonw = @import("util/jsonw.zig");
 
 pub const VERSION = @import("build_options").version;
 
+/// Max file size read into memory for parsing, in BYTES
+/// (state/agent/skill files). Files larger than this are skipped.
+pub const FILE_READ_LIMIT: u64 = 64 * 1024;
+
 /// Chat message in the session history. All slices owned by session arena.
 /// `id` is a monotonic stable message identifier assigned by the session
 /// (see Session._next_id). Position-ordered for legacy files: ids follow

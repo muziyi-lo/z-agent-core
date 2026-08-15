@@ -135,10 +135,7 @@ pub const AgentLoop = struct {
         }
         var total: u32 = 0;
         for (msgs) |m| {
-            total += @as(u32, @intCast(m.content.len / 4));
-            if (m.reasoning_content) |rc| {
-                total += @as(u32, @intCast(rc.len / 4));
-            }
+            total += compact_mod.estimateTokens(m);
         }
         return total;
     }
@@ -152,7 +149,7 @@ pub const AgentLoop = struct {
         if (self.context_window == 0) return false;
 
         const context_tokens = self.estimateContextTokens();
-        const reserved: u32 = @max(@as(u32, 20000), self.context_window / 10);
+        const reserved: u32 = @max(compact_mod.DEFAULT_KEEP_RECENT_TOKENS, self.context_window / 10);
         const usable = if (self.context_window > reserved) self.context_window - reserved else self.context_window;
         if (context_tokens <= usable) return false;
 
@@ -304,13 +301,10 @@ pub const AgentLoop = struct {
                 // If no usage data available (e.g. loaded session), estimate from content length
                 if (!usage_based) {
                     for (self.session_ref.messages()) |msg| {
-                        total_used += @as(u32, @intCast(msg.content.len / 4));
-                        if (msg.reasoning_content) |rc| {
-                            total_used += @as(u32, @intCast(rc.len / 4));
-                        }
+                        total_used += compact_mod.estimateTokens(msg);
                     }
                 }
-                const reserved: u32 = @max(@as(u32, 20000), self.context_window / 10);
+                const reserved: u32 = @max(compact_mod.DEFAULT_KEEP_RECENT_TOKENS, self.context_window / 10);
                 const usable = if (self.context_window > reserved) self.context_window - reserved else self.context_window;
                 if (total_used > usable and !self._context_warning_injected) {
                     self._context_warning_injected = true;
@@ -558,7 +552,7 @@ fn readAgentsMd(self: *const AgentLoop) ?[]const u8 {
     const f = Io.Dir.cwd().openFile(self.io, ap, .{ .mode = .read_only }) catch return null;
     defer f.close(self.io);
     const s = f.stat(self.io) catch return null;
-    if (s.size <= 0 or s.size > 65536) return null;
+    if (s.size <= 0 or s.size > types.FILE_READ_LIMIT) return null;
     const sz = @as(usize, @intCast(s.size));
     const content = self.allocator.alloc(u8, sz) catch return null;
     const n = f.readPositionalAll(self.io, content, 0) catch {
@@ -583,7 +577,7 @@ fn appendSkillsList(self: *const AgentLoop, buf: *std.ArrayListAligned(u8, null)
         const sk = Io.Dir.cwd().openFile(self.io, skill_md, .{ .mode = .read_only }) catch continue;
         defer sk.close(self.io);
         const ss = sk.stat(self.io) catch continue;
-        if (ss.size <= 0 or ss.size > 65536) continue;
+        if (ss.size <= 0 or ss.size > types.FILE_READ_LIMIT) continue;
         const sz = @as(usize, @intCast(ss.size));
         const skill_content = self.allocator.alloc(u8, sz) catch continue;
         const nn = sk.readPositionalAll(self.io, skill_content, 0) catch {

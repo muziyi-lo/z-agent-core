@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("../types.zig");
 const signal = @import("../util/signal.zig");
+const text_util = @import("../util/text.zig");
 
 pub const tool_name = "bash";
 pub const tool_description =
@@ -121,8 +122,8 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
     defer if (err_clean.ptr != proc_result.stderr.ptr and proc_result.stderr.len > 0) ctx.allocator.free(err_clean);
 
     const total_len = out_clean.len + err_clean.len;
-    const out_binary = isBinaryContent(out_clean);
-    const err_binary = isBinaryContent(err_clean);
+    const out_binary = text_util.isBinary(out_clean);
+    const err_binary = text_util.isBinary(err_clean);
 
     var result_buf = std.ArrayListAligned(u8, null).empty;
 
@@ -182,19 +183,6 @@ fn timeoutSecs(t: Io.Timeout) u32 {
         .duration => |d| @intCast(@max(d.raw.toSeconds(), 1)),
         else => 0,
     };
-}
-
-fn isBinaryContent(data: []const u8) bool {
-    if (data.len == 0) return false;
-    var control: usize = 0;
-    const check_len = @min(data.len, 4096);
-    for (data[0..check_len]) |b| {
-        if (b == 0) return true;
-        if (b < 0x20 and b != '\n' and b != '\r' and b != '\t') {
-            control += 1;
-        }
-    }
-    return control * 100 / check_len > 30;
 }
 
 fn stripAnsi(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {

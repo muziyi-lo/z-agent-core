@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const types = @import("../types.zig");
 const path_util = @import("../util/path.zig");
+const text_util = @import("../util/text.zig");
 
 pub const tool_name = "grep";
 pub const tool_description = "Search for a pattern in file contents. Supports file and directory search with optional file filter.";
@@ -9,7 +10,6 @@ pub const tool_params =
     \\{"type":"object","properties":{"pattern":{"type":"string","description":"Substring or pattern to search for"},"path":{"type":"string","description":"File or directory path (defaults to project root)"},"include":{"type":"string","description":"Glob pattern to filter files (e.g. *.zig)"}},"required":["pattern"]}
 ;
 
-const MAX_OUTPUT: usize = 50 * 1024;
 const MAX_MATCHES: usize = 500;
 
 /// Search file contents for a pattern. Returns allocator-owned ToolResult.
@@ -138,7 +138,7 @@ fn searchFile(ctx: types.ToolContext, abs_path: []const u8, pattern: []const u8)
                 truncated = true;
                 break;
             }
-            if (buf.items.len >= MAX_OUTPUT) {
+            if (buf.items.len >= text_util.TOOL_COLLECT_LIMIT) {
                 try buf.appendSlice(ctx.allocator, "[truncated]\n");
                 truncated = true;
                 break;
@@ -183,7 +183,7 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, include: 
             if (!globMatch(entry.name, inc)) continue;
         }
 
-        if (buf.items.len >= MAX_OUTPUT) {
+        if (buf.items.len >= text_util.TOOL_COLLECT_LIMIT) {
             truncated = true;
             break;
         }
@@ -217,7 +217,7 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, include: 
                         .truncated = truncated,
                     };
                 }
-                if (buf.items.len >= MAX_OUTPUT) {
+                if (buf.items.len >= text_util.TOOL_COLLECT_LIMIT) {
                     truncated = true;
                     break;
                 }

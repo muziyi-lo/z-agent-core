@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("../types.zig");
 const path_util = @import("../util/path.zig");
+const text_util = @import("../util/text.zig");
 
 pub const tool_name = "glob";
 pub const tool_description = "Find files matching a glob pattern. Supports recursive search with **.";
@@ -8,7 +9,6 @@ pub const tool_params =
     \\{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern (e.g. *.zig, src/**/*.zig)"},"path":{"type":"string","description":"Base directory (default \".\")"}},"required":["pattern"]}
 ;
 
-const MAX_OUTPUT: usize = 50 * 1024;
 const MAX_ENTRIES: usize = 1000;
 
 /// Find files matching a glob pattern. Supports recursive **. Returns allocator-owned ToolResult.
@@ -87,7 +87,7 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
 fn walkDir(ctx: types.ToolContext, buf: *std.ArrayListAligned(u8, null), dir: Io.Dir, pattern: []const u8, prefix: []const u8, count: *usize, truncated: *bool) !void {
     var iter = dir.iterate();
     while (try iter.next(ctx.io)) |entry| {
-        if (buf.items.len >= MAX_OUTPUT or count.* >= MAX_ENTRIES) {
+        if (buf.items.len >= text_util.TOOL_COLLECT_LIMIT or count.* >= MAX_ENTRIES) {
             truncated.* = true;
             return;
         }

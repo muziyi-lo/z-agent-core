@@ -108,7 +108,7 @@ pub fn listAvailableSkills(allocator: std.mem.Allocator, io: std.Io, project_roo
         defer file.close(io);
 
         const size: usize = @intCast((file.stat(io) catch continue).size);
-        if (size == 0 or size > 65536) continue;
+        if (size == 0 or size > types.FILE_READ_LIMIT) continue;
         const content = allocator.alloc(u8, size) catch continue;
         defer allocator.free(content);
         _ = file.readPositionalAll(io, content, 0) catch continue;
