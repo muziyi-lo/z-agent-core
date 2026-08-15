@@ -44,6 +44,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | JSON-WRITER | `docs/0.2.8/PLAN-JSON-WRITER.md` | ✅ 已完成 (2026-08-14) — JsonWriter 收敛 4 份手写 JSON 拼接（F7） |
 | CARD-UNIFY | `docs/0.2.8/PLAN-CARD-UNIFY.md` | ✅ 已完成 (2026-08-14) — 可折叠卡片统一抽象 |
 | ISBINARY-UNIFY | `docs/0.2.8/PLAN-ISBINARY-UNIFY.md` | ✅ 已完成 (2026-08-15) — 魔法值全量提取（F14） |
+| GREP-REGEX | `docs/0.2.8/PLAN-GREP-REGEX.md` | ✅ 已完成 (2026-08-15) — grep 正则支持（N20，util/regex.zig） |
 
 ## Done (2026-08-06 — v0.2.5)
 
