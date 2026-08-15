@@ -95,6 +95,7 @@ globalThis.api = async () => ({
 globalThis.renderSystemPrompt = () => {}
 globalThis.wrapContextToolGroups = () => {}
 globalThis.loadSessions = () => {}
+globalThis.refreshUndoBtn = () => {}
 globalThis.renderMd = (s) => "[md:" + (s ?? "") + "]"
 globalThis.esc = (s) => String(s)
 globalThis.setTopbarTitle = () => {}

@@ -17,6 +17,12 @@
   - 新增 `tests/frontend/test-tool-registry.mjs`（17 断言：webfetch/bash 幂等/meta 累积/edit diff/fallback/空 meta 降级）
 
 ### Fixed
+- **侧边栏重复点击选中会话无处理 + 流式切换会话数据混入**（用户反馈）: ① `div.onclick` 直接调 `loadSession(s.id)` 无守卫——重复点击已选会话重复 GET + 全量重渲染 + 列表刷新。修复: `s.id === currentId` 时 no-op；② 侧边栏切换会话不关 `evtSrc`（`switchToSession` 有关闭，侧边栏路径遗漏）——流式中点击其他会话，旧 SSE 持续推送混入新会话渲染。修复: 切换前 `evtSrc.close()`。模型菜单重复点击选中项无副作用（本地变量 + 菜单关闭），不处理
+- **undo 按钮始终显示**（用户反馈）: `#undo-btn` 常驻 topbar 但多数会话无可撤销操作。修复: 按钮初始隐藏（`class="hidden"`），`loadSession` 后查询 `GET /history` 判断 undo 栈非空才显示（删除消息/截断/分支后自动出现，undo 或栈清空后隐藏）；API 失败安全降级隐藏。chrome-cdp 闭环验证: 无栈隐藏 → 删除消息显示 → undo 后隐藏
+- **移动端用户消息不可见（reload/发送均不显示）**（用户实测，移动端适配）: `.msg.user` 的 `margin-right:calc((100% - var(--msg-max-width)) / 2)` 在容器宽度 < 840px 时产生**负 margin**，用户气泡右边缘被推出视口（375px 屏时气泡 262px 中约 232px 在视口外），桌面窗口宽不触发。修复: 改为 `margin-right:calc((100% - min(100%, var(--msg-max-width))) / 2)`——桌面行为不变（min 取 840px），窄容器 min 取 100% → margin 0，气泡贴右正常显示。chrome-cdp 验证: 375px 容器内 `inside:true`（修复前右超 232px）
+- **移动端输入组件不可见**（用户实测，移动端适配）: body `height:100vh`——手机地址栏展开时 100vh 超出可见视口，底部 input-bar 被推出屏幕且 `overflow:hidden` 无法滚动（经典 100vh 陷阱）。修复: `height:100vh;height:100dvh` 双声明（现代浏览器用动态视口高度，旧浏览器回退 vh）；移动端 `#sidebar` 同步 dvh
+- **移动端侧边栏打开后无法收起**（用户实测）: ≤768px 时 `#sidebar` 变 `position:fixed` 脱离文档流，`#main` 扩展占满全宽使 topbar 从视口最左开始，toggle 按钮落在 sidebar 覆盖区（z-index:10）之下被挡住；且 sidebar 内无关闭按钮。修复: ① sidebar-header 新增 `#sidebar-close` × 按钮（仅移动端显示）；② 移动端点击 sidebar 外任意处关闭（document 委托，toggle 本身豁免）；③ toggle 移动端分支同步 aria-pressed；④ 移动端 `.open` 显式覆盖 width/min-width（防桌面 localStorage 的 sidebar-collapsed 残留致移动端宽度 0）
+- **DEBUG 日志默认泄漏到 CLI**（用户实测）: 日志系统默认级别为 `.debug`（`ZAGENT_LOG_LEVEL` 未设置时 parseLevel 也回退 debug），`provider_stream_start`/`subcall_spawned`/`title_updated` 等 dbg() 事件全量输出到 stderr，在 REPL 中与界面混排。修复: 默认级别降为 `.info`（含 parseLevel 未知/空值回退），debug 日志需显式 `ZAGENT_LOG_LEVEL=debug` 开启；日志文件 `.zagent/log/` 不受影响
 - **webfetch 首次运行 code -1**（用户实测）: 工具依赖 `.tmp/` 目录写 curl body 临时文件，但**从未创建该目录**——用户项目首次运行 `.tmp` 不存在时 curl `-o` 失败（exit 23 "Failed writing body"）→ 误报 `HTTP request failed (code -1)`。开发机测试时 `.tmp` 恰好存在未暴露。修复: doFetch 前 `createDir` 确保 `.tmp` 存在（已存在则忽略 PathAlreadyExists）
 - **工具输出 `<style>` 注入污染全局布局**（用户实测）: `renderMd`/`renderMdBlocks` 的 `DOMPurify.sanitize()` 默认**保留 `<style>` 标签**——bash 工具输出 example.com 原始 HTML（含 `<style>body{width:60vw;margin:15vh auto}</style>`）时，样式被浏览器执行 → 全局 body 偏移（margin 15vh/60vw）→ 侧栏错位。修复: `FORBID_TAGS: ['style', 'link']`。新增回归测试 `tests/frontend/test-rendermd-style-sanitize.mjs`（5 断言）
 - **system prompt 重复渲染**（用户实测）: `renderMessages` 未过滤 `role='system'` 消息——`#system-prompt` 独立渲染 + addMessage 又渲染一份 `.msg.system` 进消息流（DOM 两个 system 块）。修复: renderMessages 只渲染 `[Notice:` 前缀的警告 system（StormBreaker/max_rounds/context 警告），提示词本体与 spRebuild 补充段由 renderSystemPrompt 管理不重复进消息流
@@ -39,6 +45,12 @@
 - **reload 后工具命令输入块消失**（用户实测）: 服务端持久化 tool 消息 content 只存工具输出，不存 ` ```input` args header（流式时由 sse.zig 动态注入）→ reload 无法还原命令输入块。修复: renderMessages 工具段从 assistant tool_calls arguments 重建 ` ```input` 块（`ts.args !== '{}'` 时拼到 output 顶部），与流式格式一致。浏览器实测确认 input 块 + 输出正常显示
 
 ### Refactored
+- **魔法值全量提取**（`docs/0.2.8/PLAN-ISBINARY-UNIFY.md`，F14）: 3 类跨模块同值耦合收敛为共享常量 + isBinary/token 估算收敛为共享函数。关键变更:
+  - `types.FILE_READ_LIMIT`（64KB 文件体积守卫）: agent.zig 两处 + App.zig + skill.zig 四处裸 `65536` 收敛
+  - agent.zig 引用 `compact.DEFAULT_KEEP_RECENT_TOKENS`（原裸 `@max(20000, ...)` 两处）+ 复用 `compact.estimateTokens`（原裸 `len/4` 估算两处，消除双份逻辑漂移）
+  - `util/text.TOOL_COLLECT_LIMIT`（50KB 收集中止线）: grep/glob 删本地 `MAX_OUTPUT` 引用共享；read `MAX_BYTES`（截断语义）按设计保留独立
+  - `util/text.isBinary`（4096 窗口 + 30% 控制字符阈值）: bash `isBinaryContent`/read `isBinary`+`BINARY_CHECK_SIZE` 双份实现收敛，逐字节等价证明 + 7 条边界测试（len=0/恰 4096/4097 窗口截断/NUL 早退/30% 严格大于等，与旧实现逐字节对照）
+  - **新增 `check-magic.mjs` 扫描脚本**（zig-dev 技能）: 跨文件重复数字字面量自动过滤（乘法表达式归一化 + 字符串/注释剥离 + 0x00-0x1f 恒常忽略），D-04 审查项可自动化前置过滤；实施后 65536/20000 零跨文件重复
 - **JSON 序列化统一模块**（`docs/0.2.8/PLAN-JSON-WRITER.md`，F7）: 新增 `src/util/jsonw.zig`，4 处手写 JSON 拼接收敛为单一 JsonWriter。关键变更:
   - **JsonWriter**: 自动逗号 + 完整转义（含控制字符 `\u00XX` + 非法 UTF-8 `\ufffd`）+ 容器自平衡（begin/end 配对，深度上限 16）；`Result` 终态持有者（`deinit` 依模式决定释放）；`initFixed` 供 sse 热路径零分配
   - **转义统一 4→1**: session/provider/handler/sse 各自实现收敛为 `escapeInto`/`escapeAlloc`；handler/sse 修复缺控制字符转义的既有 bug（NUL/ESC 原样透出可能产生非法 JSON）

@@ -215,16 +215,29 @@ function biIcon(name, size) {
 }
 
 // --- sidebar toggle ---
+var sidebarEl = document.getElementById('sidebar');
+function closeMobileSidebar() {
+  sidebarEl.classList.remove('open');
+  document.getElementById('sidebar-toggle').setAttribute('aria-pressed', 'false');
+}
 document.getElementById('sidebar-toggle').onclick = function() {
   if (window.matchMedia('(max-width: 768px)').matches) {
     document.body.classList.remove('sidebar-collapsed');
-    document.getElementById('sidebar').classList.toggle('open');
+    sidebarEl.classList.toggle('open');
+    this.setAttribute('aria-pressed', sidebarEl.classList.contains('open') ? 'true' : 'false');
   } else {
     var collapsed = document.body.classList.toggle('sidebar-collapsed');
     localStorage.setItem('zagent-sidebar-collapsed', collapsed ? '1' : '0');
     this.setAttribute('aria-pressed', collapsed ? 'true' : 'false');
   }
 };
+document.getElementById('sidebar-close').onclick = closeMobileSidebar;
+document.addEventListener('click', function(e) {
+  if (!sidebarEl.classList.contains('open')) return;
+  if (sidebarEl.contains(e.target)) return;
+  if (e.target.closest('#sidebar-toggle')) return;
+  closeMobileSidebar();
+});
 if (localStorage.getItem('zagent-sidebar-collapsed') === '1') {
   document.body.classList.add('sidebar-collapsed');
   document.getElementById('sidebar-toggle').setAttribute('aria-pressed', 'true');
@@ -246,7 +259,16 @@ themeBtn.onclick = function() {
 })();
 
 // --- undo last session operation (delete/truncate/branch) ---
-document.getElementById('undo-btn').onclick = async function() {
+var undoBtn = document.getElementById('undo-btn');
+// Show the undo button only while the session has undoable operations
+// (server-side per-session LIFO stack, GET /history returns [] when empty).
+function refreshUndoBtn(sessionId) {
+  if (!sessionId) { undoBtn.classList.add('hidden'); return; }
+  api('/session/' + sessionId + '/history').then(function(list) {
+    undoBtn.classList.toggle('hidden', !(list && list.length > 0));
+  }).catch(function() { undoBtn.classList.add('hidden'); });
+}
+undoBtn.onclick = async function() {
   if (!currentId || isStreaming) return;
   try {
     await api('/session/' + currentId + '/undo', { method: 'POST' });
@@ -721,7 +743,11 @@ async function loadSessions() {
       input.select();
     };
 
-    div.onclick = function() { loadSession(s.id); };
+    div.onclick = function() {
+      if (s.id === currentId) return; // repeat click on selected item: no-op
+      if (evtSrc) { evtSrc.close(); evtSrc = null; } // stop streaming into the wrong session
+      loadSession(s.id);
+    };
     return div;
   }
 
@@ -889,6 +915,7 @@ async function loadSession(id) {
     scrollToBottom(msgs, true);
   }
   await loadSessions();
+  refreshUndoBtn(id);
 }
 
 // --- message-list pagination (load newest first, scroll up for older pages) ---
