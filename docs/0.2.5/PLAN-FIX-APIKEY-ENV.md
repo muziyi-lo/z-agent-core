@@ -1,6 +1,6 @@
 # Plan FIX-APIKEY-ENV: API Key 解析修复（空值误判 + .env 死代码）
 
-## 状态: 计划中
+## 状态: ✅ 已完成（v0.2.5，REMAINING 已标记）
 
 ## 前置依赖
 

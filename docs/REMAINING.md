@@ -34,6 +34,16 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | SLASH-COMMANDS | `docs/0.2.5/PLAN-SLASH-COMMANDS.md` | 实施中 — 阶段 1-4 完成（注册表/CLI dispatch/Web 命令 API/popover），阶段 5 prompt 命令待实施 |
 | MODEL-RESOLVE | `docs/0.2.5/PLAN-MODEL-RESOLVE.md` | ✅ 已完成 — 模型解析单一化（createSession 工厂 + env 快照 + resolveSessionModel 决策点），LRN-20260811-001 遗留债收尾 |
 | CONTEXT-ASSEMBLY | `docs/0.2.5/PLAN-CONTEXT-ASSEMBLY.md` | ✅ 已完成 — 上下文拼装修复（skill 索引 IsDir bug + skills_dir 配置化）+ env 补 Model/Date/Git + frontmatter 统一 + bash 禁令 |
+| SESSION-SYSTEM-OPT | `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT.md` | ✅ 已完成 (2026-08-12) — 消息 ID 模型 + 会话操作 + 滚动状态机 + 分支树 + 游标分页 + 压缩 + undo |
+| SESSION-SYSTEM-OPT2 | `docs/0.2.7/PLAN-SESSION-SYSTEM-OPT2.md` | ✅ 已完成 (2026-08-12) — 自动压缩触发 + CLI /delete + 删除级联清理 |
+| LOGGING-SYSTEM | `docs/0.2.7/PLAN-LOGGING-SYSTEM.md` | ✅ 已完成 (2026-08-12) — 关键路径日志 + 落盘轮转 + trace + 计时插桩 |
+| LLM-AUTO-TITLE | `docs/0.2.7/PLAN-LLM-AUTO-TITLE.md` | ✅ 已完成 (2026-08-13) — LLM 自动标题 |
+| SESSION-UI-FINAL | `docs/0.2.7/PLAN-SESSION-UI-FINAL.md` | ✅ 已完成 (2026-08-13) — 会话系统收尾 |
+| TOOL-CARD-TYPED | `docs/0.2.8/PLAN-TOOL-CARD-TYPED.md` | ✅ 已完成 (2026-08-13) — 工具卡片类型化渲染 + ToolMeta 全字段持久化（N12） |
+| P0-FIXES | `docs/0.2.8/PLAN-P0-FIXES.md` | ✅ 已完成 (2026-08-14) — glob `**`/ToolMeta UB/SSE 恢复/overflow 恢复（N13/N14/N19/N18） |
+| JSON-WRITER | `docs/0.2.8/PLAN-JSON-WRITER.md` | ✅ 已完成 (2026-08-14) — JsonWriter 收敛 4 份手写 JSON 拼接（F7） |
+| CARD-UNIFY | `docs/0.2.8/PLAN-CARD-UNIFY.md` | ✅ 已完成 (2026-08-14) — 可折叠卡片统一抽象 |
+| ISBINARY-UNIFY | `docs/0.2.8/PLAN-ISBINARY-UNIFY.md` | ✅ 已完成 (2026-08-15) — 魔法值全量提取（F14） |
 
 ## Done (2026-08-06 — v0.2.5)
 
@@ -183,7 +193,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | F11 | **事件总线 EventBus** — **P3** | PLAN-LOGGING-SYSTEM.md:194"后续 UI/日志订阅扩展时再评估"+ OPT-5 流式事件系统同源未闭合 |
 | F12 | **千问自定义分组**（SB5，登记声明落空）— **P3** | PLAN-DEEPSEEK-STYLE.md:141 自称"记 REMAINING"实际未记。模型分组/说明（M5）同源 |
 | F13 | **JsonWriter pretty 输出选项**（调试可读性）— **未来** | F7 评审提出：当前紧凑格式（JSONL/API/SSE 依赖），未来调试可读性可在 `JsonWriter` 加 `pretty: bool`（begin 后写换行 + 按 depth 缩进 + 元素间换行）。因所有输出已收敛走 JsonWriter，启用点为单一配置，纯增量不改默认紧凑输出。见 `docs/0.2.8/PLAN-JSON-WRITER.md` |
-| F14 | **魔法值全量审查与提取**（调研完成 2026-08-14，实施待排期） | 按 D-04 判据（同值≥2处/跨模块/有业务语义）全量扫描 `src/`。**已提取**：`SESSION_PAGE_LIMIT`/`UNDO_CAP`(handler)、`TITLE_MAX_CHARS`/`TITLE_PREFIX_LEN`(title，handler:1068 已引用)、`DEFAULT_TIMEOUT_SECS`/`MAX_TIMEOUT_SECS`(webfetch)、`DEFAULT_KEEP_RECENT_TOKENS`/`MIN_KEEP_MESSAGES`(compact)。**待提取候选**：①**`isBinary` 30% 控制字符阈值 + 4096 检查窗口——bash.zig:197 与 read.zig:273 同逻辑复制（跨模块同值同语义，D-03 逻辑重复）**，建议提取 `util/text.isBinary`（read 已有 `BINARY_CHECK_SIZE`=4096 常量可并入）；②render.zig 显示截断 30/50（`truncatePath`/`shorten` 多处裸值，显示语义，建议命名）。**判定维持现状**（无同值耦合，提取反而制造假耦合）：session.zig:449 消息数警告 `>50`（≠handler 分页 50）；session.zig:860 字节估算 `size/150`（单处）；sse.zig:236 分块 7000（单处）；栈缓冲 4096/8192 大量出现但无业务语义。触发：提取 `isBinary` 时顺手清 title/render 显示截断域 |
+| F14 | **魔法值全量审查与提取** | **✅ 已实施（2026-08-15，commit 4f4d88d）**：`types.FILE_READ_LIMIT`（64KB 文件守卫，agent/App/skill 四处 65536 收敛）、`util/text.TOOL_COLLECT_LIMIT`（50KB 收集中止，grep/glob 删 MAX_OUTPUT）、`util/text.isBinary` + `BINARY_CHECK_SIZE`/`BINARY_CONTROL_RATIO`（bash/read 双份实现收敛，逐字节等价 + 7 边界测试）、agent 引用 `compact.DEFAULT_KEEP_RECENT_TOKENS` + 复用 `estimateTokens`（消除 2 处裸 20000/2 处 len/4 估算）。**新增 `check-magic.mjs` 防回归脚本**（跨文件重复数字字面量过滤，乘法归一化 + 字符串/注释剥离 + 0x00-0x1f 恒常忽略）。**判定维持现状**：render.zig 显示截断 30/40/45/50/60/80（各语义不同）、session.zig 消息数警告 `>50`、`size/150`、sse.zig 7000 分块、栈缓冲 4096/8192、512KB 四处与 1MB 两处值同语义异（弱耦合）。见 `docs/0.2.8/PLAN-ISBINARY-UNIFY.md`（含实施偏差记录） |
 
 ## Architecture wishlist
 

@@ -4,7 +4,7 @@
 > 日期: 2026-08-13
 > 参考: ① 前身计划 `docs/0.2.5/PLAN-STREAM-ORDER-PARTS.md`（v0.2.5 parts 模型重构，已完成——本方案是它"后续演进·功能层高价值"清单的落地，其中 **diff/补丁视图位列第 273 行**）；② deepseek-harness `presentCall`/`presentResult` card 理念（纯函数 render intent，无副作用可重放）；③ opencode DiffView/工具审批（PARTS 计划第 272-273 行已扫描）；④ 历史 DOM 双轨教训（LRN-20260806-005/007、LRN-20260807-005）
 
-## 状态: 实施中（阶段 1-5 完成，L2 双路径验证通过 2026-08-13）
+## 状态: ✅ 已完成（2026-08-13，REMAINING N12 已标记实施）
 
 ## 前置依赖
 

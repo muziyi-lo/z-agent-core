@@ -1,6 +1,6 @@
 # Plan PHASE-5: WebFetch 工具
 
-## 状态: 计划中
+## 状态: 已被 `docs/0.2.8/PLAN-WEBFETCH.md` 取代（原始方案草稿，实施见后者，✅ 2026-08-13）
 
 ## 问题
 

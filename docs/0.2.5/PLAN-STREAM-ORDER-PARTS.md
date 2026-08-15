@@ -1,6 +1,6 @@
 # Plan STREAM-ORDER-PARTS: Web 前端 parts 模型重构（根治流式/双轨渲染顺序）
 
-## 状态: 计划中
+## 状态: ✅ 已完成（v0.2.5，REMAINING 已标记）
 
 ## 前置依赖
 
