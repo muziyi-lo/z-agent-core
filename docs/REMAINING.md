@@ -116,7 +116,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 |------|----|------|
 | **P0 紧急**（正确性/稳定性，无依赖） | N13 → N14 → N19 → N18 | **✅ 全部已实施（2026-08-14，P0-FIXES）**：glob `**` bug；meta 悬垂 UB（先于一切 meta 相关改动）；SSE 断连无法恢复；压缩后无法继续 |
 | **P1 技术债/高价值** | ~~F7~~ → N16 | JSON 模块重构 **✅ 已实施（2026-08-14，JSON-WRITER）**；工具审批+预览（审批依赖权限基建可拆，预览独立） |
-| **P2 功能增强** | N17（依赖 N6）→ N15 → F8 → N4/N10 | 虚拟滚动先统一渲染契约；Web 待实现 5 件；title_model（subcall 基建已就绪）；响应式/skill 数组小改 |
+| **P2 功能增强** | N17（依赖 N6）→ N15 → F8 → N4/N10 | 虚拟滚动先统一渲染契约；Web 待实现 3 件；title_model（subcall 基建已就绪）；响应式/skill 数组小改 |
 | **P3 长期/依赖未就绪** | N8/N9 → N6 → F3/F4/F9/F10/F11/F12 | 增量上下文（格式扩展）；契约统一（结构性）；MCP/记忆/事件总线等 |
 
 **依赖链（必须遵守）**：`N14(UB) → F7(JsonWriter,✅)` · `N6(契约统一) → N17(虚拟滚动)` · `F2(subcall 基建,已完) → F8` · `N8 → N9(同 provider 缓存域)` · `F6 长期项 → N16 审批部分`
@@ -139,7 +139,7 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | N12 | 前端工具渲染优化（0.2.8 周期第二项） | **✅ 已实施（2026-08-13）**：工具卡片类型化渲染（ToolRegistry 纯函数化：webfetch url/format/mime 视图 + edit diff 高亮 + bash pre/code 幂等 + fallback 兜底）+ 服务端 ToolMeta 全字段持久化（Message.meta 挂 role=tool 消息，session serialize/parse/append + handler 透出）+ reload 路径挂载 applyToolType（meta 从 API 传入）。附带修复：system prompt 重复渲染（renderMessages 滤 system）+ 侧边栏高亮失效（增量 diff 刷 active 类）。见 `docs/0.2.8/PLAN-TOOL-CARD-TYPED.md` |
 | N13 | **glob `**` 递归匹配未实现**（0.2.6 计划搁浅，2026-08-13 审计发现） | **✅ 已实施（2026-08-14，P0-FIXES）**：提取 `matchEntry` 统一入口（`**/` 前缀去前缀 + globMatch），walkDir 与 fixture 测试共用；fixture 驱动 9 条单测（含 `a/**/b` out-of-scope 探针）+ 2 集成测试。见 `docs/0.2.8/PLAN-P0-FIXES.md` |
 | N14 | **ToolMeta 借用 args Value 悬垂 UB**（0.2.0 标注延后，2026-08-13 审计升级） | **✅ 已实施（2026-08-14，P0-FIXES）**：`ToolResult.args_owned` 持有 parsed 所有权（不可浅拷贝契约）+ `finishExec` 单点转移方法；registry/8 工具 testExec 委托；修复 defer→errdefer 泄漏（unknown/validate 路径手动 deinit）。**F7 前置已解除**。见 `docs/0.2.8/PLAN-P0-FIXES.md` |
-| N15 | Web 待实现 5 件（DESIGN-WEB-RENDER §待实现表，2026-08-13 审计发现）— **P2** | **2/5 已实施（2026-08-16，PLAN-N15-WEB-FEATURES）**：**输入历史**（上下箭头，promptHistory 纯函数三件套 push/up/down + draft 恢复 + guard 防 input 误重置，Node 测试 21 断言）、**导出对话**（`GET /api/session/:id/export` 全量消息 JSON + more-menu Export 按钮 + Blob 下载）。剩余 3 件：**多会话标签页**、**消息编辑**（双击 inline + PATCH /message/:index）、**输入框响应式高度**（lh/vh） |
+| N15 | Web 待实现 5 件（DESIGN-WEB-RENDER §待实现表，2026-08-13 审计发现）— **P2** | **2/5 已实施（2026-08-16，PLAN-N15-WEB-FEATURES）**：**输入历史**（上下箭头，promptHistory 纯函数三件套 push/up/down + draft 恢复 + guard 防 input 误重置，Node 测试 21 断言）、**导出对话**（`GET /api/session/:id/export` 全量消息 JSON + more-menu Export 按钮 + 前端 pretty 下载，文件名 `sessionExportFileName` sanitize 会话名/uuid 回退 id，Node 测试 15 断言）。剩余 3 件：**多会话标签页**、**消息编辑**（双击 inline + PATCH /message/:index）、**输入框响应式高度**（lh/vh） |
 | N16 | 工具审批 + 文件/图片预览（PARTS"高价值三件"剩余，2026-08-13 审计发现）— **P1** | PLAN-STREAM-ORDER-PARTS.md:272-275 明确"另立计划"但从未立。审批=ApprovalModal（危险命令确认，opencode 参考，依赖权限基建可拆独立做）；预览=file.tsx/file-media 内联渲染（读文件/看图，独立） |
 | N17 | 虚拟滚动（长会话卡顿）— **P2** | PLAN-STREAM-ORDER-PARTS.md:266——全量渲染，tanstack-virtual 类方案（对齐 opencode）。**依赖 N6 渲染契约统一** |
 | N18 | context overflow 自动恢复 | **✅ 已实施（2026-08-14，P0-FIXES）**：provider 新增 `error.ContextOverflow`（SSE error 帧 + error_body 双识别），重试循环跳过 overflow（零退避）；agent runTurn catch → compactSession 重试一次（`overflow_retried` 防循环），三条文案区分失败形态，Web error 帧透传。见 `docs/0.2.8/PLAN-P0-FIXES.md` |
@@ -162,13 +162,13 @@ PHASE-6 (TUI) — 备选方案，待 Zig 生态成熟后再评估
 | R10 | bash 外部目录警告 | 权限系统范式不同 |
 | R12 | 证据回执系统（Evidence Ledger） | 工具间交叉验证，需独立设计 |
 | R13 | 并行调度分区 | 后期性能优化 |
-| R14 | Web 输入框响应式高度（lh/vh）+ 多会话标签页 | DESIGN-WEB-RENDER §待实现表 |
+| R14 | Web 输入框响应式高度（lh/vh）+ 多会话标签页 | 并入 N15 剩余（同 DESIGN-WEB-RENDER §待实现表） |
 | R15 | bash 长输出存档（超限写 `.zagent/tool-output/`） | OPT-3.1 T2-7 |
 | R16 | 回收站/软删除（`.zagent/trash`） | SESSION-SYSTEM-OPT2"列入后续评估" |
 | R17 | 输入准入 steer/queue + RunCoordinator | SESSION-SYSTEM-OPT"后续架构演进" |
 | R18 | OPT-3 延后债 6 项（ToolCard 表解耦/toTools schema 缓存/ToolLimits/write old_lines 真实值/ToolEntry.validate 注册/render error 日志） | PLAN-OPT-3-RENDER-TOOLS.md:9-16 顶部延后表，实查均未落地 |
 | R19 | S12 跟随系统（prefers-color-scheme 三态） | PLAN-DEEPSEEK-STYLE.md:342"本期不做（后续）" |
-| R20 | MG5 分享/批量/移动分组（导出部分=N15） | PLAN-DEEPSEEK-STYLE.md |
+| R20 | MG5 分享/批量/移动分组（导出部分已由 N15 完成，2026-08-16） | PLAN-DEEPSEEK-STYLE.md |
 | R21 | R4 Prism 替换 hljs | PLAN-DEEPSEEK-STYLE.md |
 | R22 | 用户自定义命令（source 字段已预留）+ 完整 init/review/skill 命令 | PLAN-SLASH-COMMANDS.md:14,141 |
 | R23 | headless browser 方案（动态页面渲染） | PLAN-WEBFETCH.md:55"动态页面留给未来" |

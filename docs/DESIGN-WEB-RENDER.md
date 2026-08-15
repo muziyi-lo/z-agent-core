@@ -428,12 +428,12 @@ CSS 变量定义位置: `index.html` `<style>` 块 `:root{}` 伪类 (line 10-28)
 |--------|------|---------|------|
 | **高** | **@container 响应式** | index.html | `#sidebar{container-type:inline-size}`；窄屏自动隐藏 `.meta`、缩放字号（见 §1） |
 | **低** | **输入框响应式高度** | index.html | 改用 `lh` + `vh` 单位：`min-height:1lh; max-height:min(6lh,25vh)` |
-| **低** | **输入历史** (上下箭头) | index.html | `inputHistory[]` 栈，ArrowUp 回溯已发送 prompt |
-| **低** | **导出对话** | handler.zig | `GET /api/session/:id/export` → JSONL 下载 |
+| **低** | **输入历史** (上下箭头) | index.html | ✅ 已完成（2026-08-16，`docs/0.2.8/PLAN-N15-WEB-FEATURES.md`）：`promptHistory` 三纯函数 + keydown 集成 + draft 恢复 + guard |
+| **低** | **导出对话** | handler.zig | ✅ 已完成（2026-08-16，`docs/0.2.8/PLAN-N15-WEB-FEATURES.md`）：`GET /api/session/:id/export`。**偏差：实现为 JSON（`{name,model,exported_at,messages[]}`，前端 pretty 后下载）而非设计稿 JSONL**——理由：单文档保留会话元信息 + 前端 `JSON.parse` 直接可读 |
 | **低** | **多会话标签页** | index.html | 同时打开多个 session，标签页切换 |
 | **低** | **消息编辑** | index.html + handler.zig | 双击 user/assistant 消息 → inline 编辑 → `PATCH /api/session/:id/message/:index` |
 
-已完成移除项: G7 滚动中断(P3-1)、G13 主题系统(P4)、ToolMeta 透传(P2-3)、工具名加载(P2-1)。
+已完成移除项: G7 滚动中断(P3-1)、G13 主题系统(P4)、ToolMeta 透传(P2-3)、工具名加载(P2-1)、输入历史(2026-08-16, PLAN-N15)、导出对话(2026-08-16, PLAN-N15)。
                                                                                 (本页工具卡片加载工具名伪代码已在 P2-1 实现，不再重复)
 
 ## 设计差距分析（对照 opencode 评审）
