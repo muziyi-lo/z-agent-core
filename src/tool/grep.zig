@@ -3,11 +3,12 @@ const builtin = @import("builtin");
 const types = @import("../types.zig");
 const path_util = @import("../util/path.zig");
 const text_util = @import("../util/text.zig");
+const regex = @import("../util/regex.zig");
 
 pub const tool_name = "grep";
-pub const tool_description = "Search for a pattern in file contents. Supports file and directory search with optional file filter.";
+pub const tool_description = "Search for a regex pattern in file contents. Supports file and directory search with optional file filter.";
 pub const tool_params =
-    \\{"type":"object","properties":{"pattern":{"type":"string","description":"Substring or pattern to search for"},"path":{"type":"string","description":"File or directory path (defaults to project root)"},"include":{"type":"string","description":"Glob pattern to filter files (e.g. *.zig)"}},"required":["pattern"]}
+    \\{"type":"object","properties":{"pattern":{"type":"string","description":"Regex pattern. Supported: ^ $ . [...] [^...] [a-z] (...) a|b * + ? {n} {n,} {n,m} \\d \\w \\s \\b and escaped literals. Unsupported (compile error): backreferences, (?= lookahead, (?i flags, \\p{...}, \\B, \\A, \\z. NOTE: empty alternation branches (a|, |a, a||b) make the pattern match everywhere - avoid unless intended. Quantifier bounds ≤ 1000, nesting ≤ 64."},"path":{"type":"string","description":"File or directory path (defaults to project root)"},"include":{"type":"string","description":"Glob pattern to filter files (e.g. *.zig)"}},"required":["pattern"]}
 ;
 
 const MAX_MATCHES: usize = 500;
@@ -51,9 +52,10 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
     };
     defer ctx.allocator.free(resolved);
 
+    var steps: usize = 0;
     if (Io.Dir.cwd().openDir(ctx.io, resolved, .{ .iterate = true })) |dir| {
         defer dir.close(ctx.io);
-        const gr = try searchDir(ctx, dir, pattern_val.string, include);
+        const gr = try searchDir(ctx, dir, pattern_val.string, include, &steps);
         return types.ToolResult{
             .session_content = gr.content,
             .meta = .{ .grep = .{
@@ -69,7 +71,7 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
         else => return err,
     }
 
-    const gr = try searchFile(ctx, resolved, pattern_val.string);
+    const gr = try searchFile(ctx, resolved, pattern_val.string, &steps);
     return types.ToolResult{
         .session_content = gr.content,
         .meta = .{ .grep = .{
@@ -98,7 +100,19 @@ fn countMatches(result: []const u8) usize {
     return count;
 }
 
-fn searchFile(ctx: types.ToolContext, abs_path: []const u8, pattern: []const u8) !GrepResult {
+fn searchFile(ctx: types.ToolContext, abs_path: []const u8, pattern: []const u8, steps: *usize) !GrepResult {
+    const compiled = regex.compile(ctx.allocator, pattern) catch return error.OutOfMemory;
+    var pat = switch (compiled) {
+        .ok => |p| p,
+        .err => |e| return .{
+            .content = try std.fmt.allocPrint(ctx.allocator, "Error: invalid regex pattern '{s}': {s} at position {d}", .{ pattern, regex.errorDetail(e.code), e.pos }),
+            .match_count = 0,
+            .files_scanned = 1,
+            .truncated = false,
+        },
+    };
+    defer pat.deinit();
+
     const file = Io.Dir.cwd().openFile(ctx.io, abs_path, .{ .mode = .read_only }) catch |err| {
         return .{
             .content = try std.fmt.allocPrint(ctx.allocator, "Error: cannot open '{s}': {s}", .{ abs_path, @errorName(err) }),
@@ -131,7 +145,13 @@ fn searchFile(ctx: types.ToolContext, abs_path: []const u8, pattern: []const u8)
     var line_num: usize = 1;
     while (lines.next()) |raw_line| : (line_num += 1) {
         const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r') raw_line[0 .. raw_line.len - 1] else raw_line;
-        if (std.mem.indexOf(u8, line, pattern)) |_| {
+        const matched = pat.match(line, steps, ctx.allocator) catch {
+            // step budget exhausted: abort the scan, keep collected results
+            try buf.appendSlice(ctx.allocator, "... (match complexity limit reached)\n");
+            truncated = true;
+            break;
+        };
+        if (matched) {
             matches += 1;
             if (matches > MAX_MATCHES) {
                 try buf.appendSlice(ctx.allocator, "... (max matches reached)\n");
@@ -169,14 +189,26 @@ fn searchFile(ctx: types.ToolContext, abs_path: []const u8, pattern: []const u8)
     };
 }
 
-fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, include: ?[]const u8) !GrepResult {
+fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, include: ?[]const u8, steps: *usize) !GrepResult {
+    const compiled = regex.compile(ctx.allocator, pattern) catch return error.OutOfMemory;
+    var pat = switch (compiled) {
+        .ok => |p| p,
+        .err => |e| return .{
+            .content = try std.fmt.allocPrint(ctx.allocator, "Error: invalid regex pattern '{s}': {s} at position {d}", .{ pattern, regex.errorDetail(e.code), e.pos }),
+            .match_count = 0,
+            .files_scanned = 0,
+            .truncated = false,
+        },
+    };
+    defer pat.deinit();
+
     var buf = std.ArrayListAligned(u8, null).empty;
     var matches: usize = 0;
     var truncated = false;
     var files_scanned: usize = 0;
 
     var iter = dir.iterate();
-    while (try iter.next(ctx.io)) |entry| {
+    outer: while (try iter.next(ctx.io)) |entry| {
         if (entry.kind != .file) continue;
 
         if (include) |inc| {
@@ -205,7 +237,13 @@ fn searchDir(ctx: types.ToolContext, dir: Io.Dir, pattern: []const u8, include: 
         var line_num: usize = 1;
         while (lines.next()) |raw_line| : (line_num += 1) {
             const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r') raw_line[0 .. raw_line.len - 1] else raw_line;
-            if (std.mem.indexOf(u8, line, pattern)) |_| {
+            const matched = pat.match(line, steps, ctx.allocator) catch {
+                // step budget exhausted: abort the whole directory scan
+                try buf.appendSlice(ctx.allocator, "... (match complexity limit reached)\n");
+                truncated = true;
+                break :outer;
+            };
+            if (matched) {
                 matches += 1;
                 if (matches > MAX_MATCHES) {
                     try buf.appendSlice(ctx.allocator, "... (max matches reached)\n");
@@ -330,4 +368,81 @@ test "grep: no matches" {
     var result = try testExec(ctx, "{\"pattern\":\"xyzzy\",\"path\":\"search.txt\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "No matches") != null);
+}
+
+test "grep: regex pattern matches" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-grep-regex";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    const test_path = try std.fs.path.join(allocator, &.{ test_root });
+    defer allocator.free(test_path);
+
+    const fp = try std.fs.path.join(allocator, &.{ test_root, "code.txt" });
+    defer allocator.free(fp);
+    const f = try Io.Dir.cwd().createFile(io, fp, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, "fn foo() {}\nimport std;\ntimeout 1500ms\nother line\n");
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_path,
+    };
+
+    // dot-star spans the gap
+    {
+        var result = try testExec(ctx, "{\"pattern\":\"fn.*foo\",\"path\":\"code.txt\"}");
+        defer result.deinit(allocator);
+        try std.testing.expect(std.mem.indexOf(u8, result.session_content, "fn foo") != null);
+    }
+    // line-start anchor
+    {
+        var result = try testExec(ctx, "{\"pattern\":\"^import\",\"path\":\"code.txt\"}");
+        defer result.deinit(allocator);
+        try std.testing.expect(std.mem.indexOf(u8, result.session_content, "import std") != null);
+        try std.testing.expect(std.mem.indexOf(u8, result.session_content, "other line") == null);
+    }
+    // class escape + quantifier
+    {
+        var result = try testExec(ctx, "{\"pattern\":\"\\\\d+ms\",\"path\":\"code.txt\"}");
+        defer result.deinit(allocator);
+        try std.testing.expect(std.mem.indexOf(u8, result.session_content, "1500ms") != null);
+    }
+    // pure literal pattern keeps substring semantics
+    {
+        var result = try testExec(ctx, "{\"pattern\":\"other\",\"path\":\"code.txt\"}");
+        defer result.deinit(allocator);
+        try std.testing.expect(std.mem.indexOf(u8, result.session_content, "other line") != null);
+    }
+}
+
+test "grep: invalid regex pattern reports error" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-grep-badpat";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    const test_path = try std.fs.path.join(allocator, &.{ test_root });
+    defer allocator.free(test_path);
+
+    const fp = try std.fs.path.join(allocator, &.{ test_root, "search.txt" });
+    defer allocator.free(fp);
+    const f = try Io.Dir.cwd().createFile(io, fp, .{});
+    defer f.close(io);
+    try f.writeStreamingAll(io, "hello\n");
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_path,
+    };
+
+    var result = try testExec(ctx, "{\"pattern\":\"(ab\",\"path\":\"search.txt\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "invalid regex pattern") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "did you mean") != null);
 }

@@ -3,6 +3,16 @@
 ## [Unreleased] - 0.2.8 周期（未发布）
 
 ### Added
+- **grep 正则支持**（`docs/0.2.8/PLAN-GREP-REGEX.md`，N20）: 新增 `src/util/regex.zig` 轻量正则引擎，替代 `std.regex`（0.16 已移除）。关键变更:
+  - **语法子集**: 字面量/`.`/`^$` 锚点/字符类（POSIX 边界语义：首 `]` 字面量、首尾 `-` 字面量、降序范围报错）/分组/交替/量词（`*+?{n,m}` ≤1000）/类转义（`\d\w\s` ASCII）`\b`/字面转义；不支持构造（反向引用/前瞻/`(?i)`/`\p{}`）编译期报错
+  - **next 链 AST**: 节点数组 + `next` 顺序连接（无 Sequence 变体），组/交替引用首节点，全部后向引用无悬空；`Pattern` 独占所有权（禁止浅拷贝，nodes 数组可整块 dupe 深拷贝）
+  - **非锚定搜索**: 对齐 indexOf/ripgrep——模式可出现在任意位置；字面量前缀驱动（命中位置扫描，完备无遗漏）或逐 pos 扫描
+  - **迭代匹配**: 顺行链与量词重复零递归（长字面量/`a*` 对长行无栈风险）；递归仅组/交替嵌套（编译期 64 + 运行时 128 双守卫）；**alt/repeat 跨层级回溯**（MatchCtx 共享栈 + resume_chain + depth 过滤，`(ab|a)b`/`(a*)b` 正确）
+  - **失败记忆化**: 惰性（2k 步后）缓存 `(node,pos)` 失败状态，指数回溯降多项式；`allocator=null` 纯回溯等价性测试
+  - **按输入规模缩放的步数预算**: `MATCH_STEP_BASE + 16×字节` 双检查点（单行内部 + grep 累计）——正常线性扫描永不熔断（`a|b` 512KB 不误伤），超线性回溯熔断（truncated + `... (match complexity limit reached)`，searchDir `break :outer`）
+  - **错误自愈闭环**: `CompileResult.err{code,pos}` 结构化错误 + `errorDetail` 静态修复指引（"did you mean to close it with ')'?" 等）——LLM 从错误信息直接得知修正方式
+  - **grep 接入**: pattern 恒为正则（纯字面量行为不变），tool_params 描述含子集/不支持项/空交替警告
+  - 测试: 25 引擎单测（子集逐项/边界/回溯正确性/错误码+pos/深度与量词边界/长链与重复零递归/预算熔断/非锚定回归/indexOf 等价/前缀快路径）+ 3 grep 集成测试
 - **WebFetch 工具**（`docs/0.2.8/PLAN-WEBFETCH.md`，9 测试 + 实机验证）:
   - 第 9 个内置工具 `webfetch`：curl 子进程抓取 URL，HTML→Markdown 转换（markdown/text/html 三档格式），对齐 opencode 实现
   - **opencode 对齐**：Accept 头按格式协商、MIME 类型校验（isTextualMime，防图片/PDF 污染 session）、Cloudflare 403 重试（浏览器 UA → 诚实 UA）、timeout 参数（1-120s 默认 30s）
