@@ -2002,6 +2002,19 @@ async function deleteSession(id) {
   } catch(e) { console.error(e); }
 }
 
+// Build the download file name for a session export: sanitized session name
+// when available (uuid names mean "never renamed" and are as opaque as the
+// id), otherwise fall back to the session id. Tested via
+// tests/frontend/test-export-name.mjs.
+function sessionExportFileName(s) {
+  var name = (s && s.name ? String(s.name) : '').trim();
+  var isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(name);
+  if (!name || isUuid) return 'session-' + s.id + '.json';
+  var safe = name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/^[. ]+|[. ]+$/g, '').slice(0, 100);
+  if (!safe) return 'session-' + s.id + '.json';
+  return safe + '.json';
+}
+
 // Download the full session as a JSON file (GET /api/session/:id/export).
 // The wire format is compact; pretty-printing happens here (browser JSON
 // engine) so the downloaded file is human-readable without touching the
@@ -2018,7 +2031,7 @@ function exportSession(s) {
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
       a.href = url;
-      a.download = 'session-' + s.id + '.json';
+      a.download = sessionExportFileName(s);
       document.body.appendChild(a);
       a.click();
       a.remove();
