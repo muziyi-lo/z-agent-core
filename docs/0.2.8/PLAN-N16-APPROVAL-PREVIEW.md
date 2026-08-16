@@ -131,8 +131,14 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 **后端** `GET /api/preview?path=<相对 project_root>`：
 
 - 路径解析：复用 `util/path.resolvePath`（防穿越，与 read 工具同源）
-- 文本：读文件（≤`types.FILE_READ_LIMIT` 64KB 守卫 + 超限截断 `truncated:true`）→ `{name, kind:"text", content, truncated}`（jsonw.escapeAlloc 转义）
-- 图片：扩展名白名单 + MIME 映射表（`png→image/png`、`jpg/jpeg→image/jpeg`、`gif→image/gif`、`webp→image/webp`、`svg→image/svg+xml`——**禁止裸拼 `image/<ext>`**，jpg/svg 会生成非法 MIME）+ `util/text.isBinary` → base64 → `{name, kind:"image", data_url:"data:<mime>;base64,..."}`（≤5MB 守卫，超限 `kind:"too_large"`）
+- **判定顺序（四态）**（审查补充：非图片二进制行为显式化——此前仅 isBinary+too_large 隐含，`.exe`/`.zip`/`.pdf` 会走文本分支输出乱码）：
+  1. 大小守卫（≤5MB，超限 → `kind:"too_large"`）
+  2. 扩展名图片白名单 + `util/text.isBinary` 确认 → `kind:"image"`（base64）
+  3. 其余文件读入后 `isBinary` 检测 → **`kind:"binary"`**（拒渲染，`{name, mime_hint}`，前端提示 "Binary file — preview not available"）——防乱码输出与内容注入
+  4. 文本 → `kind:"text"`（≤`types.FILE_READ_LIMIT` 64KB 守卫 + 超限截断 `truncated:true`，jsonw.escapeAlloc 转义）
+- 文本：`{name, kind:"text", content, truncated}`
+- 图片：`{name, kind:"image", data_url:"data:<mime>;base64,..."}`（MIME 映射表见下）
+- 错误：参数缺失/路径越界 → 400；文件不存在/目录 → 404
 - **SVG XSS 例外（审查补充）**：`svg` **不进图片预览通道**——降级为 `kind:"text"` 展示源码（保留预览能力，浏览器不渲染）。理由：SVG 向量多（`<script>`/`on*` 事件处理器/`<foreignObject>` 嵌入 HTML/`<image href>` 外部引用隐私泄露），且本项目无服务端 sanitizer（DOMPurify 是前端库，Zig 侧手写 XML 消毒绕过向量多、成本高）；img 上下文虽在现代浏览器禁脚本，但外部引用等向量不依赖脚本执行。渲染类 SVG 预览留待未来（`<img>` 仅 src 属性赋值、不经 innerHTML，届时前端侧 sanitize 或 CSP 配合）
 - 错误：参数缺失/路径越界 → 400；文件不存在/目录 → 404
 
@@ -158,7 +164,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 测试（Zig：新增 approval 单测；前端：15 文件不变，modal 为 DOM 交互走浏览器实测）：
 
 - `isRisky`：**变体命中矩阵**（L1 全命中）——`rm -rf`/`rm -fr`/`rm -r -f`/`rm --recursive --force`/`rm -rF`/`rm -R -f`/PS `Remove-Item -Recurse -Force`/`Remove-Item -R -Fo`（PS 前缀简写）/cmd `rmdir /s /q`/`del /s /q`/`git push --force`/`git push -f`/`git reset --hard`/`git clean -fdx`/`curl "https://x" | sh`/`curl x | bash`/`format c:`/`diskpart`/`chkdsk /f`/`reg delete HKLM\...`/`net user`；**L1 语义说明**：`rm -r dir`（递归删除，含 recursive）**命中**——递归删除本身即破坏性，force 非必需；**L2 不命中**——`rm file.txt`/`Remove-Item file`/`git push`/`git clean`/`curl https://x`（无管道）/`chkdsk`（无 /f）；大小写变体 `RM -RF`/`Remove-Item -recurse -force` 命中 + **封闭集语义：非枚举危险命令（`shred`/`docker system prune -a`/`nmap`）不命中** + 非 bash 工具在 risky 模式不审（write/edit 等 8 工具全豁免）+ always 模式全审 + never 全不审 + `approval_allow` 白名单豁免（含匹配、大小写不敏感）+ **回合内缓存：同 name+args 命中跳过、args 不同（dir_A/dir_B）不命中各自弹窗、approval_cache=false 时完全禁用缓存**
-- 预览 MIME 映射：png/jpg/jpeg/gif/webp 走映射表（jpg/jpeg→image/jpeg），data_url 前缀与映射一致（含大小写扩展名 `.JPG`）；**svg 断言 `kind:"text"`（源码预览，非 image）**
+- 预览四态：png/jpg/jpeg/gif/webp 走映射表（jpg/jpeg→image/jpeg），data_url 前缀与映射一致（含大小写扩展名 `.JPG`）；**svg 断言 `kind:"text"`（源码预览，非 image）**；`.exe`/`.zip`/`.pdf` 断言 `kind:"binary"`（拒渲染）；超大文件 `kind:"too_large"`
 - `Gate`：初始 pending、resolve(true/false) 后状态、重复 resolve 幂等、wait 分级超时（**120s 触发 reminder 一次、240s 返回 denied**）、check_abort 置位返回 aborted、**keepalive 返回 false 立即 aborted（断连语义）、keepalive 周期性调用次数正确、reminder 写失败返回 false→aborted**；惰性清理：注册超时条目在下次插入时被 resolve+移除
 - 前端竞态（浏览器实测）：审批 Modal 打开 → 等待超时 → 点 Allow → 提示 "expired" 且无二次请求副作用；断连 → Modal 自动关闭；**连续两个 approval_required（契约破坏模拟）→ 第二个入队，第一个完成后续弹**
 
