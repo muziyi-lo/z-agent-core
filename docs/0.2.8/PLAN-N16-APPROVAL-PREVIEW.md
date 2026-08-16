@@ -52,7 +52,8 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
     - **设备/系统破坏**（L1）：首 token ∈ {`format`,`diskpart`,`fdisk`,`mkfs`,`dd`}；或首 token ∈ {`chkdsk`} 且 ∃ `/f`；或首 token ∈ {`reg`,`sc`,`net`} 且 tokens[1] ∈ {`delete`,`user`}
   - **L1 覆盖优先（宁误不漏）**，用户对"删除/格式化被拦"接受度高；**L2 歧义类不审**（`rm <file>` 无 `-r`、`git push` 无 force、`Remove-Item` 无 `-Recurse`）——漏报可接受，误报高摩擦
 - **摩擦自愈机制**（审查修订）：分级之外，双机制降低重复摩擦：
-  - **回合内允许缓存**：`ApprovalCtx` 持 `allowed: StringHashMap(void)`（key = name+args hash）——同一工具调用（同 name+args）被 Allow 后**本回合内不再弹窗**（模型重复调用同一危险命令时只问一次）
+  - **回合内允许缓存**：`ApprovalCtx` 持 `allowed: StringHashMap(void)`，key = **name + 完整 args 字节串的 Wyhash（64-bit）**——**必须哈希完整参数字符串，禁止模板化/参数剥离**（审查补充：`rm -rf dir_A` 与 `rm -rf dir_B` 的 args 不同 → hash 必不同 → **各自独立弹窗**，不存在"命令模板命中导致过度放行"；仅当完全相同的 name+args 重复时才免弹，语义 = "同一精确命令已获用户认可，不重复打扰"）。碰撞风险：单回合调用数 ≤ 数十个，64-bit Wyhash 碰撞可忽略；若需绝对严谨可存 args 字节串做二次比较（不采纳，YAGNI）
+  - **每次确认开关**（审查补充）：`approval_cache = true`（默认开，配置项）——关闭后**同一命令每次执行都弹窗**，满足"每次递归删除都要确认"的严格用户；默认开保持低摩擦
   - **配置白名单**：`approval_allow = ["rm -rf .zig-cache", "git push --force origin dev"]`（字符串含匹配，大小写不敏感，`args.command` 包含该串即豁免）——用户主动豁免的高频命令永久不弹窗
 - `Mode` 语义：`never`=不审批；`risky`=仅 L1 破坏性命令；`always`=全部 9 工具。**默认 `risky`**（功能定位；用户可配 `never` 关闭）
 - `wait` 超时：**分级 120s/240s**（审查修订：单阈值 120s 直接拒绝会误伤走神用户——长对话中用户可能暂离/分心，先提醒后拒绝体验更好；可行性高已采纳）：
@@ -137,7 +138,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 | 文件 | 改动 |
 |------|------|
 | `src/approval.zig`（新增） | Mode/GateState/Gate（wait/resolve）+ isRisky 规则集（L1/L2 分级）+ 单测 |
-| `src/config.zig` | `approval_mode` 字段（默认 risky）+ `approval_allow` 白名单数组 + TOML 解析 + 模板注释 |
+| `src/config.zig` | `approval_mode` 字段（默认 risky）+ `approval_allow` 白名单数组 + `approval_cache` 开关（默认 true）+ TOML 解析 + 模板注释 |
 | `src/frontends/web/server.zig` | 进程级 approval_map + mutex（abort_map 同模式） |
 | `src/frontends/web/handler.zig` | approvalBeforeHook + ApprovalCtx + `POST /api/approval/:id` + `GET /api/preview` + 路由（POST 分支 / GET 分支） |
 | `src/frontends/web/app.js` | `approval_required` listener + approvalModal + previewModal + Preview 按钮（ToolRegistry read/edit 分支） |
@@ -146,7 +147,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 
 测试（Zig：新增 approval 单测；前端：15 文件不变，modal 为 DOM 交互走浏览器实测）：
 
-- `isRisky`：**变体命中矩阵**（L1 全命中）——`rm -rf`/`rm -fr`/`rm -r -f`/`rm --recursive --force`/`rm -rF`/`rm -R -f`/PS `Remove-Item -Recurse -Force`/`Remove-Item -R -Fo`（PS 前缀简写）/cmd `rmdir /s /q`/`del /s /q`/`git push --force`/`git push -f`/`git reset --hard`/`git clean -fdx`/`curl "https://x" | sh`/`curl x | bash`/`format c:`/`diskpart`/`chkdsk /f`/`reg delete HKLM\...`/`net user`；**L1 语义说明**：`rm -r dir`（递归删除，含 recursive）**命中**——递归删除本身即破坏性，force 非必需；**L2 不命中**——`rm file.txt`/`Remove-Item file`/`git push`/`git clean`/`curl https://x`（无管道）/`chkdsk`（无 /f）；大小写变体 `RM -RF`/`Remove-Item -recurse -force` 命中 + 非 bash 工具在 risky 模式不审 + always 模式全审 + never 全不审 + `approval_allow` 白名单豁免（含匹配、大小写不敏感）+ 回合内 allowed 缓存命中跳过
+- `isRisky`：**变体命中矩阵**（L1 全命中）——`rm -rf`/`rm -fr`/`rm -r -f`/`rm --recursive --force`/`rm -rF`/`rm -R -f`/PS `Remove-Item -Recurse -Force`/`Remove-Item -R -Fo`（PS 前缀简写）/cmd `rmdir /s /q`/`del /s /q`/`git push --force`/`git push -f`/`git reset --hard`/`git clean -fdx`/`curl "https://x" | sh`/`curl x | bash`/`format c:`/`diskpart`/`chkdsk /f`/`reg delete HKLM\...`/`net user`；**L1 语义说明**：`rm -r dir`（递归删除，含 recursive）**命中**——递归删除本身即破坏性，force 非必需；**L2 不命中**——`rm file.txt`/`Remove-Item file`/`git push`/`git clean`/`curl https://x`（无管道）/`chkdsk`（无 /f）；大小写变体 `RM -RF`/`Remove-Item -recurse -force` 命中 + 非 bash 工具在 risky 模式不审 + always 模式全审 + never 全不审 + `approval_allow` 白名单豁免（含匹配、大小写不敏感）+ **回合内缓存：同 name+args 命中跳过、args 不同（dir_A/dir_B）不命中各自弹窗、approval_cache=false 时完全禁用缓存**
 - 预览 MIME 映射：png/jpg/jpeg/gif/webp 走映射表（jpg/jpeg→image/jpeg），data_url 前缀与映射一致（含大小写扩展名 `.JPG`）；**svg 断言 `kind:"text"`（源码预览，非 image）**
 - `Gate`：初始 pending、resolve(true/false) 后状态、重复 resolve 幂等、wait 分级超时（**120s 触发 reminder 一次、240s 返回 denied**）、check_abort 置位返回 aborted、**keepalive 返回 false 立即 aborted（断连语义）、keepalive 周期性调用次数正确、reminder 写失败返回 false→aborted**；惰性清理：注册超时条目在下次插入时被 resolve+移除
 - 前端竞态（浏览器实测）：审批 Modal 打开 → 等待超时 → 点 Allow → 提示 "expired" 且无二次请求副作用；断连 → Modal 自动关闭；**连续两个 approval_required（契约破坏模拟）→ 第二个入队，第一个完成后续弹**
