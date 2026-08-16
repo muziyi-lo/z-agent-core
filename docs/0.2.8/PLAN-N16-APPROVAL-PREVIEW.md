@@ -114,7 +114,8 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 | `approval_timeout` | handler（req_biz） | warn | id、rule（240s 自动拒绝） |
 | `approval_aborted` | handler（req_biz） | warn | id、reason（disconnect/abort/interrupt） |
 
-- `Gate.resolve` 内部记 `approval_resolved`（Gate 持 id 字段）——用户决策不可丢失；hook 侧 required/timeout/aborted 记带 session 上下文的日志
+- `Gate.resolve` 内部记 `approval_resolved`（Gate 持 id 字段，**allow=true 同样落盘**）——用户决策不可丢失；hook 侧 required/timeout/aborted 记带 session 上下文的日志
+- **审计链分工（审查补充：批准也落盘，对齐 dsh approval/asked+decided 对）**：批准决议记录在 `.zagent/log/`（approval_resolved allow=true）——不将批准写入会话（否则污染模型 transcript，对齐 dsh “audit pair 是 log-only，不进模型 transcript”）；会话只保留**拒绝消息**（模型需要知道）——审计链 = 日志（全部决议含批准）+ 会话（拒绝，模型可见）
 - 落盘走现有 log 系统（`.zagent/log/`，util/log.zig），CLI 与 Web 通用；不做单独审计文件（日志轮转已有）
 
 **Web 集成**（handler.zig + server.zig）：
@@ -125,8 +126,8 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
   1. `approval.isRisky(mode, name, args)` 返回 null → 返回 null（放行，正常流程）
   2. 需要审批：id=`uuid_mod.v4`（**不可预测 UUID，非自增**——安全审查）→ **先发 SSE `approval_required`（`{"id","name","args","rule"}`，用 sse.writer 直写 frame），写失败 = 连接已断 → 不注册 gate、不进入 wait，直接返回拒绝消息并调 `agent.abort()`**（前端收不到审批请求，gate 只会挂到超时——发送失败必须在源头短路）→ 写成功后才注册 gate 到 map（**携带 session_id**）→ `gate.wait(240_000, &checkAbort, &keepaliveAlive, &reminderPing)` → 从 map 移除 → 按决议三态返回**区分措辞**（审查补充：denied/aborted 语义合并会让模型误把系统中断当用户拒绝，错误调整策略）：
      - `approved` → 返回 null（放行执行）
-     - `denied`（用户主动拒绝）→ `"User denied this tool call ({rule}). Adjust your approach."`（模型应换方案不重试）
-     - `timeout`（超时无响应 = 自动拒绝，非用户决策）→ `"Tool call auto-denied: approval timed out ({rule}). It was not explicitly rejected by the user."`（模型可重试或询问用户）
+     - `denied`（用户主动拒绝）→ `"User denied this tool call ({rule}). This rejection is final for this command — do NOT retry it or work around it by rephrasing flags; adjust your approach."`（审查扩展：明确“对该命令最终拒绝 + 禁止换参数绕过”，对齐 dsh “rejected escalation is final for that command, never work around it”）
+     - `timeout`（超时无响应 = 自动拒绝，非用户决策）→ `"Tool call auto-denied: approval timed out ({rule}). It was not explicitly rejected by the user — you may retry this exact command later or ask the user."`（审查扩展：明确“可安全重试同一命令”，与 denied 的“最终拒绝”区分——超时是系统状态不是用户意志）
      - `aborted`（abort/SSE 断连，非用户决策）→ `"Tool call aborted: the connection was interrupted while awaiting approval ({rule}). It was NOT denied by the user."`，并调 `agent.abort()` 终止回合（SSE 已断，继续无意义）
 - `POST /api/approval/:id` `{"allow":true|false, "session_id":...}` → map 找 gate，**session_id 与 gate 记录不匹配 → 404**（与未知 id 同响应）→ 匹配则 `resolve` → 200。**无需通知机制**（agent 线程轮询 gate）。**session 隔离模式与 abort 一致**（审查追问）：abort 端点是 `POST /api/session/:id/abort`——session_id 在 URL 天然绑定（handler.zig:116）；审批端点 id 为随机 UUID 且 body 强制校验 session_id——两者同属"session 维度隔离"，审批因 UUID 不可猜测而更强（abort 的 URL 可枚举但无鉴权也仅止于中止本会话，风险面不同，已在威胁模型节说明）
 - 事件时序：`approval_required` 先于 `tool_start`（hook 在 beginTool 之前，agent.zig:374→403）；审批通过后工具卡片正常流式
@@ -150,7 +151,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - SSE listener `approval_reminder`（分级超时新增）：当前审批 Modal 文案追加提示（如 "**Still waiting for your decision** — auto-denies in ~2 minutes"）+ 轻微视觉强调（标题色/边框），不打断、不重复弹窗
 - 工具卡片流式期出现 pending 态（`tool_start` 到达后正常，审批在 tool_start 前——卡片此时尚未创建，无特殊渲染需求）
 
-**CLI 端**：本期不做（ApprovalModal 是 Web 组件）。CLI 同步 stdin 确认留待后续（REMAINING 备注）。
+**策略模型可见性**（审查补充：模型必须知道审批策略边界，否则被拒后会反复尝试危险命令）：frontend 在 SystemPromptCb（agent.zig:71）里拼装审批策略段（非审批时不注入）：`never` → “approval prompts are disabled; destructive commands will be silently blocked only by their own guards, do not attempt recursive deletes/force ops”；`risky` → “destructive commands (recursive delete / device wipe / force git / pipe-exec / system mutation) require user approval once per exact command; a denial is final for that command”；`always` → “all tool calls require approval”。完整边界说明在“覆盖边界声明”節（封闭集、仅 bash、不覆盖类别清单）——模型得知保护范围。**CLI 端——fail-closed 语义**（审查补充：原计划“CLI 不做”未定义行为——CLI 无 hook 则 `risky` 下 `rm -rf` 静默放行，与“诚实执行”定位冲突；对齐 dsh “无 answerer = 拒绝”）：CLI（REPL + `--prompt` 单发——不存在交互答复者）在 `risky`/`always` 下遇危险命令：**确定性拒绝**——`tool_hooks.before = approvalCliHook`：`isRisky(mode) → 返回 messageFor(denied, reason=no-interactive-answerer)`措辞的 tool 消息 + 日志 `approval_denied reason=no_interactive`。REPL 的同步 readLine 确认留后续（接口已预留，“决策采集可替换交互层”）。语义是全模式一致：无交互答复者时威胁命令永不无声执行；`--approval never` 可显式放行。
 
 ### Part B — 文件/图片预览
 
@@ -184,6 +185,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 | `src/frontends/web/server.zig` | 进程级 approval_map + mutex（abort_map 同模式） |
 | `src/frontends/web/handler.zig` | approvalBeforeHook + ApprovalCtx + `POST /api/approval/:id` + `GET /api/preview`（JSON 四态）+ `GET /api/preview?raw=1`（原始字节）+ 路由 + serveIndex CSP header |
 | `src/frontends/web/app.js` | `approval_required` listener + approvalModal + previewModal + Preview 按钮（ToolRegistry read/edit 分支） |
+| `src/frontends/cli/App.zig` | `approvalCliHook`（isRisky → 拒绝措辞，reason=no_interactive）+ SystemPromptCb 策略段 |
 | `src/frontends/web/index.html` | `#approval-modal` + `#preview-modal` 结构 |
 | `src/frontends/web/app.css` | 复用 modal-overlay；approval 详情 pre / preview 正文样式 |
 
@@ -191,7 +193,8 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 
 - `isRisky`：**变体命中矩阵**（L1 全命中）——`rm -rf`/`rm -fr`/`rm -r -f`/`rm --recursive --force`/`rm -rF`/`rm -R -f`/PS `Remove-Item -Recurse -Force`/`Remove-Item -R -Fo`（PS 前缀简写）/cmd `rmdir /s /q`/`del /s /q`/`git push --force`/`git push -f`/`git reset --hard`/`git clean -fdx`/**`git clean -f`/`-fd`/`-fx`/`-dfx`/`--force`（force 变体全命中）**/`curl "https://x" | sh`/`curl x | bash`/**`curl https://x|sh`/`curl "url"|bash`/`wget x|sh`（管道符紧贴，空白分词绕过修复）**/`format c:`/`diskpart`/`chkdsk /f`/`reg delete HKLM\...`/`net user`；**L1 语义说明**：`rm -r dir`（递归删除，含 recursive）**命中**——递归删除本身即破坏性，force 非必需；**L2 不命中**——`rm file.txt`/`Remove-Item file`/`git push`/`git clean`（无 force，dry-run）/**`git clean -n`/`-d`（dry-run，不实际删除）**/`curl https://x`（无管道）/**`echo "a|sh"`（引号内）/`ls | grep sh`（非 sh 命令）/`echo | shell`（前缀边界）**/`chkdsk`（无 /f）；**存储破坏新成员命中**——`shred secret.txt`/`wipefs /dev/sdb`/`vgremove data`/`lvremove /dev/vg/lv`/`parted /dev/sda mklabel`/`cryptsetup luksFormat /dev/sdb`/`mkswap /dev/sdb1`/`swapoff /dev/sdb1`；**cryptsetup 安全用法不命中**——`cryptsetup open /dev/sdb luksvol`/`cryptsetup luksAddKey /dev/sdb`；大小写变体 `RM -RF`/`Remove-Item -recurse -force` 命中 + **封闭集语义：非枚举危险命令（`shred`/`docker system prune -a`/`nmap`）不命中** + 非 bash 工具在 risky 模式不审（write/edit 等 8 工具全豁免）+ always 模式全审 + never 全不审 + **`approval_allow` 归一化精确匹配：条目命令命中（空白折叠）、`RM -RF .ZIG-CACHE` 不命中（大小写敏感）、`-extra` 尾缀不命中、`&& rm -rf /` 尾追加不命中、`./` 前缀与尾斜杠不折叠（不命中）** + **回合内缓存：同 name+args 命中跳过、args 不同（dir_A/dir_B）不命中各自弹窗、approval_cache=false 时完全禁用缓存**
 - 预览四态：png/jpg/jpeg/gif/webp 走映射表（jpg/jpeg→image/jpeg），**JSON 端点返回 kind:"image" 无内容、原始表示（raw=1）`Content-Type` 与映射一致（含大小写扩展名 `.JPG`）+ 字节直出 + Cache-Control**；**svg 断言 `kind:"text"`（源码预览，非 image）且原始表示（raw=1）对 svg 放行（`Content-Type: image/svg+xml`）且 `<img>` 渲染无脚本执行**；`.exe`/`.zip`/`.pdf` 断言 `kind:"binary"`；超大文件 `kind:"too_large"`；CSP header 含 `img-src 'self'`
-- `messageFor`：三态措辞分别生成（denied 含“User denied”/timeout 含“auto-denied”/aborted 含“NOT denied”）+ rule 嵌入
+- `messageFor`：三态措辞分别生成（denied 含“User denied + final for this command + do NOT work around”/timeout 含“auto-denied + may retry”/aborted 含“NOT denied”）+ rule 嵌入
+- 策略可见性：三模式 SystemPromptCb 输出分别含对应措辞；CLI hook：`risky` 下 `rm -rf` 返回拒绝消息（含 no_interactive 日志）、`never` 下放行
 - `Gate`：初始 pending、resolve(true/false) 后状态、重复 resolve 幂等、wait 分级超时（**120s 触发 reminder 一次、240s 返回 denied**）、check_abort 置位返回 aborted、**keepalive 返回 false 立即 aborted（断连语义）、keepalive 周期性调用次数正确、reminder 写失败返回 false→aborted**；惰性清理：注册超时条目在下次插入时被 resolve+移除
 - 前端竞态（浏览器实测）：审批 Modal 打开 → 等待超时 → 点 Allow → 提示 "expired" 且无二次请求副作用；断连 → Modal 自动关闭；**连续两个 approval_required（契约破坏模拟）→ 第二个入队，第一个完成后续弹**；**安全：错误 session_id POST → 404、未知 id → 404、两会话（双标签页）各自审批互不影响**
 
