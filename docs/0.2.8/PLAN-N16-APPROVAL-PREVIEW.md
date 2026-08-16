@@ -74,6 +74,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
   - gate id 用 **UUID v4**（`uuid_mod.v4`，项目已有）替代 `approval_{自增}`——**不可预测**，杜绝遍历猜测
   - **session 绑定**：gate 注册时记录 `session_id`；`POST /api/approval/:id` 请求体携带 `{allow, session_id}`，**session_id 不匹配 → 404**（与未知 id 同响应，不泄漏 gate 存在性）
   - 威胁模型：同源页面 CSRF 到 `127.0.0.1` 仍可**发送**请求（CORS 只禁读不禁发），但 id 为不可猜测 UUID → 无法定向到具体审批；完整 CSRF token 机制超出本期范围（本地单用户工具），登记为未来安全加固项
+  - **Web 服务器无鉴权（登记，暂缓）**：默认绑定回环，但 `--address 0.0.0.0` 暴露局域网后**无任何认证**——同网段可读会话/耗 API 额度/bash 工具读 `.zagent/.env` 拿 API key/删会话（对比 opencode `--auth` token 有差距）。方向（未来立项）：opencode 式启动打印随机 token URL + 登录端点换 httpOnly cookie + 全端点校验 + **非回环绑定无 token 拒绝启动**（防裸奔）；约束：`EventSource` 不能自定义 Authorization header，token 需走 URL 参数/cookie 通道
   - 防御纵深：即使 id+session 均泄漏，allow:true 也仅放行**本次待审批工具**（规则判定在 core，风险面有限）
 - `approval_map` 用 StringHashMap 是 **id 寻址 + 重复 POST 幂等**的便利（`resolve` 幂等），并发多 gate 由多连接自然产生、各自独立
 - 串行契约是前端单 Modal（页面级）的**依赖**：若未来 agent 并行化工具执行（e.g. 多工具同轮并行），必须同步引入 Modal 队列（按 id 排队，一次展示一个）或按工具分组合并展示——方案文档在此登记该演进约束
