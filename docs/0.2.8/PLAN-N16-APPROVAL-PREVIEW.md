@@ -56,6 +56,11 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
   - **每次确认开关**（审查补充）：`approval_cache = true`（默认开，配置项）——关闭后**同一命令每次执行都弹窗**，满足"每次递归删除都要确认"的严格用户；默认开保持低摩擦
   - **配置白名单**：`approval_allow = ["rm -rf .zig-cache", "git push --force origin dev"]`（字符串含匹配，大小写不敏感，`args.command` 包含该串即豁免）——用户主动豁免的高频命令永久不弹窗
 - `Mode` 语义：`never`=不审批；`risky`=仅 L1 破坏性命令；`always`=全部 9 工具。**默认 `risky`**（功能定位；用户可配 `never` 关闭）
+- **risky 覆盖边界声明**（审查补充：默认开启的模式必须让用户知道保护范围）：
+  - **封闭规则集**：risky 模式只对 L1 枚举规则命中时审批，**且仅作用于 bash 工具**——其余 8 工具（write/edit/read/grep/glob/skill/compact/webfetch）在 risky 模式**永不审批**（覆盖文件/批量编辑等留待后续评估，future）
+  - **L1 覆盖类别**：递归删除（rm/del/rmdir/Remove-Item）、设备格式化与分区（format/diskpart/fdisk/mkfs/dd）、强制 Git 推送与硬重置（push --force/reset --hard/clean -fdx）、管道执行脚本（curl|sh/bash）、系统破坏（chkdsk /f、reg delete、sc delete、net user）
+  - **不覆盖类别**（明确排除，未来扩展）：网络攻击类（nmap/masscan）、容器清理类（docker system prune -a）、密钥/数据导出类（gpg --export、mysqldump 全库）、数据外传类（curl -T/rsync 到远程）等——新增规则 = 在 `isRisky` 集中函数加匹配条件（单一入口，扩展成本低）
+  - 用户应知悉：risky 是"枚举类别护栏"而非"全量危险拦截"；`always` 模式覆盖所有工具执行
 - `wait` 超时：**分级 120s/240s**（审查修订：单阈值 120s 直接拒绝会误伤走神用户——长对话中用户可能暂离/分心，先提醒后拒绝体验更好；可行性高已采纳）：
   - `0–120s`：正常等待
   - `120s`：触发一次 `reminder` 回调（发 SSE `approval_reminder` `{"id"}`，前端 Modal 提示"仍在等待审批"；写失败 = 断连 → 同 keepalive 语义返回 false → aborted）
@@ -152,7 +157,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 
 测试（Zig：新增 approval 单测；前端：15 文件不变，modal 为 DOM 交互走浏览器实测）：
 
-- `isRisky`：**变体命中矩阵**（L1 全命中）——`rm -rf`/`rm -fr`/`rm -r -f`/`rm --recursive --force`/`rm -rF`/`rm -R -f`/PS `Remove-Item -Recurse -Force`/`Remove-Item -R -Fo`（PS 前缀简写）/cmd `rmdir /s /q`/`del /s /q`/`git push --force`/`git push -f`/`git reset --hard`/`git clean -fdx`/`curl "https://x" | sh`/`curl x | bash`/`format c:`/`diskpart`/`chkdsk /f`/`reg delete HKLM\...`/`net user`；**L1 语义说明**：`rm -r dir`（递归删除，含 recursive）**命中**——递归删除本身即破坏性，force 非必需；**L2 不命中**——`rm file.txt`/`Remove-Item file`/`git push`/`git clean`/`curl https://x`（无管道）/`chkdsk`（无 /f）；大小写变体 `RM -RF`/`Remove-Item -recurse -force` 命中 + 非 bash 工具在 risky 模式不审 + always 模式全审 + never 全不审 + `approval_allow` 白名单豁免（含匹配、大小写不敏感）+ **回合内缓存：同 name+args 命中跳过、args 不同（dir_A/dir_B）不命中各自弹窗、approval_cache=false 时完全禁用缓存**
+- `isRisky`：**变体命中矩阵**（L1 全命中）——`rm -rf`/`rm -fr`/`rm -r -f`/`rm --recursive --force`/`rm -rF`/`rm -R -f`/PS `Remove-Item -Recurse -Force`/`Remove-Item -R -Fo`（PS 前缀简写）/cmd `rmdir /s /q`/`del /s /q`/`git push --force`/`git push -f`/`git reset --hard`/`git clean -fdx`/`curl "https://x" | sh`/`curl x | bash`/`format c:`/`diskpart`/`chkdsk /f`/`reg delete HKLM\...`/`net user`；**L1 语义说明**：`rm -r dir`（递归删除，含 recursive）**命中**——递归删除本身即破坏性，force 非必需；**L2 不命中**——`rm file.txt`/`Remove-Item file`/`git push`/`git clean`/`curl https://x`（无管道）/`chkdsk`（无 /f）；大小写变体 `RM -RF`/`Remove-Item -recurse -force` 命中 + **封闭集语义：非枚举危险命令（`shred`/`docker system prune -a`/`nmap`）不命中** + 非 bash 工具在 risky 模式不审（write/edit 等 8 工具全豁免）+ always 模式全审 + never 全不审 + `approval_allow` 白名单豁免（含匹配、大小写不敏感）+ **回合内缓存：同 name+args 命中跳过、args 不同（dir_A/dir_B）不命中各自弹窗、approval_cache=false 时完全禁用缓存**
 - 预览 MIME 映射：png/jpg/jpeg/gif/webp 走映射表（jpg/jpeg→image/jpeg），data_url 前缀与映射一致（含大小写扩展名 `.JPG`）；**svg 断言 `kind:"text"`（源码预览，非 image）**
 - `Gate`：初始 pending、resolve(true/false) 后状态、重复 resolve 幂等、wait 分级超时（**120s 触发 reminder 一次、240s 返回 denied**）、check_abort 置位返回 aborted、**keepalive 返回 false 立即 aborted（断连语义）、keepalive 周期性调用次数正确、reminder 写失败返回 false→aborted**；惰性清理：注册超时条目在下次插入时被 resolve+移除
 - 前端竞态（浏览器实测）：审批 Modal 打开 → 等待超时 → 点 Allow → 提示 "expired" 且无二次请求副作用；断连 → Modal 自动关闭；**连续两个 approval_required（契约破坏模拟）→ 第二个入队，第一个完成后续弹**
