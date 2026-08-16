@@ -38,9 +38,18 @@ pub const Gate = struct {
 pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // 返回规则说明或 null
 ```
 
-- `isRisky` 规则集（bash 危险命令模式扫描，不区分大小写）——**两级分级**（审查修订：原"宁可漏报不可误报"一刀切与"默认开启、用户可关"定位冲突——误报是用户关掉审批（never）的主因，漏报反而不流失用户；改为按后果分级 + 摩擦自愈，见下）：
-  - **L1 破坏性**（宁误报不漏报）：`rm -rf` / `rm -r -f`（含 `--recursive --force`）、`Remove-Item -Recurse`（`rmdir /s`、`del /f /s /q` 等同族）、`format`/`diskpart`/`fdisk`/`mkfs`/`dd`（写设备）、`git push --force` / `git reset --hard` / `git clean -fdx`、`curl ... | sh` / `curl ... | bash`、`chkdsk /f`、`reg delete`、`sc delete`、`net user`——**覆盖优先**（宁可拦截合理用法；用户对"删除/格式化被拦"接受度高，不会因此关闭审批）
-  - **L2 歧义类**（不审）：`rm <file>`（无 -r）、`Remove-Item <file>`（无 -Recurse）、`git push`、`git clean`（无 -fdx）等——**漏报可接受，误报高摩擦**（拦截 `rm file` 是高频摩擦点）
+- `isRisky` 规则集——**两级分级**（审查修订：原"宁可漏报不可误报"一刀切与"默认开启、用户可关"定位冲突——误报是用户关掉审批（never）的主因，漏报反而不流失用户；改为按后果分级 + 摩擦自愈，见下）。**匹配算法定稿**（审查补充：变体覆盖需可测，如 `rm -fr`/`rm --recursive --force`/PS 前缀简写 `-Fo`）：
+  - **分词**：`args.command` 按空白 split 成 token 数组（去首尾引号；不处理嵌套引号——命令内的引号串整体成一个 token，匹配目标不在引号内，无歧义）
+  - **标志匹配 helper**（大小写不敏感，token 级前缀/包含判定）：
+    - `isShortFlagGroup(tok)`: tok 以 `-` 开头且不以 `--` 开头且长度 >1（`-rf`/`-R`/`-Fo`）
+    - `hasRecursive(tok)`: isShortFlagGroup 且组内含 `r`；或前缀 `--recursive`/`-recursive`（PS 长名）；或 tok ∈ {`/s`,`/S`}（cmd）
+    - `hasForce(tok)`: isShortFlagGroup 且组内含 `f`；或前缀 `--force`/`-force`；或 tok ∈ {`/q`,`/Q`}（cmd）
+  - **规则**（token 数组上判定）：
+    - **rm 族**（L1）：首 token ∈ {`rm`,`del`,`rmdir`,`erase`,`remove-item`}（去引号）AND ∃ recursive 标志 token——`rm -rf`/`rm -fr`/`rm -r -f`/`rm --recursive --force`/`rm -rF`/PS `Remove-Item -Recurse -Force`/`-R -Fo`/cmd `rmdir /s /q`/`del /s /q` 全命中；**`rm <file>`（无 recursive）不命中**
+    - **git 族**（L1）：`git`+`push` 且 ∃ force 标志（`--force`/`-f`——`git push -f` 即 force）；`git`+`reset` 且 ∃ `--hard` 前缀；`git`+`clean` 且 ∃ `-fdx` 或 `--force` 前缀——`git push`（无 force）不命中
+    - **curl 管道**（L1）：∃ i: tokens[i]=="|" 且 tokens[i+1] ∈ {`sh`,`bash`}——`curl "https://x" | sh` 命中（URL 带引号整体一个 token 不影响 `|` 位置判定）
+    - **设备/系统破坏**（L1）：首 token ∈ {`format`,`diskpart`,`fdisk`,`mkfs`,`dd`}；或首 token ∈ {`chkdsk`} 且 ∃ `/f`；或首 token ∈ {`reg`,`sc`,`net`} 且 tokens[1] ∈ {`delete`,`user`}
+  - **L1 覆盖优先（宁误不漏）**，用户对"删除/格式化被拦"接受度高；**L2 歧义类不审**（`rm <file>` 无 `-r`、`git push` 无 force、`Remove-Item` 无 `-Recurse`）——漏报可接受，误报高摩擦
 - **摩擦自愈机制**（审查修订）：分级之外，双机制降低重复摩擦：
   - **回合内允许缓存**：`ApprovalCtx` 持 `allowed: StringHashMap(void)`（key = name+args hash）——同一工具调用（同 name+args）被 Allow 后**本回合内不再弹窗**（模型重复调用同一危险命令时只问一次）
   - **配置白名单**：`approval_allow = ["rm -rf .zig-cache", "git push --force origin dev"]`（字符串含匹配，大小写不敏感，`args.command` 包含该串即豁免）——用户主动豁免的高频命令永久不弹窗
@@ -109,7 +118,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 
 测试（Zig：新增 approval 单测；前端：15 文件不变，modal 为 DOM 交互走浏览器实测）：
 
-- `isRisky`：L1 破坏性命令各规则命中（rm -rf/Remove-Item -Recurse/git push --force/curl|sh/format 等）+ **L2 歧义命令不审**（rm file、git push、Remove-Item 单文件）+ 非 bash 工具在 risky 模式不审 + always 模式全审 + never 全不审 + `approval_allow` 白名单豁免（含匹配、大小写不敏感）+ 回合内 allowed 缓存命中跳过
+- `isRisky`：**变体命中矩阵**（L1 全命中）——`rm -rf`/`rm -fr`/`rm -r -f`/`rm --recursive --force`/`rm -rF`/`rm -R -f`/PS `Remove-Item -Recurse -Force`/`Remove-Item -R -Fo`（PS 前缀简写）/cmd `rmdir /s /q`/`del /s /q`/`git push --force`/`git push -f`/`git reset --hard`/`git clean -fdx`/`curl "https://x" | sh`/`curl x | bash`/`format c:`/`diskpart`/`chkdsk /f`/`reg delete HKLM\...`/`net user`；**L1 语义说明**：`rm -r dir`（递归删除，含 recursive）**命中**——递归删除本身即破坏性，force 非必需；**L2 不命中**——`rm file.txt`/`Remove-Item file`/`git push`/`git clean`/`curl https://x`（无管道）/`chkdsk`（无 /f）；大小写变体 `RM -RF`/`Remove-Item -recurse -force` 命中 + 非 bash 工具在 risky 模式不审 + always 模式全审 + never 全不审 + `approval_allow` 白名单豁免（含匹配、大小写不敏感）+ 回合内 allowed 缓存命中跳过
 - 预览 MIME 映射：png/jpg/jpeg/gif/webp 走映射表（jpg/jpeg→image/jpeg），data_url 前缀与映射一致（含大小写扩展名 `.JPG`）；**svg 断言 `kind:"text"`（源码预览，非 image）**
 - `Gate`：初始 pending、resolve(true/false) 后状态、重复 resolve 幂等、wait 超时返回 denied、check_abort 置位返回 aborted、**keepalive 返回 false 立即 aborted（断连语义）、keepalive 周期性调用次数正确**
 - 前端竞态（浏览器实测）：审批 Modal 打开 → 等待 300s（或人工缩短验证）超时 → 点 Allow → 提示 "expired" 且无二次请求副作用；断连 → Modal 自动关闭
