@@ -2,6 +2,9 @@
 
 ## [Unreleased] - 0.2.8 周期（未发布）
 
+### Changed
+- **config 模板注释澄清模型命名空间**（用户实测 AI 配置供应商误解）: `DEFAULT_TEMPLATE` 中 "Models are shared across providers" 与实现矛盾（`lookupModel` 按 `(provider, id)` 归属匹配，config.zig:336）——误导 AI 认为模型 id 全局唯一、跨 provider 需改名。修复: 注释重写为命名空间语义（**同一 id 可在不同 provider 下共存**，解析按 "provider/model_id" 在 provider 内查找；`provider = ""` 才是任意 provider 可用的共享池，此时才产生跨 provider 碰撞）+ ollama 示例补 `[[models]]` 块 + 跨 provider 同名案例。模板 TOML 解析验证通过（tomllib）
+
 ### Added
 - **Web 输入历史 + 导出对话**（`docs/0.2.8/PLAN-N15-WEB-FEATURES.md`，N15 2/5）:
   - **输入历史**: 上下箭头导航已发送 prompt。`promptHistory` 三纯函数（push/up/down，immutable 状态机：`cursor=-1` 新输入位、首次 Up 存 draft、Down 回底恢复 draft、尾连续重复去重）；keydown 集成保持 slash popover 优先；`historyNavGuard` 防程序赋值触发 input 事件误退出导航（setTimeout 双保险防 stale guard 吞键）；手动编辑即退出导航；发送记录挂 `sendPrompt`（slash 命令不记录）。新增 `tests/frontend/test-history-nav.mjs`（21 断言：push 空/去重、Up 边界、Down 回 draft、不可变性）

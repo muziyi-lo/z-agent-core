@@ -590,13 +590,17 @@ const DEFAULT_TEMPLATE =
     \\api_key_env = "DEEPSEEK_API_KEY"  # environment variable holding the API key
     \\models = ["deepseek-v4-pro", "deepseek-v4-flash"]  # model IDs available for this provider
     \\
-    \\# Model: defines an LLM model and its capabilities.
-    \\# Add one [[models]] block per model. Models are shared across providers.
+    \\# Model: defines an LLM model and its capabilities. One [[models]] block
+    \\# per (provider, id) pair. Model ids are namespaced per provider: the SAME
+    \\# id may appear under different providers without conflict (each resolves
+    \\# via "provider/model_id"; ids are looked up inside the provider only).
+    \\# provider = "" makes the definition available to ANY provider (shared
+    \\# pool — only here does an id collide across providers).
     \\# Duplicate (id, provider) pairs: last entry wins (override).
     \\[[models]]
     \\id = "deepseek-v4-pro"          # used in "provider/model_id" format
     \\name = "DeepSeek V4 Pro"        # display name (shown in banner)
-    \\provider = "deepseek"           # links to [[providers]].name; empty = shared by all providers
+    \\provider = "deepseek"           # owner [[providers]].name; "" = any provider
     \\context_window = 1000000          # model's context window in tokens (informational)
     \\max_tokens = 384000             # max tokens the model can generate per response
     \\# thinking: auto-detected from base_url. Override via [models.compat] sub-table.
@@ -623,6 +627,13 @@ const DEFAULT_TEMPLATE =
     \\# base_url = "http://localhost:11434"
     \\# api_key_env = "OLLAMA_API_KEY"
     \\# models = ["llama4"]
+    \\#
+    \\# Model ids are scoped per provider — a "qwen3.7-max" under "dashscope"
+    \\# and another under "ollama" coexist without renaming either.
+    \\# [[models]]
+    \\# id = "llama4"
+    \\# name = "Llama 4"
+    \\# provider = "ollama"            # must match the [[providers]] name above
     \\#
     \\# [[models]]
     \\# id = "llama4"
