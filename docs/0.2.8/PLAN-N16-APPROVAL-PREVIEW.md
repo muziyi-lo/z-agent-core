@@ -68,6 +68,18 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - `approval_map` 用 StringHashMap 是 **id 寻址 + 重复 POST 幂等**的便利（`resolve` 幂等），不代表支持并发 pending
 - 该串行契约是前端单 Modal 的**依赖**：若未来 agent 并行化工具执行（e.g. 多工具同轮并行），必须同步引入前端 Modal 队列（按 id 排队，一次展示一个）或按工具分组合并展示——方案文档在此登记该演进约束
 
+**日志与审计**（审查补充：审批是安全关键操作——危险命令的执行决策必须可回溯，对齐 F6 ①"请求级审计"理念；review checklist G15 空操作无日志 = 无法事后定位）：
+
+| 事件 | 层级 | 级别 | 字段 |
+|------|------|------|------|
+| `approval_required` | handler（req_biz，带 tid/rid） | info | id、tool、rule、args 截断（前 200 字符） |
+| `approval_resolved` | approval.zig（biz） | info | id、allow |
+| `approval_timeout` | handler（req_biz） | warn | id、rule（240s 自动拒绝） |
+| `approval_aborted` | handler（req_biz） | warn | id、reason（disconnect/abort/interrupt） |
+
+- `Gate.resolve` 内部记 `approval_resolved`（Gate 持 id 字段）——用户决策不可丢失；hook 侧 required/timeout/aborted 记带 session 上下文的日志
+- 落盘走现有 log 系统（`.zagent/log/`，util/log.zig），CLI 与 Web 通用；不做单独审计文件（日志轮转已有）
+
 **Web 集成**（handler.zig + server.zig）：
 
 - 进程级 `approval_map: *StringHashMap(*approval.Gate)` + mutex（server.zig 定义，与 abort_map 同模式）
