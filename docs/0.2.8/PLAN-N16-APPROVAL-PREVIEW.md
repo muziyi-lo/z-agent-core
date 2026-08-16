@@ -85,7 +85,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
   - gate id 用 **UUID v4**（`uuid_mod.v4`，项目已有）替代 `approval_{自增}`——**不可预测**，杜绝遍历猜测
   - **session 绑定**：gate 注册时记录 `session_id`；`POST /api/approval/:id` 请求体携带 `{allow, session_id}`，**session_id 不匹配 → 404**（与未知 id 同响应，不泄漏 gate 存在性）。**map 隔离等价性**（审查追问）：approval_map 保持全局平铺 + 每 gate 记录 session_id + POST 校验——校验失败 404 即隔离，安全性与"按 session 分桶"等价（分桶仅省一次无谓查找，复杂度更高无收益），保持平铺
   - 威胁模型：同源页面 CSRF 到 `127.0.0.1` 仍可**发送**请求（CORS 只禁读不禁发），但 id 为不可猜测 UUID → 无法定向到具体审批；完整 CSRF token 机制超出本期范围（本地单用户工具），登记为未来安全加固项
-  - **Web 服务器无鉴权（登记，暂缓）**：默认绑定回环，但 `--address 0.0.0.0` 暴露局域网后**无任何认证**——同网段可读会话/耗 API 额度/bash 工具读 `.zagent/.env` 拿 API key/删会话（对比 opencode `--auth` token 有差距）。方向（未来立项）：opencode 式启动打印随机 token URL + 登录端点换 httpOnly cookie + 全端点校验 + **非回环绑定无 token 拒绝启动**（防裸奔）；约束：`EventSource` 不能自定义 Authorization header，token 需走 URL 参数/cookie 通道
+  - **Web 服务器无鉴权（登记，暂缓）**：默认绑定回环，但 `--address 0.0.0.0` 暴露局域网后**无任何认证**——同网段可读会话/**`/api/preview` 读 project_root 内文件（图片 ≤5MB/文本 ≤64KB）**/耗 API 额度/bash 工具读 `.zagent/.env` 拿 API key/删会话（对比 opencode `--auth` token 有差距）。方向（未来立项）：preview 与全部 API 同受 Web 认证保护（认证缺失时 preview 暴露范围 = project_root 内可读文件，与 read 工具权限等价）：opencode 式启动打印随机 token URL + 登录端点换 httpOnly cookie + 全端点校验 + **非回环绑定无 token 拒绝启动**（防裸奔）；约束：`EventSource` 不能自定义 Authorization header，token 需走 URL 参数/cookie 通道
   - 防御纵深：即使 id+session 均泄漏，allow:true 也仅放行**本次待审批工具**（规则判定在 core，风险面有限）
 - `approval_map` 用 StringHashMap 是 **id 寻址 + 重复 POST 幂等**的便利（`resolve` 幂等），并发多 gate 由多连接自然产生、各自独立
 - 串行契约是前端单 Modal（页面级）的**依赖**：若未来 agent 并行化工具执行（e.g. 多工具同轮并行），必须同步引入 Modal 队列（按 id 排队，一次展示一个）或按工具分组合并展示——方案文档在此登记该演进约束
@@ -123,7 +123,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - 进程级 `approval_map: *StringHashMap(*approval.Gate)` + mutex（server.zig 定义，与 abort_map 同模式）
 - `handlePrompt`（SSE）：组装 `ApprovalCtx`（sse_state/agent/approval_map/mode 指针）→ `agent.tool_hooks.before = approvalBeforeHook`
 - `approvalBeforeHook(ctx, name, args)`：
-  1. `approval.isRisky(mode, name, args)` 返回 null → 返回 null（放行，正常流程）
+  1. **白名单优先级（审查修订）**：`mode==never` → 放行；`approval_allow` 归一化精确匹配命中 → 放行（跳过 isRisky，用户显式信任声明最高优先，即使配置了危险命令也不弹窗）；否则 `approval.isRisky(mode, name, args)` 返回 null → 返回 null（放行，正常流程）
   2. 需要审批：id=`uuid_mod.v4`（**不可预测 UUID，非自增**——安全审查）→ **先发 SSE `approval_required`（`{"id","name","args","rule","deadline_ms"}`，用 sse.writer 直写 frame，deadline = 注册时刻 + 240_000），写失败 = 连接已断 → 不注册 gate、不进入 wait，直接返回 **messageFor(aborted, rule) 措辞**（审查修订：必须用 aborted 而非 denied——连接断开是系统中断不是用户拒绝，用 denied 会误导模型“用户拒绝”）并调 `agent.abort()`**（前端收不到审批请求，gate 只会挂到超时——发送失败必须在源头短路）→ 写成功后才注册 gate 到 map（**携带 session_id**）→ `gate.wait(240_000, &checkAbort, &keepaliveAlive, &reminderPing)` → 从 map 移除 → 按决议三态返回**区分措辞**（审查补充：denied/aborted 语义合并会让模型误把系统中断当用户拒绝，错误调整策略）：
      - `approved` → 返回 null（放行执行）
      - `denied`（用户主动拒绝）→ `"User denied this tool call ({rule}). This rejection is final for this command — do NOT retry it or work around it by rephrasing flags; adjust your approach."`（审查扩展：明确“对该命令最终拒绝 + 禁止换参数绕过”，对齐 dsh “rejected escalation is final for that command, never work around it”）
@@ -164,7 +164,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
     2. **图片（png/jpg/jpeg/gif/webp/svg）→ `kind:"image"`，无内容，仅 `{name, kind:"image", path}`**——前端 `<img src="/api/preview?path=...&raw=1">` 直连原始端点渲染（**零 base64 膨胀**）
     3. 其余文件 `isBinary` → `kind:"binary"`（拒渲染，`{name, mime_hint}`，防乱码与内容注入）
     4. 文本 → `kind:"text"`（≤`types.FILE_READ_LIMIT` 64KB 守卫 + 超限截断 `truncated:true`，jsonw.escapeAlloc 转义）
-  - **`GET /api/preview?path=&raw=1`（原始字节表示）**：仅图片扩展名白名单放行（png/jpg/jpeg/gif/webp + svg，+ isBinary 确认）→ **原始字节直出**，`Content-Type: image/<mime>`（映射表：`png→image/png`、`jpg/jpeg→image/jpeg`、`gif→image/gif`、`webp→image/webp`、`svg→image/svg+xml`——**禁止裸拼 `image/<ext>`**）+ `Cache-Control: private, max-age=60`；SVG/文本/二进制 → 404（SVG 走文本降级）；大小守卫同 JSON 端点
+  - **`GET /api/preview?path=&raw=1`（原始字节表示）**：仅图片扩展名白名单放行（png/jpg/jpeg/gif/webp/svg）→ **原始字节直出**，`Content-Type: image/<mime>`（映射表：`png→image/png`、`jpg/jpeg→image/jpeg`、`gif→image/gif`、`webp→image/webp`、`svg→image/svg+xml`——**禁止裸拼 `image/<ext>`**）+ `Cache-Control: private, max-age=60`；SVG/文本/二进制 → 404；大小守卫同 JSON 表示（超限→ **413 Payload Too Large**，审查修订：原始端点非 JSON 不能返回 kind:too_large，413 是语义正确的 HTTP 错误码）（超限→ **413 Payload Too Large**，审查修订：原始端点非 JSON，不能返回 kind:too_large，413 是语义正确的 HTTP 错误码）
 - **CSP（审查修订配套）**：`serveIndex` 响应加 CSP header——`default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:`（内联 script/style 是注入架构必须放行；`img-src 'self'` 使图片直连端点成为唯一图片来源，配合 SVG 渲染策略）
 - **SVG 渲染安全策略**（审查修订：已有 CSP 环境下 `img-src 'self' data:` 允许 SVG data URL 渲染——既保留预览又不执行脚本）：**svg 允许走原始表示渲染**（raw=1，`Content-Type: image/svg+xml`），前端 `<img src>` 直连。安全前提（缺一不可）：① `<img>` 元素 + `src` 属性赋值（**禁止** innerHTML 注入 SVG 源码）——img 上下文的 SVG 是禁脚本 + 禁外部资源引用的（规范保证：`<script>`/事件处理器不执行、`<image href>` 外部引用被忽略）；② CSP `img-src 'self' data:`（已计划）收敛图片来源；③ 原始表示仅放行图片白名单（含 svg）。禁止路径：任何将 SVG 作为 HTML 渲染的路径（innerHTML/DOMPurify 展示）不受此豁免，仍须保持降级
 - 错误：参数缺失/路径越界 → 400；文件不存在/目录 → 404
