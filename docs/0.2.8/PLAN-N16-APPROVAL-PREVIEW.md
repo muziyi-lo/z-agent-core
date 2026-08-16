@@ -82,6 +82,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - 路径解析：复用 `util/path.resolvePath`（防穿越，与 read 工具同源）
 - 文本：读文件（≤`types.FILE_READ_LIMIT` 64KB 守卫 + 超限截断 `truncated:true`）→ `{name, kind:"text", content, truncated}`（jsonw.escapeAlloc 转义）
 - 图片：扩展名白名单 + MIME 映射表（`png→image/png`、`jpg/jpeg→image/jpeg`、`gif→image/gif`、`webp→image/webp`、`svg→image/svg+xml`——**禁止裸拼 `image/<ext>`**，jpg/svg 会生成非法 MIME）+ `util/text.isBinary` → base64 → `{name, kind:"image", data_url:"data:<mime>;base64,..."}`（≤5MB 守卫，超限 `kind:"too_large"`）
+- **SVG XSS 例外（审查补充）**：`svg` **不进图片预览通道**——降级为 `kind:"text"` 展示源码（保留预览能力，浏览器不渲染）。理由：SVG 向量多（`<script>`/`on*` 事件处理器/`<foreignObject>` 嵌入 HTML/`<image href>` 外部引用隐私泄露），且本项目无服务端 sanitizer（DOMPurify 是前端库，Zig 侧手写 XML 消毒绕过向量多、成本高）；img 上下文虽在现代浏览器禁脚本，但外部引用等向量不依赖脚本执行。渲染类 SVG 预览留待未来（`<img>` 仅 src 属性赋值、不经 innerHTML，届时前端侧 sanitize 或 CSP 配合）
 - 错误：参数缺失/路径越界 → 400；文件不存在/目录 → 404
 
 **前端**：
@@ -106,7 +107,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 测试（Zig：新增 approval 单测；前端：15 文件不变，modal 为 DOM 交互走浏览器实测）：
 
 - `isRisky`：bash 危险命令各规则命中（rm -rf/Remove-Item -Recurse/git push --force/curl|sh 等）+ 安全命令不误报（rm file、git push、Remove-Item 单文件）+ 非 bash 工具在 risky 模式不审 + always 模式全审 + never 全不审
-- 预览 MIME 映射：全扩展名走映射表（jpg/jpeg→image/jpeg、svg→image/svg+xml），data_url 前缀与映射一致（含大小写扩展名 `.JPG`）
+- 预览 MIME 映射：png/jpg/jpeg/gif/webp 走映射表（jpg/jpeg→image/jpeg），data_url 前缀与映射一致（含大小写扩展名 `.JPG`）；**svg 断言 `kind:"text"`（源码预览，非 image）**
 - `Gate`：初始 pending、resolve(true/false) 后状态、重复 resolve 幂等、wait 超时返回 denied、check_abort 置位返回 aborted、**keepalive 返回 false 立即 aborted（断连语义）、keepalive 周期性调用次数正确**
 - 前端竞态（浏览器实测）：审批 Modal 打开 → 等待 300s（或人工缩短验证）超时 → 点 Allow → 提示 "expired" 且无二次请求副作用；断连 → Modal 自动关闭
 
