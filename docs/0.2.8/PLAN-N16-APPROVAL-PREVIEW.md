@@ -93,6 +93,16 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - **frontend 层（handler.zig + app.js）**：仅交互呈现——SSE 事件收发、Modal、POST 端点；经 `ToolHooks.before`（core 定义的回调契约，与 PhaseWriterCb/ToolDisplayCb 同模式）注入
 - CLI 未来审批：复用同一 `approval.zig`（规则+Gate），仅替换 hook 实现为 stdin 确认——core 零改动
 
+**SSE 写帧接口契约**（审查补充：SseWriter 注释帧能力未定义——确认现有接口已支持，无需新增能力）：
+- `SseWriter`（sse.zig:12-23）暴露 `writeAll`（任意原始字节）+ `flush` 函数指针——**writeAll 是原始字节通道，可写任意帧**（注释帧 `: keepalive\r\n\r\n`、事件帧 `event: x\ndata: {...}\n\n` 均直接 writeAll 字节序列）
+- keepalive/approval_reminder 实现 = `sw.writeAll(": keepalive\r\n\r\n")` + `sw.flush()`（或对应注释帧），**无需新增包装方法**；写失败即错误返回（keepalive 回调语义）
+- 契约：SseWriter 不改动；`writeFrame`（sse.zig:62-67）仍用于结构化事件，原始帧能力直接复用 writeAll
+
+**拒绝消息契约**（审查补充：hook 返回值格式未明确——定义与现有 tool 消息/错误格式对齐规则）：
+- `approvalBeforeHook` 返回 `?[]const u8` = **tool 消息 content（纯文本）**，非错误格式：agent 收到非 null 后 append `role=tool, content=<消息>`（agent.zig:377-381，与既有 before-block 路径完全一致），**不设 err_msg、不发 tool_error 事件、不发 tool_delta/render 回调**——拒绝不是执行错误（工具未执行），无工具卡片痕迹
+- 前端反馈：Modal 关闭即用户已知晓；拒绝消息随 session 持久化，**reload 后按普通 tool 消息显示**（与 block 行为一致）
+- 模型解析：下一轮 LLM 在 tool 消息中读到拒绝文本（三态措辞见上），据此调整策略——无特殊结构，自然语言
+
 **日志与审计**（审查补充：审批是安全关键操作——危险命令的执行决策必须可回溯，对齐 F6 ①"请求级审计"理念；review checklist G15 空操作无日志 = 无法事后定位）：
 
 | 事件 | 层级 | 级别 | 字段 |
@@ -116,7 +126,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
      - `denied`（用户主动拒绝）→ `"User denied this tool call ({rule}). Adjust your approach."`（模型应换方案不重试）
      - `timeout`（超时无响应 = 自动拒绝，非用户决策）→ `"Tool call auto-denied: approval timed out ({rule}). It was not explicitly rejected by the user."`（模型可重试或询问用户）
      - `aborted`（abort/SSE 断连，非用户决策）→ `"Tool call aborted: the connection was interrupted while awaiting approval ({rule}). It was NOT denied by the user."`，并调 `agent.abort()` 终止回合（SSE 已断，继续无意义）
-- `POST /api/approval/:id` `{"allow":true|false, "session_id":...}` → map 找 gate，**session_id 与 gate 记录不匹配 → 404**（与未知 id 同响应）→ 匹配则 `resolve` → 200。**无需通知机制**（agent 线程轮询 gate）
+- `POST /api/approval/:id` `{"allow":true|false, "session_id":...}` → map 找 gate，**session_id 与 gate 记录不匹配 → 404**（与未知 id 同响应）→ 匹配则 `resolve` → 200。**无需通知机制**（agent 线程轮询 gate）。**session 隔离模式与 abort 一致**（审查追问）：abort 端点是 `POST /api/session/:id/abort`——session_id 在 URL 天然绑定（handler.zig:116）；审批端点 id 为随机 UUID 且 body 强制校验 session_id——两者同属"session 维度隔离"，审批因 UUID 不可猜测而更强（abort 的 URL 可枚举但无鉴权也仅止于中止本会话，风险面不同，已在威胁模型节说明）
 - 事件时序：`approval_required` 先于 `tool_start`（hook 在 beginTool 之前，agent.zig:374→403）；审批通过后工具卡片正常流式
 - **SSE 写失败矩阵**（审查补充：直写 frame 依赖连接活跃，全部写点失败行为必须显式）：
   | 写点 | 写失败行为 |
