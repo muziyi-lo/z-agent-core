@@ -69,6 +69,11 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - `approval_map` 用 StringHashMap 是 **id 寻址 + 重复 POST 幂等**的便利（`resolve` 幂等），不代表支持并发 pending
 - 该串行契约是前端单 Modal 的**依赖**：若未来 agent 并行化工具执行（e.g. 多工具同轮并行），必须同步引入前端 Modal 队列（按 id 排队，一次展示一个）或按工具分组合并展示——方案文档在此登记该演进约束
 
+**职责边界**（审查补充：明确审批能力分层，防实施时判定逻辑误入 handler）：
+- **core 层（src/approval.zig）**：危险判定（isRisky）+ 状态机（Gate）+ 决议语义——**决策逻辑全在 core，任何前端共享**
+- **frontend 层（handler.zig + app.js）**：仅交互呈现——SSE 事件收发、Modal、POST 端点；经 `ToolHooks.before`（core 定义的回调契约，与 PhaseWriterCb/ToolDisplayCb 同模式）注入
+- CLI 未来审批：复用同一 `approval.zig`（规则+Gate），仅替换 hook 实现为 stdin 确认——core 零改动
+
 **日志与审计**（审查补充：审批是安全关键操作——危险命令的执行决策必须可回溯，对齐 F6 ①"请求级审计"理念；review checklist G15 空操作无日志 = 无法事后定位）：
 
 | 事件 | 层级 | 级别 | 字段 |
