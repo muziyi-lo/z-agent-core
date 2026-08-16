@@ -49,6 +49,11 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - `wait` 超时：300s（5 分钟）未决议 → 超时当 denied（防 SSE 连接挂死）。等待循环每 100ms 检查：gate.state + `check_abort`（`signal.isInterrupted()`，与 agent.abort 联动）
 - **SSE 断连生命周期**（审查补充）：审批等待期间连接无写入，断连（关页面/网络中断）无法被写失败路径感知 → 会挂到 300s 超时。修复：`wait` 的 `keepalive` 回调每 ~1s 写一次 SSE 注释帧（`: keepalive\r\n\r\n`，复用 SseWriter 函数指针包装），**写失败 = TCP 已断** → 回调返回 false → `wait` 立即返回 aborted。hook 收到 aborted 后调 `agent.abort()`（同 sse.zig 现有"写失败→abort"语义，agent.zig:109）终止整个回合（SSE 已断，结果无法送达，继续无意义）→ runTurn 走 interrupted 收尾。副作用：心跳同时防止代理超时关闭空闲 SSE 连接
 
+**并发模型与串行契约**（审查补充）：agent 的 tool_calls 执行是**严格串行**——`agent.zig:369 for (tcs) |tc|` 顺序循环，每个工具（含 hook before 审批阻塞）完成才执行下一个，回合内无任何并行执行路径（无 Thread/spawn）。server.zig 的线程是**连接级**并发（不同 HTTP 连接），与单回合内工具流无关。因此：
+- **同一时刻至多一个 pending gate**——前端"单 Modal"断言成立，无需 Modal 队列
+- `approval_map` 用 StringHashMap 是 **id 寻址 + 重复 POST 幂等**的便利（`resolve` 幂等），不代表支持并发 pending
+- 该串行契约是前端单 Modal 的**依赖**：若未来 agent 并行化工具执行（e.g. 多工具同轮并行），必须同步引入前端 Modal 队列（按 id 排队，一次展示一个）或按工具分组合并展示——方案文档在此登记该演进约束
+
 **Web 集成**（handler.zig + server.zig）：
 
 - 进程级 `approval_map: *StringHashMap(*approval.Gate)` + mutex（server.zig 定义，与 abort_map 同模式）
@@ -65,7 +70,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - `approvalModal(detail)` Promise：Allow → `POST /api/approval/:id {allow:true}`；Cancel/Escape/遮罩 → `{allow:false}`
 - **竞态处理（审查补充）**：Gate 超时/断连被清理后用户才点 Allow → POST 404。Allow 分支捕获**非 2xx 响应**（404 或 500）→ 视为"审批已超时/已失效"：提示（`showStatus` 或 Modal 内换文案"This approval expired — the tool call was auto-denied"）并关闭 Modal，**不 resolve 为 allow**。已超时的 tool 消息后续会以 denied 形式出现在会话中，前端无需重发
 - **断连联动**：SSE `evtSrc.onerror`（app.js:1592 现有路径）→ 关闭当前审批 Modal（若有）+ 清 pending 状态——服务端已因 keepalive 写失败 abort，Modal 残留会误导用户
-- SSE listener `approval_required`：解析 detail → 弹 Modal。同一时刻仅一个审批（SSE 串行单工具流）；若有旧 pending Modal 则先拒绝再弹新的
+- SSE listener `approval_required`：解析 detail → 弹 Modal。同一时刻仅一个审批（**依据 agent 串行契约，见"并发模型"节**）；防御性兜底：若已有 pending Modal（违反契约，未来并行化的信号），先拒绝旧的再弹新的——不崩溃、不叠加
 - 工具卡片流式期出现 pending 态（`tool_start` 到达后正常，审批在 tool_start 前——卡片此时尚未创建，无特殊渲染需求）
 
 **CLI 端**：本期不做（ApprovalModal 是 Web 组件）。CLI 同步 stdin 确认留待后续（REMAINING 备注）。
