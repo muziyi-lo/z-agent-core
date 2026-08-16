@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased] - 0.2.8 周期（未发布）
+## [0.2.8] - 2026-08-16
 
 ### Added
 - **配置检查功能补全**（`docs/0.2.8/PLAN-N23-CONFIG-CHECK.md`，N23，5 新单测 + 全量 383）:

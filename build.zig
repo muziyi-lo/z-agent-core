@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const version_str = b.option([]const u8, "version", "Override version string") orelse "0.2.7";
+    const version_str = b.option([]const u8, "version", "Override version string") orelse "0.2.8";
 
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", version_str);
