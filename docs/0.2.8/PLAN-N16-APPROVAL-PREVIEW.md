@@ -37,6 +37,7 @@ pub const Gate = struct {
     pub fn resolve(self: *Gate, allow: bool) bool;  // 返回 true=从 pending 转变（真正决议），false=已终态（幂等 no-op）
 };
 pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // 返回规则说明或 null
+    // 审查补充：`mode==.always` 时不做规则匹配，直接返回固定说明文本 `"all tool calls require approval (approval_mode=always)"`——approval_required 的 rule 字段就是该文本，前端 Modal 显示“全部工具审批”；`never` 返回 null；`risky` 按 L0/L1 规则返回具体规则说明
 ```
 
 - `isRisky` 规则集——**两级分级**（审查修订：原"宁可漏报不可误报"一刀切与"默认开启、用户可关"定位冲突——误报是用户关掉审批（never）的主因，漏报反而不流失用户；改为按后果分级 + 摩擦自愈，见下）。**匹配算法定稿**（审查补充：变体覆盖需可测，如 `rm -fr`/`rm --recursive --force`/PS 前缀简写 `-Fo`）：
