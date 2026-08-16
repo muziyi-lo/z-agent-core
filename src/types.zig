@@ -23,9 +23,24 @@ pub const Message = struct {
     /// preceding assistant's tool_calls by tool_call_id on reload).
     /// Arena-duped on append/load — never a borrow from ToolResult.
     meta: ?ToolMeta = null,
+    /// Media attachments (source: ToolResult.attachments), persisted on
+    /// role=tool messages. Arena-duped on append/load — never a borrow.
+    /// base64 data is injected as OpenAI image_url content blocks by the
+    /// provider (gated by the model's input modality).
+    attachments: ?[]const Attachment = null,
     timestamp: i64 = 0,
     model: ?[]const u8 = null,
     usage: ?TokenUsage = null,
+};
+
+/// Media attachment carried by a tool result and persisted on the tool
+/// message. `data` is base64-encoded original bytes (never decoded here — the
+/// API endpoint decodes); `mime` is whitelisted (image/png|jpeg|gif|webp).
+/// All slices are owned by the owning allocator (tool arena / session arena)
+/// and freed with it — deinit() frees ToolResult-owned slices.
+pub const Attachment = struct {
+    mime: []const u8,
+    data: []const u8,
 };
 
 /// Token usage captured from SSE [DONE] frame. Null for user/tool messages.
@@ -221,6 +236,9 @@ pub const ToolResult = struct {
     /// Zero-copy view into session_content — NOT freed by deinit.
     user_output: ?[]const u8 = null,
     meta: ToolMeta = .none,
+    /// Media attachments (mime + base64). Owned by this result — deinit frees
+    /// each slice. Subject to the same no-shallow-copy contract as args_owned.
+    attachments: []const Attachment = &.{},
     /// Owned parsed args JSON tree; keeps zero-copy meta borrows alive
     /// until deinit (N14 fix: transferred via finishExec — single point).
     /// CONTRACT: ToolResult must NOT be shallow-copied — args_owned carries a
@@ -231,6 +249,10 @@ pub const ToolResult = struct {
     pub fn deinit(self: *ToolResult, allocator: std.mem.Allocator) void {
         allocator.free(self.session_content);
         if (self.err_msg) |e| allocator.free(e);
+        for (self.attachments) |att| {
+            allocator.free(att.mime);
+            allocator.free(att.data);
+        }
         if (self.args_owned) |*p| p.deinit();
     }
 

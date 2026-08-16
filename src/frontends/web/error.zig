@@ -6,6 +6,7 @@ pub const ErrorCode = enum {
     session_not_found,
     message_not_found,
     agent_busy,
+    payload_too_large,
     internal_error,
 };
 
@@ -16,6 +17,7 @@ pub fn codeString(c: ErrorCode) []const u8 {
         .session_not_found => "session_not_found",
         .message_not_found => "message_not_found",
         .agent_busy => "agent_busy",
+        .payload_too_large => "payload_too_large",
         .internal_error => "internal_error",
     };
 }
@@ -27,6 +29,7 @@ pub fn statusCode(c: ErrorCode) std.http.Status {
         .session_not_found => .not_found,
         .message_not_found => .not_found,
         .agent_busy => .service_unavailable,
+        .payload_too_large => .payload_too_large,
         .internal_error => .internal_server_error,
     };
 }
@@ -51,6 +54,7 @@ test "error: statusCode maps correctly" {
     try std.testing.expectEqual(std.http.Status.not_found, statusCode(.not_found));
     try std.testing.expectEqual(std.http.Status.bad_request, statusCode(.bad_request));
     try std.testing.expectEqual(std.http.Status.service_unavailable, statusCode(.agent_busy));
+    try std.testing.expectEqual(std.http.Status.payload_too_large, statusCode(.payload_too_large));
     try std.testing.expectEqual(std.http.Status.internal_server_error, statusCode(.internal_error));
 }
 

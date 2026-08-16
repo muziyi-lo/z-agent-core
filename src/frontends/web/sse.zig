@@ -267,6 +267,8 @@ fn serializeMeta(jw: *jsonw.JsonWriter, meta: types.ToolMeta) !void {
         .read => |m| {
             try jw.beginObject(null);
             try jw.stringField("name", "read");
+            try jw.stringField("path", m.path);
+            try jw.boolField("is_directory", m.is_directory);
             try jw.intField("total_lines", m.total_lines);
             try jw.intField("byte_count", m.byte_count);
             try jw.boolField("truncated", m.truncated);
@@ -290,6 +292,7 @@ fn serializeMeta(jw: *jsonw.JsonWriter, meta: types.ToolMeta) !void {
         .edit => |m| {
             try jw.beginObject(null);
             try jw.stringField("name", "edit");
+            try jw.stringField("path", m.path);
             try jw.intField("replacements", m.replacements);
             try jw.endValue();
         },

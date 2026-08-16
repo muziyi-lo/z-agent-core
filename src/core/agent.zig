@@ -78,6 +78,24 @@ pub const ToolCallRecord = struct {
     args_hash: u64,
 };
 
+/// N22: true when the model's input modalities include image (config
+/// `input = ["text","image"]`) — the provider gates image_url injection on
+/// this same check (provider.zig hasImageModality).
+fn hasImageModality(input: []const types.InputModality) bool {
+    for (input) |m| {
+        if (m == .image) return true;
+    }
+    return false;
+}
+
+/// N22: true when any tool message carries image attachments.
+fn hasAttachmentMessages(msgs: []const types.Message) bool {
+    for (msgs) |m| {
+        if (m.role == .tool and m.attachments != null) return true;
+    }
+    return false;
+}
+
 /// Single-turn LLM execution engine. V1 synchronous — no TUI, compact, permission, or async.
 pub const AgentLoop = struct {
     /// Parent allocator, used for ToolContext and freeing tool results. Not arena.
@@ -316,7 +334,25 @@ pub const AgentLoop = struct {
                 }
             }
 
-            const msgs = self.session_ref.messages();
+            // N22: capability notice — TEMPORARY injection into the request
+            // array (never into the session history): when the messages carry
+            // image attachments but the current model has no image input
+            // modality, the model is told once per request so it stops trying
+            // to read images. Not persisted: switching to a vision model later
+            // must not leave a stale "does not support image input" notice.
+            const session_msgs = self.session_ref.messages();
+            const msgs = blk: {
+                if (hasImageModality(self.provider_ref.config.input_modality)) break :blk session_msgs;
+                if (!hasAttachmentMessages(session_msgs)) break :blk session_msgs;
+                const merged = try arena_alloc.alloc(types.Message, session_msgs.len + 1);
+                merged[0] = .{
+                    .id = 0,
+                    .role = .system,
+                    .content = "[Notice: This model does not support image input — image attachments were read but not sent. Switch to a vision-capable model to read images.]",
+                };
+                @memcpy(merged[1..], session_msgs);
+                break :blk merged;
+            };
 
         const raw_resp = blk: {
             const result = if (self.chat_fn) |cf|
@@ -448,6 +484,10 @@ pub const AgentLoop = struct {
                                 .content = ok.session_content,
                                 .tool_call_id = tc.id,
                                 .meta = ok.meta,
+                                // N22: carry image attachments into the session
+                                // message (arena-duped by append; empty → null
+                                // so the JSONL key is omitted).
+                                .attachments = if (ok.attachments.len > 0) ok.attachments else null,
                             });
                             new_msgs += 1;
                         } else |exec_err| {
@@ -641,6 +681,9 @@ const MockChatter = struct {
     index: usize,
     error_on_call: ?usize = null,
     overflow_on_call: ?usize = null,
+    /// N22: first-seen request message array snapshot for notice assertions.
+    seen_msgs: ?[]types.Message = null,
+    seen_allocator: ?std.mem.Allocator = null,
 };
 
 fn mockChat(
@@ -651,10 +694,20 @@ fn mockChat(
     tools: ?[]const types.Tool,
 ) anyerror!types.ProviderResponse {
     _ = io;
-    _ = messages;
     _ = tools;
     const self: *MockChatter = @ptrCast(@alignCast(ctx.?));
     defer self.index += 1;
+
+    if (self.seen_msgs == null) {
+        if (self.seen_allocator) |sa| {
+            const snapshot = try sa.alloc(types.Message, messages.len);
+            for (messages, 0..) |m, i| {
+                snapshot[i] = m;
+                snapshot[i].content = try sa.dupe(u8, m.content);
+            }
+            self.seen_msgs = snapshot;
+        }
+    }
 
     if (self.overflow_on_call) |oc| {
         if (self.index == oc) return error.ContextOverflow;
@@ -888,10 +941,111 @@ test "agent: runTurn stop" {
     try std.testing.expectEqualStrings("Hello!", msgs[2].content);
 }
 
-test "agent: runTurn tool_calls" {
+test "agent: non-vision model gets temporary capability notice in request array only" {
     const io = std.testing.io;
     const allocator = std.testing.allocator;
 
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+
+    var p = provider.Provider{
+        .config = .{
+            .base_url = "https://api.test.com",
+            .api_key = "",
+            .model = "test-model",
+            .max_tokens = 1000,
+            .vendor = .standard,
+            .compat = .{},
+            .input_modality = &.{.text}, // non-vision
+        },
+    };
+    const reg = registry_mod.buildRegistry();
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
+
+    var mock = MockChatter{
+        .responses = &.{.{ .content = "done", .tool_calls = null, .finish_reason = .stop }},
+        .index = 0,
+        .seen_allocator = allocator,
+    };
+    agent.chat_fn = mockChat;
+    agent.chat_ctx = &mock;
+
+    try sess.append(.{ .role = .user, .content = "hi" });
+    try sess.append(.{ .role = .tool, .content = "Image file: shot.png", .tool_call_id = "c1", .attachments = &.{.{ .mime = "image/png", .data = "iVBORw0KGgo=" }} });
+
+    const result = try agent.runTurn(null, null);
+    defer if (mock.seen_msgs) |sm| allocator.free(sm);
+    try std.testing.expectEqual(TurnFinish.stop, result.finish);
+
+    const seen = mock.seen_msgs orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    // Request array starts with the capability notice…
+    try std.testing.expect(seen.len >= 1);
+    try std.testing.expectEqual(types.Role.system, seen[0].role);
+    try std.testing.expect(std.mem.indexOf(u8, seen[0].content, "does not support image input") != null);
+    // …but the session history stays untouched (no stale notice after a model switch).
+    for (sess.messages()) |m| {
+        try std.testing.expect(std.mem.indexOf(u8, m.content, "does not support image input") == null);
+    }
+    // Attachment-bearing tool message is still in the request array (payload
+    // stays; the provider gates injection separately).
+    var found_attachment = false;
+    for (seen) |m| {
+        if (m.role == .tool and m.attachments != null) found_attachment = true;
+    }
+    try std.testing.expect(found_attachment);
+}
+
+test "agent: vision model gets no capability notice" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+
+    var p = provider.Provider{
+        .config = .{
+            .base_url = "https://api.test.com",
+            .api_key = "",
+            .model = "test-model",
+            .max_tokens = 1000,
+            .vendor = .standard,
+            .compat = .{},
+            .input_modality = &.{ .text, .image }, // vision
+        },
+    };
+    const reg = registry_mod.buildRegistry();
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, ".", 0, .{});
+
+    var mock = MockChatter{
+        .responses = &.{.{ .content = "done", .tool_calls = null, .finish_reason = .stop }},
+        .index = 0,
+        .seen_allocator = allocator,
+    };
+    agent.chat_fn = mockChat;
+    agent.chat_ctx = &mock;
+
+    try sess.append(.{ .role = .user, .content = "hi" });
+    try sess.append(.{ .role = .tool, .content = "Image file: shot.png", .tool_call_id = "c1", .attachments = &.{.{ .mime = "image/png", .data = "iVBORw0KGgo=" }} });
+
+    const result = try agent.runTurn(null, null);
+    defer if (mock.seen_msgs) |sm| allocator.free(sm);
+    try std.testing.expectEqual(TurnFinish.stop, result.finish);
+
+    const seen = mock.seen_msgs orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    for (seen) |m| {
+        try std.testing.expect(std.mem.indexOf(u8, m.content, "does not support image input") == null);
+    }
+}
+
+test "agent: runTurn tool_calls" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
     var sess = try session_mod.Session.init(allocator, io, "test-model");
     defer sess.deinit();
 
@@ -939,6 +1093,77 @@ test "agent: runTurn tool_calls" {
     try std.testing.expectEqualStrings("call_1", msgs[3].tool_call_id orelse "");
     try std.testing.expectEqual(types.Role.assistant, msgs[4].role);
     try std.testing.expectEqualStrings("Found 1 file.", msgs[4].content);
+}
+
+test "agent: read image result carries attachments into session message" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    // Real read tool execution against a real PNG fixture.
+    const test_root = ".zig-test-agent-read-img";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {};
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    // Absolute project root (production shape — resolvePath rejects relative
+    // roots like "." as escaping).
+    var root_buf: [1024]u8 = undefined;
+    const root_len = try Io.Dir.cwd().realPath(io, &root_buf);
+    const abs_root = try allocator.dupe(u8, root_buf[0..root_len]);
+    defer allocator.free(abs_root);
+    const img_path = try std.fs.path.join(allocator, &.{ test_root, "shot.png" });
+    defer allocator.free(img_path);
+    {
+        const png_head = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 'I', 'H', 'D', 'R', 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x08, 0x06, 0x00, 0x00, 0x00 };
+        const f = try Io.Dir.cwd().createFile(io, img_path, .{});
+        defer f.close(io);
+        try f.writeStreamingAll(io, &png_head);
+    }
+
+    var sess = try session_mod.Session.init(allocator, io, "test-model");
+    defer sess.deinit();
+
+    var p = provider.Provider{
+        .config = .{
+            .base_url = "https://api.test.com",
+            .api_key = "",
+            .model = "test-model",
+            .max_tokens = 1000,
+            .vendor = .standard,
+            .compat = .{},
+        },
+    };
+    const reg = registry_mod.buildRegistry();
+    var agent = AgentLoop.init(allocator, io, &p, reg, &sess, 10, abs_root, 0, .{});
+
+    var tool_calls = [_]types.ToolCall{
+        .{ .id = "call_1", .name = "read", .arguments = std.fmt.comptimePrint("{{\"path\":\"{s}/shot.png\"}}", .{test_root}) },
+    };
+    var mock = MockChatter{
+        .responses = &.{
+            .{ .content = null, .tool_calls = tool_calls[0..], .finish_reason = .tool_calls },
+            .{ .content = "done", .tool_calls = null, .finish_reason = .stop },
+        },
+        .index = 0,
+    };
+    agent.chat_fn = mockChat;
+    agent.chat_ctx = &mock;
+
+    try sess.append(.{ .role = .user, .content = "read image" });
+
+    const result = try agent.runTurn(null, null);
+    try std.testing.expectEqual(TurnFinish.stop, result.finish);
+
+    // The tool message persisted the attachment (read returned it, append must carry it).
+    var found = false;
+    for (sess.messages()) |m| {
+        if (m.role == .tool) {
+            if (m.attachments != null) {
+                found = true;
+                try std.testing.expectEqual(@as(usize, 1), m.attachments.?.len);
+                try std.testing.expectEqualStrings("image/png", m.attachments.?[0].mime);
+            }
+        }
+    }
+    try std.testing.expect(found);
 }
 
 test "agent: runTurn max_rounds" {

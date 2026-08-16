@@ -3,6 +3,7 @@ const init_mod = @import("../init.zig");
 const config_mod = @import("../../config.zig");
 const agent_mod = @import("../../core/agent.zig");
 const session_mod = @import("../../core/session.zig");
+const approval_mod = @import("../../approval.zig");
 const signal = @import("../../util/signal.zig");
 const log = @import("../../util/log.zig");
 const trace = @import("../../util/trace.zig");
@@ -19,6 +20,13 @@ const default_port: u16 = 8090;
 
 var abort_map: std.StringHashMap(*agent_mod.AgentLoop) = undefined;
 var abort_mutex: std.Io.Mutex = .init;
+/// Pending approval gates by UUID id. Gates are allocated in the per-request
+/// arena of the SSE connection that owns them; they stay alive while the hook
+/// blocks in gate.wait(). All map operations (put/get/resolve/remove) run
+/// under approval_mutex so a POST thread never touches a gate after the agent
+/// thread removed it (arena deinit follows).
+var approval_map: std.StringHashMap(*approval_mod.Gate) = undefined;
+var approval_mutex: std.Io.Mutex = .init;
 var undo_map: std.StringHashMap(*std.ArrayListAligned(handler.UndoOp, null)) = undefined;
 /// Long-lived allocator for undo ops (survives per-request arenas).
 var persistent_alloc: std.mem.Allocator = undefined;
@@ -89,6 +97,13 @@ fn threadStarted() void {
     _ = @atomicRmw(u32, &active_threads, .Add, 1, .seq_cst);
 }
 
+/// Loopback check for the auth gate. Literal comparisons only (DNS resolution
+/// happens later via IpAddress.resolve); anything else is refused.
+fn isLoopbackAddress(addr: []const u8) bool {
+    return std.mem.eql(u8, addr, "127.0.0.1") or std.mem.eql(u8, addr, "::1") or
+        std.mem.eql(u8, addr, "[::1]") or std.mem.eql(u8, addr, "localhost");
+}
+
 fn threadFinished() void {
     _ = @atomicRmw(u32, &active_threads, .Sub, 1, .seq_cst);
 }
@@ -102,6 +117,7 @@ pub fn main(process: std.process.Init) !void {
     const gpa = gpa_alloc.allocator();
 
     abort_map = std.StringHashMap(*agent_mod.AgentLoop).init(gpa);
+    approval_map = std.StringHashMap(*approval_mod.Gate).init(gpa);
     undo_map = std.StringHashMap(*std.ArrayListAligned(handler.UndoOp, null)).init(gpa);
     persistent_alloc = gpa;
     subcall_runner = subcall_mod.SubcallRunner.init(gpa, io);
@@ -130,6 +146,21 @@ pub fn main(process: std.process.Init) !void {
     }
     if (root_override == null) {
         root_override = process.environ_map.get("ZAGENT_ROOT");
+    }
+
+    // N16 security gate (fail-closed): binding to a non-loopback address with
+    // no authentication exposes sessions, preview file reads and API-key
+    // reading. Until auth exists, refuse non-loopback binds outright.
+    if (!isLoopbackAddress(bind_address)) {
+        var ebuf: [256]u8 = undefined;
+        var ew: Io.File.Writer = .init(.stderr(), io, &ebuf);
+        ew.interface.print("z-agent-core: error: binding to a non-loopback address requires authentication — use --address 127.0.0.1, or wait for the auth feature\n", .{}) catch |err| {
+            log.errorLog("event=startup_gate", "err={s}", .{@errorName(err)});
+        };
+        ew.interface.flush() catch |err| {
+            log.errorLog("event=startup_gate_flush", "err={s}", .{@errorName(err)});
+        };
+        return;
     }
 
     var state = init_mod.init(gpa, io, .{ .project_root = root_override }) catch |err| {
@@ -255,9 +286,15 @@ fn handleConnection(
         .undo_allocator = persistent_alloc,
         .undo_map = &undo_map,
         .subcall_runner = &subcall_runner,
+        .approval_map = &approval_map,
+        .approval_mutex = &approval_mutex,
         .thread_id = tid,
         .request_id = rid,
     };
+    // N16: inject the approval policy notice into the system prompt on every
+    // turn (idempotent by prefix scan inside the callback). Context is the
+    // per-connection handler Context, alive for the whole request.
+    agent.system_prompt = .{ .context = &ctx, .rebuild = handler.approvalSystemPrompt };
 
     defer {
         abort_mutex.lock(io) catch unreachable;

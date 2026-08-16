@@ -2,6 +2,32 @@
 
 ## [Unreleased] - 0.2.8 周期（未发布）
 
+### Fixed
+- **会话名 JSON 转义 bug**（真实事故）：会话名含反斜杠（如 prompt 带 `c:\path`）→ `/api/session` 返回损坏 JSON → 前端解析崩溃。修复 handler.zig 6 处 name 拼接（列表/分页/get/messages 端点）补 `jsonw.escapeAlloc` 转义
+- **`[models.compat]` TOML 平铺陷阱**（真实事故）：轻量 toml.zig 不支持嵌套表——`[models.compat]` 表头后的键（`input`/`thinking_format`）平铺到 root 丢失：`input=["text","image"]` 静默回退 `["text"]`（vision 失效）、compat override 永不生效。修复：启动检测 `models.compat` 键 → stderr 警告；模板移除真实表头改纯注释（明确 input 必须在 `[[models]]` 表内）；`--list-models` 输出 input 模态列（配置生效可见）。登记 F25（toml 嵌套表支持）
+
+### Added
+- **多模态图片附件（vision）**（`docs/0.2.8/PLAN-N22-VISION-ATTACHMENTS.md`，N22，8 新单测 + 全量 375）:
+  - **附件链路**（对齐 opencode read.ts attachments + openai-chat.ts image_url 五步链路）: `types.Attachment{mime, base64}` 双挂载（ToolResult 产出/Message 持久化，deinit 与 arena dup 契约）；session JSONL serialize/parse/dup（null 省略键，旧文件惰性兼容）；undo dupMessage 附件深拷贝
+  - **read 图片附件化**（改造既有摘要分支）: magic bytes 嗅探（PNG/JPEG/GIF/WEBP 文件头，扩展名仅预筛——伪装文件回退 binary 拒绝）+ 纯头部尺寸解析（IHDR/SOF/GIF/VP8X，零依赖）**短边 >2000px 拒绝附件化**（对齐 opencode 2000 阈值，vision 按图块计费）+ 5MB 字节上限 + base64 附件（解码回原字节验证）
+  - **provider 门控注入**: `ProviderConfig.input_modality`（init/setModel 从 Model.input 填充）——含 `.image` 才构造 OpenAI `content` 数组（text + image_url data URL）；**非 vision 模型保持纯文本摘要**；注入前校验（mime 白名单 / base64 容忍 `\r\n\t` 行折叠 / 累计原始 5MB 近似守卫）
+  - **agent 层能力 Notice**（改进 opencode transform.ts 错误文本替换）: 非 vision + 带附件消息 → **临时注入请求数组**（不写 session 历史，模型切换无残留）"[Notice: This model does not support image input...]"
+  - **Web 渲染**: reload 路径 tool 卡内联 `<img data:>`（card-body 尾部，typed view 不覆盖）+ CSS
+  - **配置联动**: `input=["text","image"]` 声明 vision 才激活注入（此前配置无消费方）；未知枚举值 stderr 警告（防 typo 静默）；模板注释补 vision 说明
+  - 边界：5MB 守卫、magic 伪装、EXIF 不处理（原始像素为准）、尺寸守卫长图（4000×400）不误伤、空/损坏 base64 跳过
+  - 未来：F23 完整缩放（stb 系）、F24 附件外置存储/压缩
+
+### Added
+- **工具审批 + 文件预览**（`docs/0.2.8/PLAN-N16-APPROVAL-PREVIEW.md`，N16，29 单测 + 3 纯函数测试）:
+  - **审批引擎 `src/approval.zig`**（core 层，零 frontend 依赖）: `Gate` 原子状态机（100ms 轮询、`resolve` CAS 幂等、keepalive 断连检测、120s reminder + 240s 超时自动拒绝、超时/用户拒绝区分措辞）；`isRisky` **L0/L1 两级规则**——L0 动态执行信号（`$(`/反号/`${`/分号后 `$` 变量命令）fail-closed 升级审批；L1 封闭清单（递归删除 rm/del/rmdir/erase/Remove-Item、存储/设备破坏 format/diskpart/fdisk/parted/mkfs*/shred/wipefs/LVM/cryptsetup/dd of=/dev/、系统破坏 chkdsk/reg/sc/net、git force push/hard reset/clean、任意命令管道到 sh/bash/dash 引号感知扫描），firstCommand 归一化（sudo/env/nice/exec/command 包装词 + sudo 选项值 + VAR= 赋值 + 绝对路径）；`messageFor` 三态措辞统一出口（denied 最终拒绝/timeout 可重试/aborted 非用户拒绝）；`policyNotice` 模型可见策略段
+  - **Web 审批流**: `ToolHooks.before` 注入（agent.zig 既有契约）+ `approval_required`/`approval_reminder` SSE 事件（jsonw 组装规避 4096 缓冲截断）+ ApprovalModal（deadline 倒计时/红色紧迫/排队上限 2/Allow-Deny 竞态 stale 处理/断连自动关闭）+ `POST /api/approval/:id`（**UUID v4 不可预测 id + session_id 绑定校验不匹配 404**，与未知 id 同响应不泄漏存在性）；`approval_map` 全局 + mutex（惰性清理超时残留）；**SSE 写失败矩阵**（发送前短路不注册 gate / keepalive/reminder 写失败 → aborted → `agent.abort()`）
+  - **摩擦自愈**: `approval_cache` 回合内缓存（name+args Wyhash 完整哈希，approval_cache=false 禁用）+ `approval_allow` 归一化精确白名单（trim+空白折叠+大小写敏感，防 -extra 尾缀/&& 追加绕过）+ `approval_mode` never/risky/always（默认 risky，仅 bash 工具 L1 规则）
+  - **CLI fail-closed**: 无交互答复者 → 危险命令确定性拒绝（`approvalCliHook` + no_interactive 日志 + messageFor denied 措辞），`--approval never` 显式放行；REPL/单发双端注入 policyNotice（前缀幂等）
+  - **文件预览**: `GET /api/preview?path=` JSON 四态（image 无内容/文本 ≤64KB 截断/binary/too_large）+ `&raw=1` 原始字节（仅图片扩展名白名单，大小写不敏感 MIME 映射表，超限 **413**，`Cache-Control: private, max-age=60`）；JSON 表示 `no-store`；CSP header（`img-src 'self' data:`）；SVG 仅 `<img>` 路径渲染（禁脚本 + 禁外部资源）；read/edit 工具卡 Preview 按钮（tool_meta 事件补 path 字段）
+  - **安全门禁**: server `--address` 非回环且无鉴权 → 拒绝启动（fail-closed，待 auth 特性解禁）
+  - 测试: approval 25 单测（L1 命中矩阵 ~100 变体 + L0 信号 + Gate 状态机 8 项含超时/keepalive/reminder）+ config 3 + handler 3 纯函数（MIME 映射/查询参数/白名单归一化），All 359 tests + 15 前端文件
+  - 附: N16 审查发现差异修正（error.zig 413 变体、Web 端补 SystemPromptCb 注入、writeFrame 4096 帧构造、实时钟统一）
+
 ### Changed
 - **config 模板注释澄清模型命名空间**（用户实测 AI 配置供应商误解）: `DEFAULT_TEMPLATE` 中 "Models are shared across providers" 与实现矛盾（`lookupModel` 按 `(provider, id)` 归属匹配，config.zig:336）——误导 AI 认为模型 id 全局唯一、跨 provider 需改名。修复: 注释重写为命名空间语义（**同一 id 可在不同 provider 下共存**，解析按 "provider/model_id" 在 provider 内查找；`provider = ""` 才是任意 provider 可用的共享池，此时才产生跨 provider 碰撞）+ ollama 示例补 `[[models]]` 块 + 跨 provider 同名案例。模板 TOML 解析验证通过（tomllib）
 

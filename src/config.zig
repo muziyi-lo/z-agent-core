@@ -5,6 +5,40 @@ const types = @import("types.zig");
 
 const ConfigToml = std.StringArrayHashMapUnmanaged(toml.Value);
 
+/// Known top-level config keys (parseConfigContent consumers). Unknown keys
+/// trigger a warning so typos surface instead of silently doing nothing.
+const top_level_keys = [_][]const u8{
+    "default_model", "max_tokens", "max_tool_rounds", "base_prompt", "skills_dir",
+    "auto_title", "title_stop_words", "approval_mode", "approval_allow", "approval_cache",
+    "thinking_level", "providers", "models", "models.compat",
+};
+/// Known per-model keys (parseAllModels consumers).
+const model_keys = [_][]const u8{ "id", "name", "provider", "context_window", "max_tokens", "params_json", "input", "compat", "thinking_level" };
+/// Known per-provider keys (parseProviders consumers).
+const provider_keys = [_][]const u8{ "name", "api", "base_url", "api_key_env", "models" };
+
+/// Warn about keys in `table` that are not in `known`. This catches
+/// misspelled keys (`imput = [...]`) and misplaced keys before they silently
+/// degrade to defaults.
+fn warnUnknownKeys(io: Io, table: *const ConfigToml, known: []const []const u8, context: []const u8) void {
+    var it = table.iterator();
+    while (it.next()) |entry| {
+        var matched = false;
+        for (known) |k| {
+            if (std.mem.eql(u8, entry.key_ptr.*, k)) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            var warn_buf: [512]u8 = undefined;
+            var warn_w: Io.File.Writer = .init(.stderr(), io, &warn_buf);
+            warn_w.interface.print("z-agent-core: warning: unknown config key \"{s}\" in {s} — check the spelling (it was ignored)\n", .{ entry.key_ptr.*, context }) catch {};
+            warn_w.interface.flush() catch {};
+        }
+    }
+}
+
 /// Configuration loaded from .zagent/config.toml.
 /// Caller must call deinit() to release all owned memory.
 pub const Config = struct {
@@ -22,6 +56,17 @@ pub const Config = struct {
     /// Extra stopwords appended to the built-in conservative STOPWORDS set for
     /// the L2 keyword fallback title. User domain-specific noise words.
     title_stop_words: []const []const u8 = &.{},
+    /// Tool approval policy: "never" / "risky" / "always" (see src/approval.zig
+    /// Mode). risky = only enumerated destructive bash commands (L1 rules).
+    approval_mode: []const u8 = "risky",
+    /// Exact normalized command whitelist exempt from approval. A command is
+    /// exempt when `args.command` trimmed with whitespace collapsed to single
+    /// spaces equals an entry exactly (case-sensitive). Coverage list: see
+    /// docs/0.2.8/PLAN-N16-APPROVAL-PREVIEW.md category table (grows per version).
+    approval_allow: []const []const u8 = &.{},
+    /// Skip the approval prompt when the exact name+args pair was already
+    /// approved in this round (SSE connection). Set false to prompt every time.
+    approval_cache: bool = true,
 
     _arena: std.heap.ArenaAllocator,
 
@@ -251,6 +296,23 @@ fn parseConfigContent(a: std.mem.Allocator, io: Io, source: []const u8) !Config 
     var parsed = try toml.parse(a, source);
     defer toml.freeTable(a, &parsed);
 
+    // N22: the lightweight TOML parser flattens nested tables — a
+    // `[models.compat]` header routes subsequent keys (input,
+    // thinking_format, ...) into root["models.compat"] where the model
+    // parser never reads them. Warn loudly instead of silently dropping
+    // (observed: input=["text","image"] written after [models.compat] was
+    // ignored, leaving the model text-only).
+    if (parsed.get("models.compat") != null) {
+        var warn_buf: [512]u8 = undefined;
+        var warn_w: Io.File.Writer = .init(.stderr(), io, &warn_buf);
+        warn_w.interface.print("z-agent-core: warning: [models.compat] is not supported — its keys (input/thinking_format/...) were ignored. Move them directly into the [[models]] table, above any [models.compat] header.\n", .{}) catch {};
+        warn_w.interface.flush() catch {};
+    }
+
+    // Unknown top-level keys: warn instead of silently ignoring (a typo like
+    // `imput` or `max_token` would otherwise look configured but do nothing).
+    warnUnknownKeys(io, &parsed, &top_level_keys, "top-level config");
+
     const dm_raw = getString(parsed, "default_model") orelse "deepseek/deepseek-v4-pro";
     const max_tokens_val = getInt(parsed, "max_tokens") orelse 384000;
     const max_tool_rounds_val = getInt(parsed, "max_tool_rounds") orelse 10;
@@ -258,7 +320,7 @@ fn parseConfigContent(a: std.mem.Allocator, io: Io, source: []const u8) !Config 
     if (max_tokens_val > @as(i64, @intCast(std.math.maxInt(u32)))) return error.ValueTooLarge;
     if (max_tool_rounds_val > @as(i64, @intCast(std.math.maxInt(u32)))) return error.ValueTooLarge;
 
-    const all_models = try parseAllModels(a, parsed);
+    const all_models = try parseAllModels(a, parsed, io);
     const bp_raw = getString(parsed, "base_prompt");
     const skills_dir_raw = getString(parsed, "skills_dir") orelse ".zagent/skills";
     const auto_title_val = getBool(parsed, "auto_title") orelse true;
@@ -276,15 +338,34 @@ fn parseConfigContent(a: std.mem.Allocator, io: Io, source: []const u8) !Config 
         break :blk &.{};
     };
 
+    const approval_mode_raw = getString(parsed, "approval_mode") orelse "risky";
+    // approval_allow: best-effort; type errors degrade to empty with a warning
+    // (a broken whitelist must not block startup — an empty list just means
+    // every risky command prompts again).
+    var approval_allow_val: []const []const u8 = &.{};
+    approval_allow_val = getStringArray(a, parsed, "approval_allow") catch |err| blk: {
+        if (err == error.InvalidType) {
+            var warn_buf: [256]u8 = undefined;
+            var warn_w: Io.File.Writer = .init(.stderr(), io, &warn_buf);
+            warn_w.interface.print("z-agent-core: warning: approval_allow ignored (expected a string array)\n", .{}) catch {};
+            warn_w.interface.flush() catch {};
+        }
+        break :blk &.{};
+    };
+    const approval_cache_val = getBool(parsed, "approval_cache") orelse true;
+
     return .{
         .default_model = try a.dupe(u8, dm_raw),
         .max_tokens = @intCast(@max(max_tokens_val, 0)),
         .max_tool_rounds = @intCast(@max(max_tool_rounds_val, 0)),
-        .providers = try parseProviders(a, parsed, all_models),
+        .providers = try parseProviders(a, parsed, all_models, io),
         .base_prompt = if (bp_raw) |bp| try a.dupe(u8, bp) else null,
         .skills_dir = try a.dupe(u8, skills_dir_raw),
         .auto_title = auto_title_val,
         .title_stop_words = title_stop_words_val,
+        .approval_mode = try a.dupe(u8, approval_mode_raw),
+        .approval_allow = approval_allow_val,
+        .approval_cache = approval_cache_val,
         ._arena = undefined,
     };
 }
@@ -297,13 +378,14 @@ fn testParseConfig(allocator: std.mem.Allocator, source: []const u8) !Config {
     return config;
 }
 
-fn parseProviders(a: std.mem.Allocator, root: ConfigToml, all_models: []const types.Model) ![]const types.ProviderEntry {
+fn parseProviders(a: std.mem.Allocator, root: ConfigToml, all_models: []const types.Model, io: Io) ![]const types.ProviderEntry {
     const arr = root.get("providers") orelse return &.{};
     if (arr != .array) return error.InvalidConfig_ProvidersNotArray;
     var list = std.ArrayListAligned(types.ProviderEntry, null).empty;
     for (arr.array) |provider_table| {
         if (provider_table != .table) continue;
         const pt = provider_table.table;
+        warnUnknownKeys(io, &pt, &provider_keys, "[[providers]] table");
         const name_raw = getString(pt, "name") orelse "";
         const base_url_raw = getString(pt, "base_url") orelse "";
         const key_env_raw = getString(pt, "api_key_env") orelse "";
@@ -347,13 +429,14 @@ fn lookupModel(all_models: []const types.Model, provider_name: []const u8, model
     return null;
 }
 
-fn parseAllModels(a: std.mem.Allocator, root: ConfigToml) ![]const types.Model {
+fn parseAllModels(a: std.mem.Allocator, root: ConfigToml, io: Io) ![]const types.Model {
     const arr = root.get("models") orelse return &.{};
     if (arr != .array) return &.{};
     var list = std.ArrayListAligned(types.Model, null).empty;
     for (arr.array) |model_table| {
         if (model_table != .table) continue;
         const mt = model_table.table;
+        warnUnknownKeys(io, &mt, &model_keys, "[[models]] table");
         const id_raw = getString(mt, "id") orelse "";
         const name_raw = getString(mt, "name") orelse "";
         const provider_raw = getString(mt, "provider") orelse "";
@@ -401,13 +484,13 @@ fn parseAllModels(a: std.mem.Allocator, root: ConfigToml) ![]const types.Model {
             .max_tokens = @intCast(mt_val),
             .params_json = getString(mt, "params_json"),
             .compat = model_compat,
-            .input = try parseInputModality(a, mt),
+            .input = try parseInputModality(a, mt, io),
         });
     }
     return list.toOwnedSlice(a);
 }
 
-fn parseInputModality(a: std.mem.Allocator, mt: ConfigToml) ![]const types.InputModality {
+fn parseInputModality(a: std.mem.Allocator, mt: ConfigToml, io: Io) ![]const types.InputModality {
     const arr = mt.get("input") orelse {
         const duped = try a.dupe(types.InputModality, &.{.text});
         return duped;
@@ -419,8 +502,21 @@ fn parseInputModality(a: std.mem.Allocator, mt: ConfigToml) ![]const types.Input
     var list = std.ArrayListAligned(types.InputModality, null).empty;
     for (arr.array) |v| {
         if (v == .string) {
+            var matched = false;
             inline for (@typeInfo(types.InputModality).@"enum".fields) |field| {
-                if (std.mem.eql(u8, v.string, field.name)) try list.append(a, @field(types.InputModality, field.name));
+                if (std.mem.eql(u8, v.string, field.name)) {
+                    try list.append(a, @field(types.InputModality, field.name));
+                    matched = true;
+                }
+            }
+            // Unknown modality values are silently ignored today; warn so the
+            // user notices a typo (e.g. input=["text","video"]) instead of
+            // believing the modality is declared (N22 vision gating).
+            if (!matched) {
+                var warn_buf: [256]u8 = undefined;
+                var warn_w: Io.File.Writer = .init(.stderr(), io, &warn_buf);
+                warn_w.interface.print("z-agent-core: warning: input modality \"{s}\" ignored (expected text|image)\n", .{v.string}) catch {};
+                warn_w.interface.flush() catch {};
             }
         }
     }
@@ -581,6 +677,20 @@ const DEFAULT_TEMPLATE =
     \\# L2 keyword fallback title. Use for domain-specific noise words.
     \\# title_stop_words = ["修", "修复", "TODO"]
     \\
+    \\# Tool approval: dangerous commands ask for confirmation before running.
+    \\#   never  = no prompts (risky commands run silently — not recommended)
+    \\#   risky  = only enumerated destructive bash commands prompt (default)
+    \\#   always = every tool call prompts
+    \\# approval_mode = "risky"
+    \\# Exact command whitelist exempt from approval. Matches `args.command`
+    \\# exactly (trimmed, whitespace collapsed, case-sensitive):
+    \\# approval_allow = ["rm -rf .zig-cache", "git push --force origin dev"]
+    \\# Covered destructive categories (grows per version): recursive delete,
+    \\# storage/device wipe, system mutation, git force ops, pipe to shell.
+    \\# Full list: docs/0.2.8/PLAN-N16-APPROVAL-PREVIEW.md category table.
+    \\# Skip the prompt for an exact command already approved in this round.
+    \\# approval_cache = true
+    \\
     \\# Provider: defines an API endpoint with auth and available models.
     \\# Add multiple [[providers]] blocks for different services (openai, ollama, etc).
     \\[[providers]]
@@ -605,11 +715,21 @@ const DEFAULT_TEMPLATE =
     \\max_tokens = 384000             # max tokens the model can generate per response
     \\# thinking: auto-detected from base_url. Override via [models.compat] sub-table.
     \\# thinking_level = "high"         # none|minimal|low|medium|high|xhigh|max (default: high)
-    \\[models.compat]
-    \\# thinking_format = "thinking_object"  # auto-detected; uncomment to force
+    \\# NOTE: [models.compat] as a table header is NOT supported (flattened by the
+    \\# TOML parser) — put overrides (thinking_format/max_tokens_field/...) directly
+    \\# in the [[models]] table above this line.
     \\# params_json: vendor-specific JSON fragment for non-thinking params (e.g. top_p).
     \\# params_json = ""
     \\input = ["text"]               # supported input modalities: ["text"] or ["text", "image"]
+    \\                                # ["text","image"] = vision model — image attachments are
+    \\                                # injected into the model request (N22); text-only models
+    \\                                # receive plain summaries + a capability notice instead.
+    \\                                # Unknown values are ignored with a warning.
+    \\                                # !! MUST be written in the [[models]] table directly —
+    \\                                # a later [models.compat] header would swallow it.
+    \\# Compat quirks: NOT supported as a nested table. Put compat keys
+    \\# (thinking_format / max_tokens_field / ...) directly in the [[models]]
+    \\# table above this line, e.g. thinking_format = "openai".
     \\
     \\[[models]]
     \\id = "deepseek-v4-flash"
@@ -740,6 +860,46 @@ test "config: title_stop_words type error degrades to empty with warning" {
     try std.testing.expect(config.auto_title);
 }
 
+test "config: approval defaults risky, cache on, empty allow" {
+    const allocator = std.testing.allocator;
+    var config = try testParseConfig(allocator, DEFAULT_TEMPLATE);
+    defer config.deinit();
+    try std.testing.expectEqualStrings("risky", config.approval_mode);
+    try std.testing.expect(config.approval_cache);
+    try std.testing.expectEqual(@as(usize, 0), config.approval_allow.len);
+}
+
+test "config: approval fields parsed" {
+    const allocator = std.testing.allocator;
+    var config = try testParseConfig(allocator,
+        \\approval_mode = "always"
+        \\approval_cache = false
+        \\approval_allow = ["rm -rf .zig-cache", "git push --force origin dev"]
+        \\default_model = "deepseek/deepseek-v4-pro"
+        \\max_tokens = 1000
+        \\max_tool_rounds = 8
+    );
+    defer config.deinit();
+    try std.testing.expectEqualStrings("always", config.approval_mode);
+    try std.testing.expect(!config.approval_cache);
+    try std.testing.expectEqual(@as(usize, 2), config.approval_allow.len);
+    try std.testing.expectEqualStrings("rm -rf .zig-cache", config.approval_allow[0]);
+    try std.testing.expectEqualStrings("git push --force origin dev", config.approval_allow[1]);
+}
+
+test "config: approval_allow type error degrades to empty" {
+    const allocator = std.testing.allocator;
+    var config = try testParseConfig(allocator,
+        \\approval_allow = "not-an-array"
+        \\default_model = "deepseek/deepseek-v4-pro"
+        \\max_tokens = 1000
+        \\max_tool_rounds = 8
+    );
+    defer config.deinit();
+    try std.testing.expectEqual(@as(usize, 0), config.approval_allow.len);
+    try std.testing.expectEqualStrings("risky", config.approval_mode);
+}
+
 test "config: model params_json present" {
     const allocator = std.testing.allocator;
 
@@ -797,24 +957,76 @@ test "config: model input multimodal" {
         \\[[providers]]
         \\name = "test"
         \\api = "openai_compat"
-        \\base_url = "https://test.example.com"
+        \\base_url = "https://api.test.com"
         \\api_key_env = "TEST_KEY"
-        \\models = ["test-model"]
+        \\models = ["m1"]
         \\
         \\[[models]]
-        \\id = "test-model"
-        \\name = "Test Model"
+        \\id = "m1"
+        \\name = "M1"
         \\provider = "test"
-        \\context_window = 100000
-        \\max_tokens = 4096
+        \\context_window = 1000
+        \\max_tokens = 100
         \\input = ["text", "image"]
     );
     defer config.deinit();
-
     const input = config.providers[0].models[0].input;
     try std.testing.expectEqual(@as(usize, 2), input.len);
     try std.testing.expect(input[0] == .text);
     try std.testing.expect(input[1] == .image);
+}
+
+test "config: unknown input modality warns and is ignored" {
+    const allocator = std.testing.allocator;
+
+    var config = try testParseConfig(allocator,
+        \\[[providers]]
+        \\name = "test"
+        \\api = "openai_compat"
+        \\base_url = "https://api.test.com"
+        \\api_key_env = "TEST_KEY"
+        \\models = ["m1"]
+        \\
+        \\[[models]]
+        \\id = "m1"
+        \\name = "M1"
+        \\provider = "test"
+        \\context_window = 1000
+        \\max_tokens = 100
+        \\input = ["text", "video"]
+    );
+    defer config.deinit();
+    const input = config.providers[0].models[0].input;
+    try std.testing.expectEqual(@as(usize, 1), input.len);
+    try std.testing.expect(input[0] == .text);
+}
+
+test "config: input under [models.compat] header is ignored with warning" {
+    const allocator = std.testing.allocator;
+
+    var config = try testParseConfig(allocator,
+        \\[[providers]]
+        \\name = "test"
+        \\api = "openai_compat"
+        \\base_url = "https://api.test.com"
+        \\api_key_env = "TEST_KEY"
+        \\models = ["m1"]
+        \\
+        \\[[models]]
+        \\id = "m1"
+        \\name = "M1"
+        \\provider = "test"
+        \\context_window = 1000
+        \\max_tokens = 100
+        \\[models.compat]
+        \\thinking_format = "openai"
+        \\input = ["text", "image"]
+    );
+    defer config.deinit();
+    // Flattened [models.compat] keys are dropped: input falls back to text-only.
+    const input = config.providers[0].models[0].input;
+    try std.testing.expectEqual(@as(usize, 1), input.len);
+    try std.testing.expect(input[0] == .text);
 }
 
 test "config: resolveModel deepseek/v4-pro" {

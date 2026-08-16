@@ -111,7 +111,17 @@ pub fn main(process: std.process.Init) !void {
         var ow: std.Io.File.Writer = .init(.stdout(), io, &obuf);
         for (cfg.providers) |p| {
             for (p.models) |m| {
-                try ow.interface.print("{s}/{s}  {s}\n", .{ p.name, m.id, m.name });
+                // input modality column: lets users/AI confirm a vision model
+                // actually loaded with image input (config mistakes like an
+                // input line swallowed by a [models.compat] header show up
+                // here as text-only).
+                var list = std.ArrayListAligned(u8, null).empty;
+                for (m.input) |mod| {
+                    if (list.items.len > 0) try list.append(allocator, ',');
+                    try list.appendSlice(allocator, @tagName(mod));
+                }
+                defer list.deinit(allocator);
+                try ow.interface.print("{s}/{s}  {s}  input=[{s}]\n", .{ p.name, m.id, m.name, list.items });
             }
         }
         try ow.interface.flush();

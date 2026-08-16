@@ -63,6 +63,9 @@ globalThis.esc = (s) => String(s)
 globalThis.hljs = { highlightAll() {}, highlightElement() {} }
 globalThis.highlightNewCode = () => {}
 globalThis.copyText = (text, btn, label) => { if (btn) btn.textContent = label }
+// N16: read/edit typed views add a Preview button via addPreviewButton; the
+// browser modal path is out of scope for the DOM stub.
+globalThis.addPreviewButton = () => {}
 
 const ToolRegistry = eval(`(${extractToolRegistry()})`)
 globalThis.ToolRegistry = ToolRegistry
@@ -170,6 +173,23 @@ console.log("edit: diff coloring for unified diff output")
   applyToolType(card, "edit", { replacements: 1, old_lines: 1, new_lines: 1 })
   check("card gets tool-diff class", card.className.includes("tool-diff"))
   check("meta shows replacements", metaText(card) && metaText(card).includes("1 replacements"))
+}
+
+// --- read preview button: file yes, directory no ---
+console.log("read: Preview button only for files (not directories)")
+{
+  let calls = []
+  const orig = globalThis.addPreviewButton
+  globalThis.addPreviewButton = (toolDiv, path) => { calls.push(path) }
+  const fileCard = buildToolCard("read", "content")
+  applyToolType(fileCard, "read", { path: "src/main.zig", total_lines: 3 })
+  check("file read adds Preview button", calls.length === 1 && calls[0] === "src/main.zig")
+  calls = []
+  const dirCard = buildToolCard("read", "listing")
+  applyToolType(dirCard, "read", { path: "C:\\VibeCoding\\Projects\\Test", is_directory: true })
+  check("directory read adds no Preview button", calls.length === 0)
+  check("directory meta still shows dir", metaText(dirCard) && metaText(dirCard).includes("dir"))
+  globalThis.addPreviewButton = orig
 }
 
 // --- fallback: unknown tool goes to fallback renderer, no throw ---

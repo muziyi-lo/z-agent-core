@@ -21,6 +21,190 @@ fn isBlacklisted(path: []const u8) bool {
     return false;
 }
 
+/// Preview-able image extensions — aligned with the Web preview raw whitelist
+/// (handler.zig mimeForExtension): every image readable here must be
+/// previewable there. bmp/ico stay blacklisted (no preview path). Case-insensitive.
+fn isImage(path: []const u8) bool {
+    const exts = [_][]const u8{ ".png", ".jpg", ".jpeg", ".gif", ".webp" };
+    for (exts) |e| {
+        if (path.len >= e.len and std.ascii.eqlIgnoreCase(path[path.len - e.len ..], e)) return true;
+    }
+    return false;
+}
+
+/// Max raw image bytes attachable (base64 grows ~33%; aligns with preview 5MB).
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// Short side cap — vision models charge by image tiles; oversized images are
+/// rejected instead of attached (aligned with opencode max_width/max_height=2000).
+const MAX_IMAGE_SIDE: u32 = 2000;
+/// Header bytes read for magic sniffing + dimension parsing (JPEG SOF scanning
+/// needs room for APPn segments; aligns with opencode SAMPLE_BYTES=4096).
+const IMAGE_HEADER_BYTES: usize = 4096;
+
+/// Magic-byte sniff: authoritative MIME (extension is only a pre-filter).
+/// N22: prevents extension spoofing (a .png that is really text is rejected).
+fn sniffImageMime(header: []const u8) ?[]const u8 {
+    if (header.len >= 8 and header[0] == 0x89 and header[1] == 'P' and header[2] == 'N' and header[3] == 'G' and
+        header[4] == 0x0D and header[5] == 0x0A and header[6] == 0x1A and header[7] == 0x0A) return "image/png";
+    if (header.len >= 3 and header[0] == 0xFF and header[1] == 0xD8 and header[2] == 0xFF) return "image/jpeg";
+    if (header.len >= 4 and std.mem.eql(u8, header[0..4], "GIF8")) return "image/gif";
+    if (header.len >= 12 and std.mem.eql(u8, header[0..4], "RIFF") and std.mem.eql(u8, header[8..12], "WEBP")) return "image/webp";
+    return null;
+}
+
+const Dimensions = struct { w: u32, h: u32 };
+
+/// Parse pixel dimensions from the header. Original pixel size only — EXIF
+/// Orientation rotation is deliberately NOT applied (models do not rotate
+/// EXIF; judging the short side on raw pixels is conservative — a rotated
+/// image's user-visible short side is never larger).
+fn imageDimensions(mime: []const u8, header: []const u8) ?Dimensions {
+    if (std.mem.eql(u8, mime, "image/png")) {
+        // IHDR at fixed offset: chunk header at 8, "IHDR" at 12-15, w 16-19, h 20-23 (BE)
+        if (header.len >= 24 and std.mem.eql(u8, header[12..16], "IHDR")) {
+            return .{ .w = readBe32(header[16..20]), .h = readBe32(header[20..24]) };
+        }
+        return null;
+    }
+    if (std.mem.eql(u8, mime, "image/gif")) {
+        if (header.len >= 10) return .{ .w = readLe16(header[6..8]), .h = readLe16(header[8..10]) };
+        return null;
+    }
+    if (std.mem.eql(u8, mime, "image/webp")) {
+        // VP8X chunk: "VP8X" at 12-15, canvas 24-bit LE at 24-29, values are (size-1)
+        if (header.len >= 30 and std.mem.eql(u8, header[12..16], "VP8X")) {
+            return .{ .w = readLe24(header[24..27]) + 1, .h = readLe24(header[27..30]) + 1 };
+        }
+        // VP8 / VP8L: not parsed → null → conservative rejection
+        return null;
+    }
+    if (std.mem.eql(u8, mime, "image/jpeg")) {
+        var i: usize = 2; // skip SOI (FF D8)
+        while (i + 9 <= header.len) {
+            if (header[i] != 0xFF) {
+                i += 1;
+                continue;
+            }
+            const marker = header[i + 1];
+            // SOF0-SOF3 carry the frame dimensions
+            if (marker >= 0xC0 and marker <= 0xC3) {
+                return .{ .w = readBe16(header[i + 7 .. i + 9]), .h = readBe16(header[i + 5 .. i + 7]) };
+            }
+            // Standalone markers / RSTn / TEM: no length field
+            if (marker == 0xD8 or marker == 0xD9 or marker == 0x01 or (marker >= 0xD0 and marker <= 0xD7)) {
+                i += 2;
+                continue;
+            }
+            if (i + 4 > header.len) return null;
+            const seg_len = readBe16(header[i + 2 .. i + 4]);
+            if (seg_len < 2) return null;
+            i += 2 + seg_len;
+        }
+        return null;
+    }
+    return null;
+}
+
+fn readBe32(b: []const u8) u32 {
+    return (@as(u32, b[0]) << 24) | (@as(u32, b[1]) << 16) | (@as(u32, b[2]) << 8) | b[3];
+}
+fn readBe16(b: []const u8) u32 {
+    return (@as(u32, b[0]) << 8) | b[1];
+}
+fn readLe16(b: []const u8) u32 {
+    return (@as(u32, b[1]) << 8) | b[0];
+}
+fn readLe24(b: []const u8) u32 {
+    return (@as(u32, b[2]) << 16) | (@as(u32, b[1]) << 8) | b[0];
+}
+
+fn base64Encode(allocator: std.mem.Allocator, data: []const u8) ![]const u8 {
+    const b64 = std.base64.standard.Encoder;
+    const out_len = b64.calcSize(data.len);
+    const buf = try allocator.alloc(u8, out_len);
+    _ = b64.encode(buf, data);
+    return buf;
+}
+
+/// Image files: attach base64 bytes for vision models (gated at the provider),
+/// guarded by magic sniffing + size/dimension caps. The model-facing text stays
+/// a factual summary; pixels travel as attachments. meta.path feeds the Web
+/// Preview button (raw endpoint) for the user.
+fn readImageSummary(ctx: types.ToolContext, path: []const u8, display_path: []const u8) !types.ToolResult {
+    const file = Io.Dir.cwd().openFile(ctx.io, path, .{ .mode = .read_only }) catch |err| {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: cannot open '{s}': {s}", .{ display_path, @errorName(err) });
+        return types.ToolResult{ .session_content = msg };
+    };
+    defer file.close(ctx.io);
+    const stat = file.stat(ctx.io) catch |err| {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: cannot stat '{s}': {s}", .{ display_path, @errorName(err) });
+        return types.ToolResult{ .session_content = msg };
+    };
+    const size: usize = @intCast(stat.size);
+    const name = std.fs.path.basename(display_path);
+    const ext = std.fs.path.extension(display_path);
+
+    const head_len = @min(size, IMAGE_HEADER_BYTES);
+    const head = try ctx.allocator.alloc(u8, head_len);
+    defer ctx.allocator.free(head);
+    const head_n = file.readPositionalAll(ctx.io, head, 0) catch |err| {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: cannot read '{s}': {s}", .{ display_path, @errorName(err) });
+        return types.ToolResult{ .session_content = msg };
+    };
+
+    // 1) Magic sniff: extension claims image but bytes do not match → fall
+    //    back to the binary-rejection path (spoof protection).
+    const mime = sniffImageMime(head[0..head_n]) orelse {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: cannot read binary file '{s}'", .{display_path});
+        return types.ToolResult{ .session_content = msg };
+    };
+
+    // 2) Dimension cap: short side > 2000px is rejected (token cost), the user
+    //    still previews via the Preview button.
+    if (imageDimensions(mime, head[0..head_n])) |d| {
+        const short_side = @min(d.w, d.h);
+        if (short_side > MAX_IMAGE_SIDE) {
+            const msg = try std.fmt.allocPrint(ctx.allocator, "Image file: {s} ({d} bytes, {s}). Image too large ({d}x{d}px) — not attached; use Preview to view.", .{ name, size, ext, d.w, d.h });
+            return types.ToolResult{
+                .session_content = msg,
+                .meta = .{ .read = .{ .path = display_path, .is_directory = false, .total_lines = 0, .byte_count = size, .truncated = false, .next_offset = null } },
+            };
+        }
+    } else {
+        // Magic matches but structure is broken/non-standard → conservative reject.
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Image file: {s} ({d} bytes, {s}). Image structure could not be parsed — not attached; use Preview to view.", .{ name, size, ext });
+        return types.ToolResult{
+            .session_content = msg,
+            .meta = .{ .read = .{ .path = display_path, .is_directory = false, .total_lines = 0, .byte_count = size, .truncated = false, .next_offset = null } },
+        };
+    }
+
+    // 3) Byte cap: oversized payload is not worth the base64 inflation.
+    if (size > MAX_IMAGE_BYTES) {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Image file: {s} ({d} bytes, {s}). Image too large to attach — use Preview to view.", .{ name, size, ext });
+        return types.ToolResult{
+            .session_content = msg,
+            .meta = .{ .read = .{ .path = display_path, .is_directory = false, .total_lines = 0, .byte_count = size, .truncated = false, .next_offset = null } },
+        };
+    }
+
+    // 4) Read all bytes → base64 attachment.
+    const data = try ctx.allocator.alloc(u8, size);
+    defer ctx.allocator.free(data);
+    const data_n = file.readPositionalAll(ctx.io, data, 0) catch |err| {
+        const msg = try std.fmt.allocPrint(ctx.allocator, "Error: cannot read '{s}': {s}", .{ display_path, @errorName(err) });
+        return types.ToolResult{ .session_content = msg };
+    };
+    const b64 = try base64Encode(ctx.allocator, data[0..data_n]);
+    const mime_dup = try ctx.allocator.dupe(u8, mime);
+    const msg = try std.fmt.allocPrint(ctx.allocator, "Image file: {s} ({d} bytes, {s}). Image read successfully — preview it separately to view (Web UI read/edit cards).", .{ name, size, ext });
+    return types.ToolResult{
+        .session_content = msg,
+        .meta = .{ .read = .{ .path = display_path, .is_directory = false, .total_lines = 0, .byte_count = size, .truncated = false, .next_offset = null } },
+        .attachments = &.{.{ .mime = mime_dup, .data = b64 }},
+    };
+}
+
 fn countLines(content: []const u8) usize {
     var count: usize = 0;
     for (content) |b| {
@@ -155,6 +339,10 @@ pub fn execute(ctx: types.ToolContext, args: std.json.Value) anyerror!types.Tool
     } else |err| switch (err) {
         error.FileNotFound, error.NotDir, error.AccessDenied => {},
         else => return err,
+    }
+
+    if (isImage(path_val.string)) {
+        return readImageSummary(ctx, path, path_val.string);
     }
 
     if (isBlacklisted(path_val.string)) {
@@ -331,6 +519,239 @@ test "read: detects binary" {
     var result = try testExec(ctx, "{\"path\":\"test_binary.bin\"}");
     defer result.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, result.session_content, "binary") != null);
+}
+
+test "read: image returns summary with meta.path (preview bridge)" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-read-image";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {}; // best-effort cleanup
+    try Io.Dir.cwd().createDirPath(io, test_root);
+
+    const test_path = try std.fs.path.join(allocator, &.{ test_root });
+    defer allocator.free(test_path);
+
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, "shot.png" });
+    defer allocator.free(file_path);
+    // Minimal real PNG header: 8-byte magic + IHDR (w=4, h=4)
+    const png_head = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 'I', 'H', 'D', 'R', 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x08, 0x06, 0x00, 0x00, 0x00 };
+    const file = try Io.Dir.cwd().createFile(io, file_path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, &png_head);
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_path,
+    };
+
+    var result = try testExec(ctx, "{\"path\":\"shot.png\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "Image file") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "preview") != null);
+    const meta = result.meta;
+    try std.testing.expect(meta == .read);
+    try std.testing.expectEqualStrings("shot.png", meta.read.path);
+    try std.testing.expect(!meta.read.is_directory);
+    try std.testing.expect(meta.read.byte_count > 0);
+    // Attachment present with correct mime; base64 decodes back to the bytes.
+    try std.testing.expectEqual(@as(usize, 1), result.attachments.len);
+    try std.testing.expectEqualStrings("image/png", result.attachments[0].mime);
+    const dec_calc = try std.base64.standard.Decoder.calcSizeForSlice(result.attachments[0].data);
+    const decoded = try allocator.alloc(u8, dec_calc);
+    defer allocator.free(decoded);
+    try std.base64.standard.Decoder.decode(decoded, result.attachments[0].data);
+    try std.testing.expectEqualSlices(u8, &png_head, decoded);
+}
+
+test "read: image extension is case-insensitive" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-read-image-jpg";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {}; // best-effort cleanup
+    try Io.Dir.cwd().createDirPath(io, test_root);
+
+    const test_path = try std.fs.path.join(allocator, &.{ test_root });
+    defer allocator.free(test_path);
+
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, "photo.JPG" });
+    defer allocator.free(file_path);
+    // Minimal JPEG: SOI + SOF0 (h=8, w=10)
+    const jpeg_head = [_]u8{ 0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x08, 0x00, 0x0A, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01 };
+    const file = try Io.Dir.cwd().createFile(io, file_path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, &jpeg_head);
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_path,
+    };
+
+    var result = try testExec(ctx, "{\"path\":\"photo.JPG\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "Image file") != null);
+    try std.testing.expectEqual(@as(usize, 1), result.attachments.len);
+    try std.testing.expectEqualStrings("image/jpeg", result.attachments[0].mime);
+}
+
+test "read: image spoof (extension png, magic text) rejected" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-read-image-spoof";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {}; // best-effort cleanup
+    try Io.Dir.cwd().createDirPath(io, test_root);
+
+    const test_path = try std.fs.path.join(allocator, &.{ test_root });
+    defer allocator.free(test_path);
+
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, "fake.png" });
+    defer allocator.free(file_path);
+    const file = try Io.Dir.cwd().createFile(io, file_path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, "not-really-png-bytes");
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_path,
+    };
+
+    var result = try testExec(ctx, "{\"path\":\"fake.png\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "binary") != null);
+    try std.testing.expectEqual(@as(usize, 0), result.attachments.len);
+}
+
+test "read: image dimension cap rejects oversized short side" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-read-image-big";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {}; // best-effort cleanup
+    try Io.Dir.cwd().createDirPath(io, test_root);
+
+    const test_path = try std.fs.path.join(allocator, &.{ test_root });
+    defer allocator.free(test_path);
+
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, "wide.png" });
+    defer allocator.free(file_path);
+    // PNG header with w=4000, h=4000 (short side 4000 > 2000)
+    var png_head: [29]u8 = .{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 'I', 'H', 'D', 'R', 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x06, 0x00, 0x00, 0x00 };
+    png_head[16] = 0x0F; // w = 0x0FA0 = 4000
+    png_head[17] = 0xA0;
+    png_head[20] = 0x0F;
+    png_head[21] = 0xA0;
+    const file = try Io.Dir.cwd().createFile(io, file_path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, &png_head);
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_path,
+    };
+
+    var result = try testExec(ctx, "{\"path\":\"wide.png\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "too large") != null);
+    try std.testing.expectEqual(@as(usize, 0), result.attachments.len);
+}
+
+test "read: long image (4000x400) not rejected (short side 400)" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-read-image-long";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {}; // best-effort cleanup
+    try Io.Dir.cwd().createDirPath(io, test_root);
+
+    const test_path = try std.fs.path.join(allocator, &.{ test_root });
+    defer allocator.free(test_path);
+
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, "banner.png" });
+    defer allocator.free(file_path);
+    var png_head: [29]u8 = .{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 'I', 'H', 'D', 'R', 0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x06, 0x00, 0x00, 0x00 };
+    png_head[18] = 0x0F; // w BE = 0x00000FA0 = 4000
+    png_head[19] = 0xA0;
+    png_head[22] = 0x01; // h BE = 0x00000190 = 400
+    png_head[23] = 0x90;
+    const file = try Io.Dir.cwd().createFile(io, file_path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, &png_head);
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_path,
+    };
+
+    var result = try testExec(ctx, "{\"path\":\"banner.png\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "Image file") != null);
+    try std.testing.expectEqual(@as(usize, 1), result.attachments.len);
+}
+
+test "read: broken image header (magic ok, structure bad) conservatively rejected" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-read-image-broken";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {}; // best-effort cleanup
+    try Io.Dir.cwd().createDirPath(io, test_root);
+
+    const test_path = try std.fs.path.join(allocator, &.{ test_root });
+    defer allocator.free(test_path);
+
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, "broken.png" });
+    defer allocator.free(file_path);
+    // PNG magic + random bytes but no IHDR chunk signature at offset 12.
+    const png_broken = [_]u8{ 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 'X', 'Y', 'Z', 'W', 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x04, 0x08, 0x06, 0x00, 0x00, 0x00 };
+    const file = try Io.Dir.cwd().createFile(io, file_path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, &png_broken);
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_path,
+    };
+
+    var result = try testExec(ctx, "{\"path\":\"broken.png\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "could not be parsed") != null);
+    try std.testing.expectEqual(@as(usize, 0), result.attachments.len);
+}
+
+test "read: non-preview binary extensions still rejected" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const test_root = ".zig-test-read-bmp";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {}; // best-effort cleanup
+    try Io.Dir.cwd().createDirPath(io, test_root);
+
+    const test_path = try std.fs.path.join(allocator, &.{ test_root });
+    defer allocator.free(test_path);
+
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, "pic.bmp" });
+    defer allocator.free(file_path);
+    const file = try Io.Dir.cwd().createFile(io, file_path, .{});
+    defer file.close(io);
+    try file.writeStreamingAll(io, "bmp-bytes");
+
+    const ctx = types.ToolContext{
+        .allocator = allocator,
+        .io = io,
+        .project_root = test_path,
+    };
+
+    var result = try testExec(ctx, "{\"path\":\"pic.bmp\"}");
+    defer result.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, result.session_content, "not supported") != null);
 }
 
 test "read: directory listing" {

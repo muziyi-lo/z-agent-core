@@ -20,14 +20,15 @@ function check(name, cond) { if (cond) { pass++; console.log("  ok " + name) } e
 console.log("renderModelMenu: lists models with active flag")
 {
   const models = [
-    { id: "deepseek/v4-pro", name: "V4 Pro" },
-    { id: "deepseek/v4-flash", name: "V4 Flash" },
+    { id: "deepseek/v4-pro", name: "V4 Pro", provider: "deepseek" },
+    { id: "deepseek/v4-flash", name: "V4 Flash", provider: "deepseek" },
   ]
   const items = renderModelMenu(models, "deepseek/v4-flash")
   check("2 items", items.length === 2)
   check("first not active", items[0].active === false)
   check("second active", items[1].active === true && items[1].id === "deepseek/v4-flash")
   check("name preserved", items[0].name === "V4 Pro")
+  check("provider preserved", items[0].provider === "deepseek")
 }
 
 console.log("renderModelMenu: no match current")

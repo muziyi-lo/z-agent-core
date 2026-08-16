@@ -175,6 +175,27 @@ pub const Session = struct {
                 }
                 break :blk null;
             } else null;
+
+            // Attachments: {mime, data}[] — missing/empty degrades to null
+            // (legacy files, forward compat).
+            var msg_attachments: ?[]const types.Attachment = null;
+            if (obj.get("attachments")) |atts_val| {
+                if (atts_val == .array and atts_val.array.items.len > 0) {
+                    const atts = try arena.alloc(types.Attachment, atts_val.array.items.len);
+                    var atts_valid = true;
+                    for (atts_val.array.items, 0..) |att_val, j| {
+                        if (att_val != .object) {
+                            atts_valid = false;
+                            break;
+                        }
+                        const att_obj = att_val.object;
+                        const mime = if (att_obj.get("mime")) |v| (if (v == .string) try arena.dupe(u8, v.string) else "") else "";
+                        const data = if (att_obj.get("data")) |v| (if (v == .string) try arena.dupe(u8, v.string) else "") else "";
+                        atts[j] = .{ .mime = mime, .data = data };
+                    }
+                    if (atts_valid) msg_attachments = atts;
+                }
+            }
             const ts = if (obj.get("timestamp")) |v| if (v == .integer) @as(i64, @intCast(v.integer)) else @as(i64, 0) else @as(i64, 0);
             const msg_model: ?[]const u8 = if (obj.get("model")) |v| if (v == .string) try arena.dupe(u8, v.string) else null else null;
             const usage: ?types.TokenUsage = if (obj.get("usage")) |u_val| blk: {
@@ -231,6 +252,7 @@ pub const Session = struct {
                 .tool_calls = tool_calls,
                 .tool_call_id = tool_call_id,
                 .meta = msg_meta,
+                .attachments = msg_attachments,
                 .timestamp = ts,
                 .model = msg_model,
                 .usage = usage,
@@ -289,6 +311,7 @@ pub const Session = struct {
             duped.tool_calls = duped_tcs;
         }
         if (msg.meta) |meta| duped.meta = try dupeToolMeta(arena, meta);
+        if (msg.attachments) |atts| duped.attachments = try dupeAttachments(arena, atts);
 
         try self._messages.append(arena, duped);
         self.modified = true;
@@ -709,6 +732,19 @@ fn dupeToolMeta(arena: std.mem.Allocator, meta: types.ToolMeta) !types.ToolMeta 
     return .none;
 }
 
+/// Deep-copy attachments into the session arena (mime/data both duped —
+/// never a borrow from the tool arena; same contract as dupeToolMeta).
+fn dupeAttachments(arena: std.mem.Allocator, atts: []const types.Attachment) ![]const types.Attachment {
+    const out = try arena.alloc(types.Attachment, atts.len);
+    for (atts, out) |src, *dst| {
+        dst.* = .{
+            .mime = try arena.dupe(u8, src.mime),
+            .data = try arena.dupe(u8, src.data),
+        };
+    }
+    return out;
+}
+
 fn serializeMessage(allocator: std.mem.Allocator, msg: types.Message) ![]u8 {
     var jw = jsonw.JsonWriter.init(allocator);
     errdefer jw.deinit();
@@ -754,6 +790,18 @@ fn serializeMessage(allocator: std.mem.Allocator, msg: types.Message) ![]u8 {
         var mout = try mjw.result();
         defer mout.deinit();
         try jw.rawField("meta", mout.bytes);
+    }
+
+    // Attachments: omitted entirely when null (backward-compatible format).
+    if (msg.attachments) |atts| {
+        try jw.beginArray("attachments");
+        for (atts) |att| {
+            try jw.beginObject(null);
+            try jw.stringField("mime", att.mime);
+            try jw.stringField("data", att.data);
+            try jw.endValue();
+        }
+        try jw.endValue();
     }
 
     try jw.endValue();
@@ -1596,4 +1644,40 @@ test "session: JSONL golden bytes stable" {
         defer allocator.free(line);
         try std.testing.expectEqualStrings(expected[i], line);
     }
+}
+
+test "session: attachment serialize omits when null, roundtrips when present" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    // null → key omitted entirely
+    {
+        const msg = types.Message{ .id = 1, .role = .tool, .content = "out", .tool_call_id = "c1" };
+        const line = try serializeMessage(allocator, msg);
+        defer allocator.free(line);
+        try std.testing.expect(std.mem.indexOf(u8, line, "attachments") == null);
+    }
+
+    // present → JSONL roundtrip preserves mime/data
+    const test_root = ".zig-test-session-att";
+    defer Io.Dir.cwd().deleteTree(io, test_root) catch {}; // best-effort cleanup
+    try Io.Dir.cwd().createDirPath(io, test_root);
+    const file_path = try std.fs.path.join(allocator, &.{ test_root, "att.jsonl" });
+    defer allocator.free(file_path);
+
+    var s = try Session.init(allocator, io, "deepseek/model");
+    defer s.deinit();
+    s.path = file_path;
+    try s.append(.{ .role = .tool, .content = "Image file: shot.png", .tool_call_id = "c1", .attachments = &.{.{ .mime = "image/png", .data = "iVBORw0KGgo=" }} });
+    try s.flush();
+
+    var loaded = try Session.load(allocator, io, file_path);
+    defer loaded.deinit();
+    const atts = loaded.messages()[0].attachments orelse {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expectEqual(@as(usize, 1), atts.len);
+    try std.testing.expectEqualStrings("image/png", atts[0].mime);
+    try std.testing.expectEqualStrings("iVBORw0KGgo=", atts[0].data);
 }

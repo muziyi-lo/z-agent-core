@@ -3,6 +3,7 @@ const types = @import("../../types.zig");
 const config_mod = @import("../../config.zig");
 const session_mod = @import("../../core/session.zig");
 const agent_mod = @import("../../core/agent.zig");
+const approval_mod = @import("../../approval.zig");
 const sse = @import("sse.zig");
 const err_mod = @import("error.zig");
 const uuid_mod = @import("../../util/uuid.zig");
@@ -15,6 +16,8 @@ const subcall_mod = @import("../../core/subcall.zig");
 const trace = @import("../../util/trace.zig");
 const jsonw = @import("../../util/jsonw.zig");
 const timing = @import("../../util/timing.zig");
+const path_mod = @import("../../util/path.zig");
+const text_util = @import("../../util/text.zig");
 
 const AlignedU8 = std.ArrayListAligned(u8, null);
 const Io = std.Io;
@@ -41,7 +44,7 @@ const SCRIPT_MARKER = "<!-- SCRIPTS -->";
 /// Session operation undo entries. Stored per-session (LIFO, cap 20) in the
 /// server's persistent allocator. Each entry carries enough to reverse the op.
 pub const UndoOp = union(enum) {
-    delete: struct { index: usize, message: types.Message },
+    delete: struct { index: usize, removed: []const types.Message },
     truncate: struct { removed: []const types.Message },
     branch: struct { fork_id: []const u8 },
 };
@@ -66,8 +69,31 @@ pub const Context = struct {
     undo_map: *std.StringHashMap(*std.ArrayListAligned(UndoOp, null)),
     /// Process-level background sub-call runner (D6 title generation).
     subcall_runner: *subcall_mod.SubcallRunner,
+    approval_map: *std.StringHashMap(*approval_mod.Gate),
+    approval_mutex: *std.Io.Mutex,
     thread_id: u32,
     request_id: u32,
+};
+
+/// Per-SSE-connection approval state (round-scoped). Allocated on the request
+/// arena; the cache dies with the connection (round boundary).
+const ApprovalCtx = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    agent: *agent_mod.AgentLoop,
+    session_id: []const u8,
+    mode: approval_mod.Mode,
+    allow: []const []const u8,
+    cache_enabled: bool,
+    sse_writer: *const sse.SseWriter,
+    approval_map: *std.StringHashMap(*approval_mod.Gate),
+    approval_mutex: *std.Io.Mutex,
+    thread_id: u32,
+    request_id: u32,
+    /// Current pending gate id (for the reminder callback), null when idle.
+    gate_id: ?[]const u8 = null,
+    /// Round cache: exact name+args Wyhash → already approved this round.
+    allowed: std.AutoHashMapUnmanaged(u64, void) = .empty,
 };
 
 pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, request: *std.http.Server.Request) !void {
@@ -90,6 +116,7 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
         if (std.mem.eql(u8, path, "/api/session")) return handleSessionList(ctx, request, a);
         if (std.mem.eql(u8, path, "/api/session/active")) return handleSessionActive(ctx, request, a);
         if (std.mem.eql(u8, path, "/api/command")) return handleCommandList(ctx, request, a);
+        if (std.mem.startsWith(u8, path, "/api/preview")) return handlePreview(ctx, request, a);
         if (std.mem.startsWith(u8, path, "/api/session/")) {
             const rest = path["/api/session/".len..];
             if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
@@ -108,6 +135,10 @@ pub fn handleRequest(ctx: *Context, method: std.http.Method, path: []const u8, r
     } else if (method == .POST) {
         if (std.mem.eql(u8, path, "/api/session")) return handleSessionCreate(ctx, request, a);
         if (std.mem.eql(u8, path, "/api/command")) return handleCommandExec(ctx, request, a);
+        if (std.mem.startsWith(u8, path, "/api/approval/")) {
+            const id = path["/api/approval/".len..];
+            return handleApprovalPost(ctx, request, id, a);
+        }
         if (std.mem.startsWith(u8, path, "/api/session/")) {
             const rest = path["/api/session/".len..];
             if (std.mem.indexOfScalar(u8, rest, '/')) |slash| {
@@ -207,7 +238,15 @@ fn serveIndex(_: *Context, request: *std.http.Server.Request, a: std.mem.Allocat
     }
 
     try request.respond(body.items, .{
-        .extra_headers = &.{.{ .name = "content-type", .value = "text/html; charset=utf-8" }},
+        .extra_headers = &.{
+            .{ .name = "content-type", .value = "text/html; charset=utf-8" },
+            // N16: CSP keeps image sources local (img-src 'self' data:) so the
+            // preview raw endpoint is the only image origin; inline script/style
+            // are required by the injection architecture. font-src 'self' data:
+            // permits the base64-embedded Inter/JetBrainsMono faces (without
+            // it, default-src 'self' blocks data: fonts).
+            .{ .name = "content-security-policy", .value = "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:" },
+        },
     });
 }
 
@@ -307,6 +346,10 @@ fn handleSessionList(ctx: *Context, request: *std.http.Server.Request, a: std.me
             if (!first) try buf.appendSlice(a, ",");
             first = false;
             const display_name = if (uuid_mod.isUuid(s.name)) "New Session" else s.name;
+            // Session names come from user prompts — escape backslashes/quotes
+            // (e.g. "c:\path" in a title would otherwise break the JSON).
+            const name_esc = try jsonw.escapeAlloc(a, display_name);
+            defer a.free(name_esc);
             var pid_owned: ?[]const u8 = null;
             defer if (pid_owned) |p| a.free(p);
             const pid_json = if (s.parent_id) |pid| blk: {
@@ -314,7 +357,7 @@ fn handleSessionList(ctx: *Context, request: *std.http.Server.Request, a: std.me
                 pid_owned = owned;
                 break :blk owned;
             } else "null";
-            const ss = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":{s}}}", .{ s.id, display_name, s.model, s.msg_count, s.timestamp, pid_json });
+            const ss = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":{s}}}", .{ s.id, name_esc, s.model, s.msg_count, s.timestamp, pid_json });
             defer a.free(ss);
             try buf.appendSlice(a, ss);
         }
@@ -341,12 +384,14 @@ fn handleSessionList(ctx: *Context, request: *std.http.Server.Request, a: std.me
         if (!first) try buf.appendSlice(a, ",");
         first = false;
         const display_name = if (uuid_mod.isUuid(s.name)) "New Session" else s.name;
+        const name_esc = try jsonw.escapeAlloc(a, display_name);
+        defer a.free(name_esc);
         if (s.parent_id) |pid| {
-            const ss = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":\"{s}\"}}", .{ s.id, display_name, s.model, s.msg_count, s.timestamp, pid });
+            const ss = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":\"{s}\"}}", .{ s.id, name_esc, s.model, s.msg_count, s.timestamp, pid });
             defer a.free(ss);
             try buf.appendSlice(a, ss);
         } else {
-            const ss = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":null}}", .{ s.id, display_name, s.model, s.msg_count, s.timestamp });
+            const ss = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":null}}", .{ s.id, name_esc, s.model, s.msg_count, s.timestamp });
             defer a.free(ss);
             try buf.appendSlice(a, ss);
         }
@@ -369,11 +414,13 @@ fn handleSessionActive(ctx: *Context, request: *std.http.Server.Request, a: std.
 
     const s = list[0];
     const display_name = if (uuid_mod.isUuid(s.name)) "New Session" else s.name;
+    const name_esc = try jsonw.escapeAlloc(a, display_name);
+    defer a.free(name_esc);
     if (s.parent_id) |pid| {
-        const body = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":\"{s}\"}}", .{ s.id, display_name, s.model, s.msg_count, s.timestamp, pid });
+        const body = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":\"{s}\"}}", .{ s.id, name_esc, s.model, s.msg_count, s.timestamp, pid });
         return respondJson(request, body);
     }
-    const body = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":null}}", .{ s.id, display_name, s.model, s.msg_count, s.timestamp });
+    const body = try std.fmt.allocPrint(a, "{{\"id\":\"{s}\",\"name\":\"{s}\",\"model\":\"{s}\",\"msg_count\":{d},\"timestamp\":{d},\"parent_id\":null}}", .{ s.id, name_esc, s.model, s.msg_count, s.timestamp });
     return respondJson(request, body);
 }
 
@@ -394,13 +441,16 @@ fn handleSessionGet(ctx: *Context, request: *std.http.Server.Request, id: []cons
     }
 
     var buf: AlignedU8 = .empty;
-    var hdr: [512]u8 = undefined;
     const display_name = if (uuid_mod.isUuid(session.name)) "New Session" else session.name;
+    const name_esc = try jsonw.escapeAlloc(a, display_name);
+    defer a.free(name_esc);
     if (session.parent_id) |pid| {
-        const h = try std.fmt.bufPrint(&hdr, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"parent_id\":\"{s}\",\"messages\":[", .{ display_name, session.model, pid });
+        const h = try std.fmt.allocPrint(a, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"parent_id\":\"{s}\",\"messages\":[", .{ name_esc, session.model, pid });
+        defer a.free(h);
         try buf.appendSlice(a, h);
     } else {
-        const h = try std.fmt.bufPrint(&hdr, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"messages\":[", .{ display_name, session.model });
+        const h = try std.fmt.allocPrint(a, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"messages\":[", .{ name_esc, session.model });
+        defer a.free(h);
         try buf.appendSlice(a, h);
     }
     const msgs = session.messages();
@@ -439,6 +489,8 @@ fn writeMessagesRange(a: std.mem.Allocator, buf: *AlignedU8, msgs: []const types
 /// Emit {name, model, parent_id, system, messages:[page], has_more}.
 fn respondPagedSession(request: *std.http.Server.Request, a: std.mem.Allocator, session: *session_mod.Session, page: anytype) !void {
     const display_name = if (uuid_mod.isUuid(session.name)) "New Session" else session.name;
+    const name_esc = try jsonw.escapeAlloc(a, display_name);
+    defer a.free(name_esc);
     const msgs = session.messages();
     var buf: AlignedU8 = .empty;
     // system content can be a large system prompt — use heap allocPrint, never a
@@ -447,11 +499,11 @@ fn respondPagedSession(request: *std.http.Server.Request, a: std.mem.Allocator, 
     defer if (sys) |s| a.free(s);
     const sys_str = if (sys) |s| s else "";
     if (session.parent_id) |pid| {
-        const h = try std.fmt.allocPrint(a, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"parent_id\":\"{s}\",\"system\":\"{s}\",\"messages\":[", .{ display_name, session.model, pid, sys_str });
+        const h = try std.fmt.allocPrint(a, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"parent_id\":\"{s}\",\"system\":\"{s}\",\"messages\":[", .{ name_esc, session.model, pid, sys_str });
         defer a.free(h);
         try buf.appendSlice(a, h);
     } else {
-        const h = try std.fmt.allocPrint(a, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"system\":\"{s}\",\"messages\":[", .{ display_name, session.model, sys_str });
+        const h = try std.fmt.allocPrint(a, "{{\"name\":\"{s}\",\"model\":\"{s}\",\"system\":\"{s}\",\"messages\":[", .{ name_esc, session.model, sys_str });
         defer a.free(h);
         try buf.appendSlice(a, h);
     }
@@ -677,6 +729,407 @@ fn sessionIdFromPath(a: std.mem.Allocator, path: []const u8) ![]const u8 {
     return a.dupe(u8, id);
 }
 
+/// N16: inject the model-visible approval policy notice once per session
+/// (idempotent by POLICY_PREFIX scan). Runs before every turn via
+/// SystemPromptCb (server.zig wires agent.system_prompt to this).
+pub fn approvalSystemPrompt(ctx: ?*anyopaque) anyerror!void {
+    const c: *Context = @ptrCast(@alignCast(ctx.?));
+    const mode = approval_mod.Mode.fromString(c.config.approval_mode) orelse .risky;
+    const notice = approval_mod.policyNotice(mode) orelse return;
+    const agent: *agent_mod.AgentLoop = @ptrCast(@alignCast(c.agent));
+    for (agent.session_ref.messages()) |m| {
+        if (m.role == .system and std.mem.startsWith(u8, m.content, approval_mod.POLICY_PREFIX)) return;
+    }
+    try agent.session_ref.append(.{ .role = .system, .content = notice });
+}
+
+/// Approval decision timeouts (PLAN-N16): 240s with a reminder at 120s.
+const APPROVAL_TIMEOUT_MS: u32 = 240_000;
+/// Lazy-sweep grace: registered_at older than timeout + 10s gets resolved+removed
+/// on the next insertion.
+const APPROVAL_SWEEP_MS: i64 = 250_000;
+
+/// The approval hook thread (per SSE connection) parked in gate.wait. The
+/// callback slots have no context parameter, so the waiting ApprovalCtx is
+/// exposed thread-locally — web request threads are plain threads, one per
+/// connection, so this is race-free by construction.
+threadlocal var waiting_approval: ?*const ApprovalCtx = null;
+
+fn approvalCheckAbort() bool {
+    const ac = waiting_approval orelse return false;
+    return ac.agent._aborted.load(.acquire);
+}
+
+fn approvalKeepalive() bool {
+    const ac = waiting_approval orelse return false;
+    ac.sse_writer.writeAll(": keepalive\r\n\r\n") catch return false;
+    ac.sse_writer.flush() catch return false;
+    return true;
+}
+
+fn approvalReminder() bool {
+    const ac = waiting_approval orelse return false;
+    const id = ac.gate_id orelse return false;
+    var buf: [128]u8 = undefined;
+    const payload = std.fmt.bufPrint(&buf, "{{\"id\":\"{s}\"}}", .{id}) catch return false;
+    ac.sse_writer.writeAll("event: approval_reminder\ndata: ") catch return false;
+    ac.sse_writer.writeAll(payload) catch return false;
+    ac.sse_writer.writeAll("\n\n") catch return false;
+    ac.sse_writer.flush() catch return false;
+    return true;
+}
+
+/// N16 tool hook: block risky tool calls until the user decides (web). Returns
+/// null to allow, or the tool-message content for deny/timeout/abort.
+fn approvalBeforeHook(ctx: ?*anyopaque, name: []const u8, args: []const u8) ?[]const u8 {
+    const ac: *ApprovalCtx = @ptrCast(@alignCast(ctx.?));
+    if (ac.mode == .never) return null;
+
+    // 1) Explicit whitelist: normalized exact match wins over everything.
+    if (ac.allow.len > 0) {
+        if (commandFromArgs(ac.allocator, args)) |cmd| {
+            const norm = normalizeCommand(ac.allocator, cmd) catch return null;
+            defer ac.allocator.free(norm);
+            for (ac.allow) |entry| {
+                if (std.mem.eql(u8, norm, entry)) return null;
+            }
+        }
+    }
+
+    // 2) Round cache: exact name+args already approved this connection.
+    if (ac.cache_enabled) {
+        const h = std.hash.Wyhash.hash(0, args);
+        if (ac.allowed.contains(h)) return null;
+    }
+
+    const rule = approval_mod.isRisky(ac.mode, name, args) orelse return null;
+
+    // 3) Send approval_required BEFORE registering the gate: a failed write
+    //    means the connection is gone — short-circuit without a dangling gate.
+    const now_ms = nowRealMs(ac.io);
+    const deadline_ms = now_ms + APPROVAL_TIMEOUT_MS;
+    const id = uuid_mod.v4(ac.allocator) catch return null;
+    ac.gate_id = id;
+
+    {
+        var jw = jsonw.JsonWriter.init(ac.allocator);
+        defer jw.deinit();
+        jw.beginObject(null) catch return null;
+        jw.stringField("id", id) catch return null;
+        jw.stringField("name", name) catch return null;
+        jw.stringField("args", args) catch return null;
+        jw.stringField("rule", rule) catch return null;
+        jw.intField("deadline_ms", deadline_ms) catch return null;
+        jw.endValue() catch return null;
+        var payload = jw.result() catch return null;
+        defer payload.deinit();
+        ac.sse_writer.writeAll("event: approval_required\ndata: ") catch return abortShortCircuit(ac, rule);
+        ac.sse_writer.writeAll(payload.bytes) catch return abortShortCircuit(ac, rule);
+        ac.sse_writer.writeAll("\n\n") catch return abortShortCircuit(ac, rule);
+        ac.sse_writer.flush() catch return abortShortCircuit(ac, rule);
+        log.req_info(ac.thread_id, ac.request_id, "approval_required", "id={s} tool={s} rule={s} args={s}", .{ id, name, rule, truncateArgs(ac.allocator, args) });
+    }
+
+    const gate = ac.allocator.create(approval_mod.Gate) catch return abortShortCircuit(ac, rule);
+    gate.* = approval_mod.Gate.init(ac.io, id, ac.session_id, now_ms);
+
+    // Lazy sweep of stale entries + registration, under the map lock. The
+    // sweep resolves and removes entries past their deadline (a dead wait
+    // thread would otherwise leave them forever).
+    ac.approval_mutex.lock(ac.io) catch unreachable;
+    {
+        var it = ac.approval_map.iterator();
+        while (it.next()) |entry| {
+            const g = entry.value_ptr.*;
+            if (now_ms - g.registered_at_ms >= APPROVAL_SWEEP_MS) {
+                _ = g.resolve(false);
+                _ = ac.approval_map.remove(entry.key_ptr.*);
+            }
+        }
+        ac.approval_map.put(id, gate) catch |err| {
+            log.req_warn(ac.thread_id, ac.request_id, "approval_registration_failed", "err={s}", .{@errorName(err)});
+            ac.approval_mutex.unlock(ac.io);
+            return abortShortCircuit(ac, rule);
+        };
+    }
+    ac.approval_mutex.unlock(ac.io);
+
+    waiting_approval = ac;
+    defer waiting_approval = null;
+    const st = gate.wait(APPROVAL_TIMEOUT_MS, &approvalCheckAbort, &approvalKeepalive, &approvalReminder);
+
+    ac.approval_mutex.lock(ac.io) catch unreachable;
+    _ = ac.approval_map.remove(id);
+    ac.approval_mutex.unlock(ac.io);
+    ac.gate_id = null;
+
+    switch (st) {
+        .approved => {
+            if (ac.cache_enabled) {
+                ac.allowed.put(ac.allocator, std.hash.Wyhash.hash(0, args), {}) catch |err| {
+                    // Cache miss on OOM: the next identical call prompts again —
+                    // a safe degradation, no functional impact.
+                    log.req_warn(ac.thread_id, ac.request_id, "approval_cache_put_failed", "err={s}", .{@errorName(err)});
+                };
+            }
+            return null;
+        },
+        .denied => {
+            const decision: approval_mod.Decision = if (gate.timed_out) .timeout else .denied;
+            log.req_warn(ac.thread_id, ac.request_id, "approval_decided", "id={s} decision={s} rule={s}", .{ id, @tagName(decision), rule });
+            return approval_mod.messageFor(ac.allocator, decision, rule) catch abortShortCircuit(ac, rule);
+        },
+        .aborted => {
+            log.req_warn(ac.thread_id, ac.request_id, "approval_decided", "id={s} decision=aborted rule={s}", .{ id, rule });
+            ac.agent.abort();
+            return approval_mod.messageFor(ac.allocator, .aborted, rule) catch null;
+        },
+        .pending => unreachable,
+    }
+}
+
+/// SSE write failed before/during the gate flow: the connection is gone. Do
+/// not wait on a gate nobody can resolve — abort the round and return the
+/// aborted wording.
+fn abortShortCircuit(ac: *ApprovalCtx, rule: []const u8) ?[]const u8 {
+    log.req_warn(ac.thread_id, ac.request_id, "approval_aborted", "reason=sse_write_failed", .{});
+    ac.agent.abort();
+    return approval_mod.messageFor(ac.allocator, .aborted, rule) catch null;
+}
+
+/// Extract `command` from bash tool args JSON ({ "command": "..." }).
+/// Returns null for non-bash payloads / parse errors.
+fn commandFromArgs(a: std.mem.Allocator, args: []const u8) ?[]const u8 {
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, args, .{ .ignore_unknown_fields = true }) catch return null;
+    if (parsed != .object) return null;
+    const c = parsed.object.get("command") orelse return null;
+    if (c != .string) return null;
+    return c.string;
+}
+
+/// Trim + collapse internal whitespace runs to single spaces (case-sensitive;
+/// no path normalization, no quote merging — PLAN-N16 allow matching rules).
+fn normalizeCommand(a: std.mem.Allocator, command: []const u8) ![]const u8 {
+    var buf = std.ArrayListAligned(u8, null).empty;
+    var in_space = false;
+    var started = false;
+    for (command) |c| {
+        if (c == ' ' or c == '\t') {
+            in_space = true;
+            continue;
+        }
+        if (in_space and started) try buf.append(a, ' ');
+        in_space = false;
+        started = true;
+        try buf.append(a, c);
+    }
+    return buf.toOwnedSlice(a);
+}
+
+fn truncateArgs(a: std.mem.Allocator, args: []const u8) []const u8 {
+    const limit: usize = 200;
+    if (args.len <= limit) return args;
+    const cut = a.alloc(u8, limit + 3) catch return "";
+    @memcpy(cut[0..limit], args[0..limit]);
+    cut[limit] = '.';
+    cut[limit + 1] = '.';
+    cut[limit + 2] = '.';
+    return cut;
+}
+
+fn nowRealMs(io: std.Io) i64 {
+    return @as(i64, @intCast(Io.Timestamp.toMilliseconds(Io.Clock.Timestamp.now(io, .real).raw)));
+}
+
+/// POST /api/approval/:id {allow, session_id} — resolve a pending gate.
+/// Session mismatch → 404 (indistinguishable from unknown id). Returns
+/// {"status":"ok"} when this call transitioned the gate, "stale" otherwise.
+fn handleApprovalPost(ctx: *Context, request: *std.http.Server.Request, id: []const u8, a: std.mem.Allocator) !void {
+    const body = readRequestBody(a, request, 512) orelse
+        return err_mod.respondError(request, .bad_request, "invalid JSON body", a);
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, a, body, .{}) catch
+        return err_mod.respondError(request, .bad_request, "invalid JSON body", a);
+    if (parsed != .object) return err_mod.respondError(request, .bad_request, "invalid JSON body", a);
+    const allow = if (parsed.object.get("allow")) |av| (av == .bool and av.bool) else false;
+    const session_id = if (parsed.object.get("session_id")) |sv| (if (sv == .string) sv.string else "") else "";
+
+    ctx.approval_mutex.lock(ctx.io) catch unreachable;
+    defer ctx.approval_mutex.unlock(ctx.io);
+
+    const gate = ctx.approval_map.get(id) orelse
+        return err_mod.respondError(request, .not_found, "approval not found", a);
+    // Session binding: mismatch → same 404 as unknown id (no existence leak).
+    if (session_id.len == 0 or !std.mem.eql(u8, gate.session_id, session_id))
+        return err_mod.respondError(request, .not_found, "approval not found", a);
+
+    const changed = gate.resolve(allow);
+    const resp = try std.fmt.allocPrint(a, "{{\"status\":\"{s}\"}}", .{if (changed) "ok" else "stale"});
+    return respondJson(request, resp);
+}
+
+/// Size guard shared by both preview representations (5MB).
+const PREVIEW_MAX_SIZE: u64 = 5 * 1024 * 1024;
+/// Text preview cap (types.FILE_READ_LIMIT — same as the read tool).
+const PREVIEW_TEXT_LIMIT: u64 = 64 * 1024;
+
+/// GET /api/preview?path=<relative>&raw=1
+/// JSON representation (default): kind = image | text | binary | too_large.
+/// raw=1: original bytes, image extensions only (png/jpg/jpeg/gif/webp/svg).
+fn handlePreview(ctx: *Context, request: *std.http.Server.Request, a: std.mem.Allocator) !void {
+    const target = request.head.target;
+    const path = extractQueryParam(target, "path", a) orelse
+        return err_mod.respondError(request, .bad_request, "missing ?path= parameter", a);
+    defer a.free(path);
+    const raw = extractQueryParam(target, "raw", a) != null;
+
+    const resolved = path_mod.resolvePath(a, ctx.project_root, path) catch |err| switch (err) {
+        error.PathEscape => return err_mod.respondError(request, .bad_request, "path escapes project root", a),
+        else => return err_mod.respondError(request, .bad_request, "invalid path", a),
+    };
+    defer a.free(resolved);
+
+    const file = Io.Dir.cwd().openFile(ctx.io, resolved, .{ .mode = .read_only }) catch |err| switch (err) {
+        error.FileNotFound => return err_mod.respondError(request, .not_found, "file not found", a),
+        error.IsDir => return err_mod.respondError(request, .not_found, "not a file", a),
+        else => return err_mod.respondError(request, .internal_error, "failed to open file", a),
+    };
+    defer file.close(ctx.io);
+
+    const st = file.stat(ctx.io) catch return err_mod.respondError(request, .internal_error, "failed to stat file", a);
+    const size: u64 = @intCast(st.size);
+
+    const esc_name = jsonw.escapeAlloc(a, std.fs.path.basename(resolved)) catch return err_mod.respondError(request, .internal_error, "failed to escape name", a);
+    defer a.free(esc_name);
+    const esc_path = jsonw.escapeAlloc(a, path) catch return err_mod.respondError(request, .internal_error, "failed to escape path", a);
+    defer a.free(esc_path);
+
+    if (size > PREVIEW_MAX_SIZE) {
+        if (raw) return err_mod.respondError(request, .payload_too_large, "file too large", a);
+        const body = try std.fmt.allocPrint(a, "{{\"kind\":\"too_large\",\"name\":\"{s}\",\"path\":\"{s}\"}}", .{ esc_name, esc_path });
+        return respondPreviewJson(request, body);
+    }
+
+    const mime = mimeForExtension(std.fs.path.extension(resolved));
+    if (raw) {
+        const m = mime orelse return err_mod.respondError(request, .not_found, "not an image", a);
+        const data = a.alloc(u8, @intCast(size)) catch return err_mod.respondError(request, .internal_error, "failed to allocate", a);
+        const n = file.readPositionalAll(ctx.io, data, 0) catch return err_mod.respondError(request, .internal_error, "failed to read file", a);
+        // Original bytes straight through; image Content-Types only (mapping
+        // table — never a bare "image/<ext>" splice).
+        try request.respond(data[0..n], .{
+            .transfer_encoding = .none,
+            .extra_headers = &.{
+                .{ .name = "content-type", .value = m },
+                .{ .name = "cache-control", .value = "private, max-age=60" },
+            },
+        });
+        return;
+    }
+
+    if (mime != null) {
+        // Image kind: no content — the frontend <img src> goes to raw=1.
+        const body = try std.fmt.allocPrint(a, "{{\"kind\":\"image\",\"name\":\"{s}\",\"path\":\"{s}\"}}", .{ esc_name, esc_path });
+        return respondPreviewJson(request, body);
+    }
+
+    // Text vs binary: sniff the head window (isBinary semantics).
+    var head: [512]u8 = undefined;
+    const head_len: usize = @intCast(@min(size, head.len));
+    const head_n = if (head_len > 0) (file.readPositionalAll(ctx.io, head[0..head_len], 0) catch 0) else 0;
+    if (text_util.isBinary(head[0..head_n])) {
+        const body = try std.fmt.allocPrint(a, "{{\"kind\":\"binary\",\"name\":\"{s}\",\"path\":\"{s}\",\"mime_hint\":\"application/octet-stream\"}}", .{ esc_name, esc_path });
+        return respondPreviewJson(request, body);
+    }
+
+    const read_len: u64 = @min(size, PREVIEW_TEXT_LIMIT);
+    const truncated = size > PREVIEW_TEXT_LIMIT;
+    const data = a.alloc(u8, @intCast(read_len)) catch return err_mod.respondError(request, .internal_error, "failed to allocate", a);
+    const n = if (read_len > 0) (file.readPositionalAll(ctx.io, data, 0) catch 0) else 0;
+    const esc_content = jsonw.escapeAlloc(a, data[0..n]) catch return err_mod.respondError(request, .internal_error, "failed to escape content", a);
+    defer a.free(esc_content);
+
+    var jw = jsonw.JsonWriter.init(a);
+    defer jw.deinit();
+    jw.beginObject(null) catch return err_mod.respondError(request, .internal_error, "json", a);
+    jw.stringField("kind", "text") catch return err_mod.respondError(request, .internal_error, "json", a);
+    jw.stringField("name", esc_name) catch return err_mod.respondError(request, .internal_error, "json", a);
+    jw.stringField("path", esc_path) catch return err_mod.respondError(request, .internal_error, "json", a);
+    jw.stringField("content", esc_content) catch return err_mod.respondError(request, .internal_error, "json", a);
+    if (truncated) jw.boolField("truncated", true) catch return err_mod.respondError(request, .internal_error, "json", a);
+    jw.endValue() catch return err_mod.respondError(request, .internal_error, "json", a);
+    var out = jw.result() catch return err_mod.respondError(request, .internal_error, "json", a);
+    defer out.deinit();
+    return respondPreviewJson(request, out.bytes);
+}
+
+fn respondPreviewJson(request: *std.http.Server.Request, body: []const u8) !void {
+    // no-store: preview text may contain sensitive file content; never let
+    // browser/proxy caches leak it across sessions.
+    try request.respond(body, .{
+        .transfer_encoding = .none,
+        .extra_headers = &.{
+            .{ .name = "content-type", .value = "application/json" },
+            .{ .name = "cache-control", .value = "no-store" },
+        },
+    });
+}
+
+/// Case-insensitive extension → image Content-Type. Whitelist only; anything
+/// else returns null (raw endpoint 404s; JSON representation falls through to
+/// text/binary sniffing).
+fn mimeForExtension(ext: []const u8) ?[]const u8 {
+    if (ext.len < 2 or ext[0] != '.') return null;
+    var lower_buf: [8]u8 = undefined;
+    const rest = ext[1..];
+    if (rest.len > lower_buf.len) return null;
+    for (rest, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
+    const l = lower_buf[0..rest.len];
+    if (std.mem.eql(u8, l, "png")) return "image/png";
+    if (std.mem.eql(u8, l, "jpg") or std.mem.eql(u8, l, "jpeg")) return "image/jpeg";
+    if (std.mem.eql(u8, l, "gif")) return "image/gif";
+    if (std.mem.eql(u8, l, "webp")) return "image/webp";
+    if (std.mem.eql(u8, l, "svg")) return "image/svg+xml";
+    return null;
+}
+
+/// Extract a query parameter value from the request target. Owned by a.
+fn extractQueryParam(target: []const u8, key: []const u8, a: std.mem.Allocator) ?[]const u8 {
+    const qm = std.mem.indexOfScalar(u8, target, '?') orelse return null;
+    var it = std.mem.splitScalar(u8, target[qm + 1 ..], '&');
+    while (it.next()) |pair| {
+        const eq = std.mem.indexOfScalar(u8, pair, '=') orelse continue;
+        if (std.mem.eql(u8, pair[0..eq], key)) {
+            const val = pair[eq + 1 ..];
+            return urlDecode(a, val) catch null;
+        }
+    }
+    return null;
+}
+
+/// Percent-decode a query value. Borrowed from the existing prompt/model
+/// extractors (extractPrompt uses a no-decode slice; preview paths can contain
+/// spaces/UTF-8 so decoding is required).
+fn urlDecode(a: std.mem.Allocator, val: []const u8) ![]const u8 {
+    var out = std.ArrayListAligned(u8, null).empty;
+    var i: usize = 0;
+    while (i < val.len) {
+        if (val[i] == '%' and i + 2 < val.len) {
+            const hi = std.fmt.charToDigit(val[i + 1], 16) catch return error.InvalidUrlEncoding;
+            const lo = std.fmt.charToDigit(val[i + 2], 16) catch return error.InvalidUrlEncoding;
+            try out.append(a, @intCast(hi * 16 + lo));
+            i += 3;
+            continue;
+        }
+        if (val[i] == '+') {
+            try out.append(a, ' ');
+        } else {
+            try out.append(a, val[i]);
+        }
+        i += 1;
+    }
+    return out.toOwnedSlice(a);
+}
+
 fn handleAbort(ctx: *Context, request: *std.http.Server.Request, session_id: []const u8, a: std.mem.Allocator) !void {
     _ = a;
     ctx.abort_mutex.lock(ctx.io) catch unreachable;
@@ -811,14 +1264,42 @@ fn handleMessageDelete(ctx: *Context, request: *std.http.Server.Request, session
         return err_mod.respondError(request, .message_not_found, "message not found", a);
     if (index == 0) return err_mod.respondError(request, .bad_request, "cannot delete system message", a);
 
-    try pushUndo(ctx, session_id, .{ .delete = .{ .index = index, .message = try dupMessage(ctx.undo_allocator, session.messages()[index]) } });
+    // Cascade delete: remove [index, next user message) — deleting a user
+    // message must also drop its LLM reply + tool chain, and deleting an
+    // assistant/tool message must not leave orphaned tool_calls sequences
+    // (OpenAI-compat protocol requires user → assistant(tool_calls) → tool
+    // adjacency). Everything up to the next user message goes.
+    const end = cascadeDeleteEnd(session.messages(), index);
+    const count = end - index;
 
-    session.removeMessage(index) catch |err| {
-        if (err == error.IndexOutOfBounds) return err_mod.respondError(request, .bad_request, "message index out of bounds", a);
-        return err_mod.respondError(request, .internal_error, "failed to remove message", a);
-    };
+    const removed = try ctx.undo_allocator.alloc(types.Message, count);
+    for (session.messages()[index..end], 0..) |m, i| {
+        removed[i] = try dupMessage(ctx.undo_allocator, m);
+    }
+    try pushUndo(ctx, session_id, .{ .delete = .{ .index = index, .removed = removed } });
 
+    var i: usize = end;
+    while (i > index) {
+        i -= 1;
+        session.removeMessage(i) catch |err| {
+            if (err == error.IndexOutOfBounds) return err_mod.respondError(request, .bad_request, "message index out of bounds", a);
+            return err_mod.respondError(request, .internal_error, "failed to remove message", a);
+        };
+    }
+    try session.flush();
+
+    log.biz_info(ctx.thread_id, ctx.request_id, "message_delete", "session={s} index={d} removed={d}", .{ session_id, index, count });
     try respondJson(request, "{\"status\":\"deleted\"}");
+}
+
+/// End (exclusive) of the cascade range for a delete at `index`: everything
+/// from `index` up to (not including) the next user message.
+fn cascadeDeleteEnd(msgs: []const types.Message, index: usize) usize {
+    var i = index + 1;
+    while (i < msgs.len) : (i += 1) {
+        if (msgs[i].role == .user) return i;
+    }
+    return msgs.len;
 }
 
 /// POST /api/session/:id/truncate {"message_id":N} — keep messages before the
@@ -946,7 +1427,9 @@ fn handleUndo(ctx: *Context, request: *std.http.Server.Request, session_id: []co
                 return err_mod.respondError(request, .internal_error, "failed to load session", a);
             };
             defer session.deinit();
-            try session.insertMessageAt(d.index, d.message);
+            for (d.removed, 0..) |m, i| {
+                try session.insertMessageAt(d.index + i, m);
+            }
             try session.flush();
         },
         .truncate => |t| {
@@ -982,7 +1465,7 @@ fn handleHistory(ctx: *Context, request: *std.http.Server.Request, session_id: [
             first = false;
             switch (op) {
                 .delete => |d| {
-                    const s = try std.fmt.allocPrint(a, "{{\"kind\":\"delete\",\"index\":{d},\"id\":{d}}}", .{ d.index, d.message.id });
+                    const s = try std.fmt.allocPrint(a, "{{\"kind\":\"delete\",\"index\":{d},\"removed\":{d}}}", .{ d.index, d.removed.len });
                     defer a.free(s);
                     try buf.appendSlice(a, s);
                 },
@@ -1038,6 +1521,16 @@ fn dupMessage(al: std.mem.Allocator, src: types.Message) !types.Message {
             };
         }
         d.tool_calls = dtcs;
+    }
+    if (src.attachments) |atts| {
+        const datt = try al.alloc(types.Attachment, atts.len);
+        for (atts, datt) |s, *dst| {
+            dst.* = .{
+                .mime = try al.dupe(u8, s.mime),
+                .data = try al.dupe(u8, s.data),
+            };
+        }
+        d.attachments = datt;
     }
     return d;
 }
@@ -1138,6 +1631,29 @@ fn handlePrompt(ctx: *Context, request: *std.http.Server.Request, session_id: []
     };
     const phase_cb = sse.createPhaseWriter(&sse_state);
     const tool_cb = sse.createToolDisplay(&sse_state);
+
+    // N16: assemble the round-scoped approval context and install the tool hook.
+    // The ApprovalCtx lives on the request arena — the round cache dies with
+    // the SSE connection, as designed (no cross-round carryover).
+    {
+        const ac = ctx.allocator.create(ApprovalCtx) catch
+            return err_mod.respondError(request, .internal_error, "failed to allocate approval context", ctx.allocator);
+        ac.* = .{
+            .io = ctx.io,
+            .allocator = ctx.allocator,
+            .agent = agent,
+            .session_id = session_id,
+            .mode = approval_mod.Mode.fromString(ctx.config.approval_mode) orelse .risky,
+            .allow = ctx.config.approval_allow,
+            .cache_enabled = ctx.config.approval_cache,
+            .sse_writer = sw,
+            .approval_map = ctx.approval_map,
+            .approval_mutex = ctx.approval_mutex,
+            .thread_id = ctx.thread_id,
+            .request_id = ctx.request_id,
+        };
+        agent.tool_hooks = .{ .context = ac, .before = approvalBeforeHook };
+    }
 
     ctx.abort_mutex.lock(ctx.io) catch unreachable;
     ctx.abort_map.put(session_id, agent) catch {};
@@ -1568,6 +2084,80 @@ test "handler: ToolMeta JSON (types.writeJson) parseable for every variant" {
         const m = parsed.value.object.get("meta").?.object;
         try std.testing.expectEqualStrings(@tagName(meta), m.get("name").?.string);
     }
+}
+
+test "handler: mimeForExtension maps image extensions case-insensitively" {
+    try std.testing.expectEqualStrings("image/png", mimeForExtension(".png").?);
+    try std.testing.expectEqualStrings("image/jpeg", mimeForExtension(".jpg").?);
+    try std.testing.expectEqualStrings("image/jpeg", mimeForExtension(".jpeg").?);
+    try std.testing.expectEqualStrings("image/jpeg", mimeForExtension(".JPG").?);
+    try std.testing.expectEqualStrings("image/gif", mimeForExtension(".gif").?);
+    try std.testing.expectEqualStrings("image/webp", mimeForExtension(".webp").?);
+    try std.testing.expectEqualStrings("image/svg+xml", mimeForExtension(".svg").?);
+    try std.testing.expectEqualStrings("image/svg+xml", mimeForExtension(".SVG").?);
+    try std.testing.expectEqual(@as(?[]const u8, null), mimeForExtension(".exe"));
+    try std.testing.expectEqual(@as(?[]const u8, null), mimeForExtension(".zip"));
+    try std.testing.expectEqual(@as(?[]const u8, null), mimeForExtension(".pdf"));
+    try std.testing.expectEqual(@as(?[]const u8, null), mimeForExtension(".txt"));
+    try std.testing.expectEqual(@as(?[]const u8, null), mimeForExtension("noext"));
+    try std.testing.expectEqual(@as(?[]const u8, null), mimeForExtension(""));
+}
+
+test "handler: extractQueryParam parses target query" {
+    var tmp = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer tmp.deinit();
+    const a = tmp.allocator();
+
+    const p1 = extractQueryParam("/api/preview?path=src%2Fmain.zig&raw=1", "path", a).?;
+    try std.testing.expectEqualStrings("src/main.zig", p1);
+    const p2 = extractQueryParam("/api/preview?path=src%2Fmain.zig&raw=1", "raw", a).?;
+    try std.testing.expectEqualStrings("1", p2);
+    try std.testing.expectEqual(@as(?[]const u8, null), extractQueryParam("/api/preview?path=x", "missing", a));
+    try std.testing.expectEqual(@as(?[]const u8, null), extractQueryParam("/api/preview", "path", a));
+    const p3 = extractQueryParam("/api/preview?path=with+space.txt", "path", a).?;
+    try std.testing.expectEqualStrings("with space.txt", p3);
+    const p4 = extractQueryParam("/api/preview?path=%E4%B8%AD%E6%96%87.md", "path", a).?;
+    try std.testing.expectEqualStrings("\xe4\xb8\xad\xe6\x96\x87.md", p4);
+}
+
+test "handler: normalizeCommand trims and collapses whitespace" {
+    var tmp = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer tmp.deinit();
+    const a = tmp.allocator();
+
+    const n1 = try normalizeCommand(a, "  rm -rf  .zig-cache \t ");
+    defer a.free(n1);
+    try std.testing.expectEqualStrings("rm -rf .zig-cache", n1);
+    const n2 = try normalizeCommand(a, "rm  -rf\tx");
+    defer a.free(n2);
+    try std.testing.expectEqualStrings("rm -rf x", n2);
+}
+
+test "handler: cascadeDeleteEnd stops at next user message" {
+    const msgs = [_]types.Message{
+        .{ .id = 1, .role = .system, .content = "sys" },
+        .{ .id = 2, .role = .user, .content = "q1" },
+        .{ .id = 3, .role = .assistant, .content = "a1", .model = "m" },
+        .{ .id = 4, .role = .tool, .content = "t1", .tool_call_id = "c1" },
+        .{ .id = 5, .role = .user, .content = "q2" },
+        .{ .id = 6, .role = .assistant, .content = "a2", .model = "m" },
+    };
+    // deleting user q1 (index 1): cascades through a1+t1, stops before q2
+    try std.testing.expectEqual(@as(usize, 4), cascadeDeleteEnd(&msgs, 1));
+    // deleting assistant a1 (index 2): tool t1 goes too, stops before q2
+    try std.testing.expectEqual(@as(usize, 4), cascadeDeleteEnd(&msgs, 2));
+    // deleting last assistant a2 (index 5): cascades to end
+    try std.testing.expectEqual(@as(usize, 6), cascadeDeleteEnd(&msgs, 5));
+}
+
+test "handler: cascadeDeleteEnd single message when next is user" {
+    const msgs = [_]types.Message{
+        .{ .id = 1, .role = .system, .content = "sys" },
+        .{ .id = 2, .role = .user, .content = "q1" },
+        .{ .id = 3, .role = .user, .content = "q2" },
+    };
+    // deleting q1: next message is already a user → single delete
+    try std.testing.expectEqual(@as(usize, 2), cascadeDeleteEnd(&msgs, 1));
 }
 
 test "handler: buildDonePayload surfaces latest [Notice: system warning" {

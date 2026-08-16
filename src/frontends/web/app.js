@@ -167,7 +167,7 @@ document.addEventListener('click', function(e) {
 
 function renderModelMenu(models, currentId) {
   return (models || []).map(function(m) {
-    return { id: m.id, name: m.name, active: m.id === currentId };
+    return { id: m.id, name: m.name, provider: m.provider, active: m.id === currentId };
   });
 }
 
@@ -406,7 +406,10 @@ function selectModel(id) {
 }
 function renderModelMenuHtml(items) {
   return items.map(function(it) {
-    return '<div class="model-item' + (it.active ? ' active' : '') + '" data-id="' + esc(it.id) + '" title="' + esc(it.id) + '">' + esc(it.name) + (it.active ? ' &#10003;' : '') + '</div>';
+    // Provider prefix disambiguates same-named models from different vendors
+    // (e.g. two "DeepSeek V4 Pro" entries from different providers).
+    var label = (it.provider ? it.provider + ' / ' : '') + it.name;
+    return '<div class="model-item' + (it.active ? ' active' : '') + '" data-id="' + esc(it.id) + '" title="' + esc(it.id) + '">' + esc(label) + (it.active ? ' &#10003;' : '') + '</div>';
   }).join('');
 }
 async function loadModels() {
@@ -445,7 +448,10 @@ document.getElementById('model-btn').onclick = function(e) {
       item.onclick = function(e2) {
         e2.stopPropagation();
         selectModel(item.getAttribute('data-id'));
-        document.getElementById('model-btn-name').textContent = item.querySelector ? item.textContent.replace(/[ \u2713]/g,'').trim() : item.getAttribute('data-id');
+        // Strip only the trailing ✓ checkmark (keep spaces inside the name —
+        // the old /[ \u2713]/g regex dropped them: "DeepSeek V4 Flash" became
+        // "DeepSeekV4Flash" on the button).
+        document.getElementById('model-btn-name').textContent = item.querySelector ? item.textContent.replace(/\s*\u2713\s*$/, '').trim() : item.getAttribute('data-id');
         menu.remove();
         btn.setAttribute('aria-expanded','false');
       };
@@ -964,6 +970,21 @@ function renderMessages(msgs, insertBeforeNode) {
               out.innerHTML = renderMd(inputBlock + (m.content || ''));
             }
             if (ts.name) applyToolType(ts.el, ts.name, ts.data);
+            // N22: inline image attachments (reload path) — appended to the
+            // card body so typed views that rewrite .output do not clobber them.
+            if (m.attachments && m.attachments.length && !ts.el.querySelector('.tool-attachments')) {
+              var attsDiv = document.createElement('div');
+              attsDiv.className = 'tool-attachments';
+              m.attachments.forEach(function(a) {
+                var img = document.createElement('img');
+                img.className = 'tool-attachment';
+                img.src = 'data:' + a.mime + ';base64,' + a.data;
+                img.alt = a.mime;
+                attsDiv.appendChild(img);
+              });
+              var bodyEl = ts.el.querySelector('.card-body');
+              (bodyEl || ts.el).appendChild(attsDiv);
+            }
             break;
           }
         }
@@ -1589,9 +1610,20 @@ function sendPrompt(prompt) {
     scrollToBottom(msgs);
   });
 
+  evtSrc.addEventListener('approval_required', function(e) {
+    try { handleApprovalRequired(JSON.parse(e.data)); }
+    catch(ex) { console.error('approval_required handler:', ex); }
+  });
+
+  evtSrc.addEventListener('approval_reminder', function(e) {
+    try { handleApprovalReminder(JSON.parse(e.data)); }
+    catch(ex) { console.error('approval_reminder handler:', ex); }
+  });
+
   evtSrc.onerror = function() {
     if (evtSrc) { evtSrc.close(); evtSrc = null; }
     abortPrompt();
+    closeApprovalModal();
     conn.go('disconnect');
   };
 
@@ -2110,6 +2142,167 @@ function abortPrompt() {
 }
 function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+// --- N16 approval modal (prompt for dangerous tool calls) ---
+// Page-level queue: the agent contract is strictly serial, so at most one
+// approval should be pending at a time. A second request queues (defensive
+// path for contract breakage); queue depth is naturally capped by the server's
+// 240s gate timeout, and a late request that already expired is dropped.
+var approvalQueue = [];
+var approvalActive = null;
+
+function approvalModal(detail) {
+  return new Promise(function(resolve) {
+    var overlay = document.getElementById('approval-modal');
+    var titleEl = document.getElementById('approval-title');
+    var detailEl = document.getElementById('approval-detail');
+    var argsEl = document.getElementById('approval-args');
+    var deadlineEl = document.getElementById('approval-deadline');
+    titleEl.textContent = detail.name + ' — requires approval';
+    titleEl.classList.remove('urgent');
+    detailEl.textContent = detail.rule || '';
+    argsEl.textContent = detail.args || '';
+    deadlineEl.className = 'approval-deadline';
+    function updateDeadline() {
+      var remain = detail.deadline_ms ? (detail.deadline_ms - Date.now()) : Infinity;
+      if (remain <= 0) {
+        deadlineEl.textContent = 'expires now';
+        deadlineEl.className = 'approval-deadline urgent';
+      } else {
+        var min = Math.max(1, Math.ceil(remain / 60000));
+        deadlineEl.textContent = 'auto-denies in ~' + min + ' min';
+        if (remain < 30000) { deadlineEl.className = 'approval-deadline urgent'; titleEl.classList.add('urgent'); }
+      }
+    }
+    updateDeadline();
+    var timer = setInterval(updateDeadline, 30000);
+    overlay.classList.add('open');
+    var done = false;
+    function close(r) { if (done) return; done = true; clearInterval(timer); overlay.classList.remove('open'); resolve(r); }
+    function send(allow) {
+      fetch(A + '/approval/' + detail.id, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allow: allow, session_id: currentId })
+      })
+        .then(function(r) { return r.json().then(function(body) { return { ok: r.ok, body: body }; }); })
+        .then(function(res) {
+          // 404 (gate gone) or stale (already resolved by timeout/disconnect):
+          // the tool call was auto-denied server-side — do NOT resolve as allow.
+          if (!res.ok || (res.body && res.body.status === 'stale')) {
+            showStatus('This approval expired — the tool call was auto-denied', true);
+            close('expired');
+            return;
+          }
+          close(allow ? 'allow' : 'deny');
+        })
+        .catch(function() {
+          showStatus('This approval expired — the tool call was auto-denied', true);
+          close('expired');
+        });
+    }
+    document.getElementById('approval-allow').onclick = function() { send(true); };
+    document.getElementById('approval-deny').onclick = function() { send(false); };
+    overlay.onclick = function(e) { if (e.target === overlay) send(false); };
+    function escHandler(e) { if (e.key === 'Escape') { send(false); document.removeEventListener('keydown', escHandler); } }
+    document.addEventListener('keydown', escHandler, {once:true});
+  });
+}
+
+function handleApprovalRequired(d) {
+  // Already past the deadline: the server gate timed out; nothing to prompt.
+  if (d.deadline_ms && d.deadline_ms < Date.now()) { showStatus('Approval request expired', true); return; }
+  // Queue depth cap 2 (PLAN-N16): under the serial contract the queue stays
+  // empty; a third concurrent request means the contract broke — drop the
+  // extra one (its server gate falls back to the 240s timeout).
+  if (approvalQueue.length >= 2) { showStatus('Too many pending approvals — dropping request', true); return; }
+  approvalQueue.push(d);
+  drainApprovalQueue();
+}
+
+function handleApprovalReminder(d) {
+  if (!approvalActive || approvalActive.id !== d.id) return;
+  var deadlineEl = document.getElementById('approval-deadline');
+  var titleEl = document.getElementById('approval-title');
+  if (deadlineEl && deadlineEl.textContent.indexOf('Still waiting') === -1) {
+    deadlineEl.textContent = 'Still waiting for your decision — ' + deadlineEl.textContent;
+  }
+  if (deadlineEl) deadlineEl.className = 'approval-deadline urgent';
+  if (titleEl) titleEl.classList.add('urgent');
+}
+
+function drainApprovalQueue() {
+  if (approvalActive || approvalQueue.length === 0) return;
+  var d = approvalQueue.shift();
+  approvalActive = { id: d.id };
+  approvalModal(d).then(function() { approvalActive = null; drainApprovalQueue(); });
+}
+
+/// Close any pending approval UI (SSE disconnect path). The server already
+/// aborted via keepalive write failure — a leftover modal would mislead.
+function closeApprovalModal() {
+  approvalQueue = [];
+  if (approvalActive) {
+    var overlay = document.getElementById('approval-modal');
+    if (overlay) overlay.classList.remove('open');
+    approvalActive = null;
+  }
+}
+
+// --- N16 file preview modal ---
+function previewModal(path) {
+  return new Promise(function(resolve) {
+    var overlay = document.getElementById('preview-modal');
+    document.getElementById('preview-title').textContent = path;
+    var body = document.getElementById('preview-body');
+    body.innerHTML = '<div class="preview-hint">Loading...</div>';
+    overlay.classList.add('open');
+    var done = false;
+    function close() { if (done) return; done = true; overlay.classList.remove('open'); resolve(); }
+    document.getElementById('preview-close').onclick = close;
+    overlay.onclick = function(e) { if (e.target === overlay) close(); };
+    function escHandler(e) { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', escHandler); } }
+    document.addEventListener('keydown', escHandler, {once:true});
+    var url = A + '/preview?path=' + encodeURIComponent(path);
+    fetch(url)
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (d.kind === 'image') {
+          // <img> direct to the raw endpoint — no base64 inflation. SVG here
+          // is script-free by <img> semantics + CSP img-src 'self'.
+          var img = document.createElement('img');
+          img.src = url + '&raw=1';
+          img.alt = path;
+          img.onerror = function() { body.innerHTML = '<div class="preview-hint">Failed to load image.</div>'; };
+          body.innerHTML = '';
+          body.appendChild(img);
+        } else if (d.kind === 'text') {
+          var pre = document.createElement('pre');
+          pre.textContent = d.content + (d.truncated ? '\n... (truncated)' : '');
+          body.innerHTML = '';
+          body.appendChild(pre);
+        } else if (d.kind === 'binary') {
+          body.innerHTML = '<div class="preview-hint">Binary file — preview not available.</div>';
+        } else if (d.kind === 'too_large') {
+          body.innerHTML = '<div class="preview-hint">File too large to preview.</div>';
+        } else {
+          body.innerHTML = '<div class="preview-hint">Cannot preview this file.</div>';
+        }
+      })
+      .catch(function() { body.innerHTML = '<div class="preview-hint">Failed to load preview.</div>'; });
+  });
+}
+
+function addPreviewButton(toolDiv, path) {
+  if (!path) return;
+  var headEl = toolDiv.querySelector('.card-head');
+  if (!headEl || toolDiv.querySelector('.preview-btn')) return;
+  var btn = document.createElement('button');
+  btn.className = 'copy-cmd preview-btn';
+  btn.textContent = 'Preview';
+  btn.onclick = function(e) { e.stopPropagation(); previewModal(path); };
+  headEl.appendChild(btn);
+}
+
 // --- tool registry (typed views) ---
 // 每个条目是纯函数 (toolDiv, toolData) => void：只操作 toolDiv 内部 DOM，
 // 不读全局流式状态（curSegments/currentTool/isStreaming），同一数据多次调用
@@ -2143,6 +2336,9 @@ var ToolRegistry = {
   },
   read: function(toolDiv, d) {
     setToolIcon(toolDiv, '&#8962;');
+    // Directories cannot be previewed (GET /api/preview 404s on dirs) — hide
+    // the button for directory reads instead of a dead-end "Cannot preview".
+    if (!d.is_directory) addPreviewButton(toolDiv, d.path);
     var p = [];
     if (d.total_lines) p.push(d.total_lines + ' lines');
     if (d.byte_count) p.push(d.byte_count + 'B');
@@ -2159,6 +2355,7 @@ var ToolRegistry = {
   },
   edit: function(toolDiv, d) {
     setToolIcon(toolDiv, '&#9986;');
+    addPreviewButton(toolDiv, d.path);
     var p = [];
     if (d.replacements) p.push(d.replacements + ' replacements');
     if (d.old_lines && d.new_lines) p.push(d.old_lines + '->' + d.new_lines + ' lines');

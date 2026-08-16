@@ -1,5 +1,6 @@
 test {
     _ = @import("core/agent.zig");
+    _ = @import("approval.zig");
     _ = @import("core/session.zig");
     _ = @import("core/compact.zig");
     _ = @import("core/title.zig");

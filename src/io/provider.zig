@@ -32,6 +32,9 @@ pub const Provider = struct {
         model_params: ?[]const u8 = null,
         compat: types.ModelCompat,
         stream_options_declined: bool = false,
+        /// Model input modalities (from config `input`): image attachments are
+        /// only injected when `.image` is present (N22 gating).
+        input_modality: []const types.InputModality = &.{.text},
     };
 
     pub const Vendor = enum { deepseek, standard };
@@ -77,6 +80,7 @@ pub const Provider = struct {
                 .model_params = model.params_json,
                 .compat = resolved_compat,
                 .stream_options_declined = false,
+                .input_modality = model.input,
             },
         };
     }
@@ -100,6 +104,7 @@ pub const Provider = struct {
         self.config.model_params = model.params_json;
         self.config.compat = config_mod.resolveCompat(entry.base_url, model);
         self.config.stream_options_declined = false;
+        self.config.input_modality = model.input;
     }
 
     /// Call LLM API with streaming SSE. Retries up to 3 times on transient errors.
@@ -538,6 +543,16 @@ pub const Provider = struct {
                     try jw.endValue();
                 }
                 try jw.endValue();
+            } else if (msg.attachments) |atts| {
+                // N22: image attachments — inject as OpenAI image_url content
+                // blocks only when the model's input modality includes image
+                // (config `input = ["text","image"]`). Otherwise keep the plain
+                // text summary (the agent layer adds the capability Notice).
+                if (hasImageModality(self.config.input_modality)) {
+                    try writeContentWithAttachments(&jw, allocator, msg.content, atts);
+                } else {
+                    try jw.stringField("content", msg.content);
+                }
             } else {
                 try jw.stringField("content", msg.content);
             }
@@ -601,7 +616,82 @@ pub const Provider = struct {
         // Ownership transfer to caller (Result.deinit NOT called — slice escapes).
         return (try jw.result()).bytes;
     }
+
+    /// Emit `content` as an array of {type:text} + {type:image_url} blocks.
+    /// Per-attachment guards: mime whitelist, base64 charset (whitespace
+    /// tolerated per RFC 4648 line folding), cumulative raw-size cap (5MB,
+    /// approximated as data.len*3/4 — base64 minimum — slight overestimate
+    /// keeps the guard conservative).
+    fn writeContentWithAttachments(
+        jw: *jsonw.JsonWriter,
+        allocator: std.mem.Allocator,
+        text: []const u8,
+        atts: []const types.Attachment,
+    ) !void {
+        try jw.beginArray("content");
+        try jw.beginObject(null);
+        try jw.stringField("type", "text");
+        try jw.stringField("text", text);
+        try jw.endValue();
+        var total_raw: usize = 0;
+        for (atts) |att| {
+            if (!isImageMime(att.mime)) continue;
+            if (!isValidBase64(att.data)) continue;
+            total_raw += att.data.len / 4 * 3;
+            if (total_raw > MAX_ATTACHMENT_RAW_BYTES) break;
+            // Block scope: each url buffer dies at the end of its iteration
+            // (a function-level defer would keep every iteration's buffer
+            // alive until the function returns).
+            {
+                var url_buf = std.ArrayListAligned(u8, null).empty;
+                defer url_buf.deinit(allocator);
+                try url_buf.appendSlice(allocator, "data:");
+                try url_buf.appendSlice(allocator, att.mime);
+                try url_buf.appendSlice(allocator, ";base64,");
+                try url_buf.appendSlice(allocator, att.data);
+                try jw.beginObject(null);
+                try jw.stringField("type", "image_url");
+                try jw.beginObject("image_url");
+                try jw.stringField("url", url_buf.items);
+                try jw.endValue();
+                try jw.endValue();
+            }
+        }
+        try jw.endValue();
+    }
 };
+
+/// Raw byte cap for injected attachments (N22; aligns with read MAX_IMAGE_BYTES).
+const MAX_ATTACHMENT_RAW_BYTES: usize = 5 * 1024 * 1024;
+
+fn hasImageModality(input: []const types.InputModality) bool {
+    for (input) |m| {
+        if (m == .image) return true;
+    }
+    return false;
+}
+
+fn isImageMime(mime: []const u8) bool {
+    const whitelist = [_][]const u8{ "image/png", "image/jpeg", "image/gif", "image/webp" };
+    for (whitelist) |m| {
+        if (std.mem.eql(u8, mime, m)) return true;
+    }
+    return false;
+}
+
+/// Base64 charset check that tolerates whitespace (RFC 4648 line folding):
+/// \r\n\t and space are ignored; everything else must be in [A-Za-z0-9+/=].
+fn isValidBase64(data: []const u8) bool {
+    var significant: usize = 0;
+    for (data) |c| {
+        if (c == '\r' or c == '\n' or c == '\t' or c == ' ') continue;
+        significant += 1;
+        const ok = (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or
+            (c >= '0' and c <= '9') or c == '+' or c == '/' or c == '=';
+        if (!ok) return false;
+    }
+    return significant > 0;
+}
 
 fn buildThinkingJson(
     jw: *jsonw.JsonWriter,
@@ -794,6 +884,86 @@ test "detectVendor standard" {
     try std.testing.expectEqual(Provider.Vendor.standard, Provider.detectVendor("https://api.openai.com"));
     try std.testing.expectEqual(Provider.Vendor.standard, Provider.detectVendor("https://openrouter.ai/api/v1"));
     try std.testing.expectEqual(Provider.Vendor.standard, Provider.detectVendor("http://localhost:8080"));
+}
+
+fn testProvider(input: []const types.InputModality) Provider {
+    return .{ .config = .{
+        .base_url = "https://api.test.com",
+        .api_key = "",
+        .model = "test-model",
+        .max_tokens = 1000,
+        .vendor = .standard,
+        .compat = .{},
+        .input_modality = input,
+    } };
+}
+
+test "buildJsonBody: vision model injects image_url attachments" {
+    const testing = std.testing;
+    var p = testProvider(&.{ .text, .image });
+    const msgs = [_]types.Message{
+        .{ .role = .tool, .content = "Image file: shot.png", .tool_call_id = "c1", .attachments = &.{.{ .mime = "image/png", .data = "iVBORw0KGgo=" }} },
+    };
+    const body = try p.buildJsonBody(testing.allocator, &msgs, null, true);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "\"content\":[{") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"type\":\"text\"") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"type\":\"image_url\"") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"url\":\"data:image/png;base64,iVBORw0KGgo=\"") != null);
+}
+
+test "buildJsonBody: text-only model keeps plain content (gating)" {
+    const testing = std.testing;
+    var p = testProvider(&.{.text});
+    const msgs = [_]types.Message{
+        .{ .role = .tool, .content = "Image file: shot.png", .tool_call_id = "c1", .attachments = &.{.{ .mime = "image/png", .data = "iVBORw0KGgo=" }} },
+    };
+    const body = try p.buildJsonBody(testing.allocator, &msgs, null, true);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "\"content\":\"Image file: shot.png\"") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "image_url") == null);
+}
+
+test "buildJsonBody: invalid attachments skipped" {
+    const testing = std.testing;
+    var p = testProvider(&.{ .text, .image });
+    const msgs = [_]types.Message{
+        .{ .role = .tool, .content = "summary", .tool_call_id = "c1", .attachments = &.{
+            .{ .mime = "application/pdf", .data = "bm90LWltYWdl" }, // mime not whitelisted
+            .{ .mime = "image/png", .data = "" },                     // empty data
+            .{ .mime = "image/png", .data = "bad!chars" },            // invalid base64
+            .{ .mime = "image/png", .data = "dmFsaWQ=" },             // valid → injected
+        } },
+    };
+    const body = try p.buildJsonBody(testing.allocator, &msgs, null, true);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "application/pdf") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "bad!chars") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "dmFsaWQ=") != null);
+    // one injected attachment → one image_url content block (the type value
+    // appears once; the "image_url" object key is a separate occurrence)
+    try testing.expectEqual(@as(usize, 1), countOccurrences(body, "\"type\":\"image_url\""));
+}
+
+test "buildJsonBody: base64 line folding tolerated" {
+    const testing = std.testing;
+    var p = testProvider(&.{ .text, .image });
+    const msgs = [_]types.Message{
+        .{ .role = .tool, .content = "s", .tool_call_id = "c1", .attachments = &.{.{ .mime = "image/png", .data = "iVBORw0KGgo=\r\nAAECAwQFBgc=" }} },
+    };
+    const body = try p.buildJsonBody(testing.allocator, &msgs, null, true);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "AAECAwQFBgc=") != null);
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var count: usize = 0;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, pos, needle)) |i| {
+        count += 1;
+        pos = i + needle.len;
+    }
+    return count;
 }
 
 test "buildJsonBody basic" {

@@ -1,6 +1,15 @@
 # Plan N16-APPROVAL-PREVIEW: 工具审批 + 文件预览
 
-## 状态: 待实施
+## 状态: ✅ 已实施（2026-08-16，N16）
+
+## 实施偏差记录
+
+- `sse.zig serializeMeta` 的 read/edit 分支补 `path` 字段——实施表未列（Preview 按钮的 path 数据源：tool_meta 事件此前只发数值，方案假设 meta.path 存在但源码验证不成立）
+- Web 端 SystemPromptCb 注入点：server.zig `AgentLoop.init` 后置 `agent.system_prompt`（handler.zig `approvalSystemPrompt` 前缀幂等扫描）——实施表 server.zig 行已补
+- `approval.zig` 原子状态用 `std.atomic.Value(u8)`（extern struct 不能含 enum 字段，Zig 0.16 限制）
+- `mkfs.*` 前缀变体加入存储破坏规则（`mkfs.ext4`/`mkfs.vfat`——封闭清单的 mkfs 前缀扩展，宁误不漏）
+- Gate 时钟统一 `.real`（方案原"单调时钟"——项目无 `.mono` 先例，见设计要点惰性清理节）
+- CLI REPL 模式同样注入 policyNotice（方案只提 single-shot 的 SystemPromptCb；REPL 复用 spRebuild 前缀幂等）
 
 ## 前置依赖
 
@@ -80,7 +89,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
   - `240s`：仍未决议 → denied（超时自动拒绝，非用户决策，措辞见三态表）
   - `Gate.wait` 签名：`wait(timeout_ms, check_abort, keepalive, reminder)`——reminder 在 timeout/2 处调用一次（timeout_ms=240_000 时即 120s），可空
 - **SSE 断连生命周期**（审查补充）：审批等待期间连接无写入，断连（关页面/网络中断）无法被写失败路径感知 → 会挂到超时。修复：`wait` 的 `keepalive` 回调每 ~1s 写一次 SSE 注释帧（`: keepalive\r\n\r\n`，复用 SseWriter 函数指针包装），**写失败 = 连接不可写**（审查修订：TCP 半开时写可能短暂成功——缓冲区接受后才报错，因此“写失败 = TCP 已断”过于绝对；keepalive 是**最快失败检测**，TCP 半开/中间缓冲场景由 240s 超时兜底） → 回调返回 false → `wait` 立即返回 aborted。hook 收到 aborted 后调 `agent.abort()`（同 sse.zig 现有"写失败→abort"语义，agent.zig:109）终止整个回合（SSE 已断，结果无法送达，继续无意义）→ runTurn 走 interrupted 收尾。副作用：心跳同时防止代理超时关闭空闲 SSE 连接。**为何不监听连接关闭事件**（审查追问）：单请求线程模型下连接线程被 `wait` 阻塞，无法 select 读端检测 EOF；写探测（keepalive）是该模型下唯一可靠且非侵入的断连检测，且复用现有 SseWriter 无新机制
-- **approval_map 惰性清理**（审查补充）：gate 记录 `registered_at`（单调时钟）。正常路径 `wait` 返回后立即移除；异常路径可能残留——**每次插入新 gate 前扫描 map 中 `registered_at` 已超时（≥240s+10s 缓冲）的条目，主动 `resolve(denied)` + 移除**（幂等，残留 wait 线程唤醒后发现状态非 pending 即返回）。**map 规模 = 并发活跃 SSE 流数（每连接至多一个 pending，多连接并存）**（审查修订：原"常驻 0-1 个条目"是单 agent 视角、与并发模型节矛盾——进程级实际为活跃流数量，扫描 O(活跃流数) 仍可忽略，不引入后台线程）
+- **approval_map 惰性清理**（审查补充）：gate 记录 `registered_at`（**实时钟 `.real`**——源码验证：项目时钟统一 `Io.Clock.Timestamp.now(io, .real)`（subcall.zig:56/session.zig:269/agent.zig:517），`.mono` 无先例；惰性清理比较同为 `.real` 相同时钟域，墙钟跳变仅影响清理时机不影响正确性，偏差记录）。正常路径 `wait` 返回后立即移除；异常路径可能残留——**每次插入新 gate 前扫描 map 中 `registered_at` 已超时（≥240s+10s 缓冲）的条目，主动 `resolve(denied)` + 移除**（幂等，残留 wait 线程唤醒后发现状态非 pending 即返回）。**map 规模 = 并发活跃 SSE 流数（每连接至多一个 pending，多连接并存）**（审查修订：原"常驻 0-1 个条目"是单 agent 视角、与并发模型节矛盾——进程级实际为活跃流数量，扫描 O(活跃流数) 仍可忽略，不引入后台线程）
   - **残留窗口评估**（审查补充，低优先级）（审查追问：残留 gate 对功能无影响——不可寻址（无人能 POST 其 id）、无人决议；wait 线程仍存活时 240s 超时自清，仅线程死亡才真残留，下一次插入时被惰性清理）：Zig 默认 panic handler = 打印 + abort 整个进程——"wait 线程 panic 后进程存活且 gate 残留"实际不会发生（进程已退出）；残留仅可能出现在极端退出路径（如连接线程被强制终止）。若进程无新审批插入，残留条目永不被惰性清理——**登记为低优先改进**：未来可在 server accept 循环加周期扫描（如每 1024 次 accept 清一次超时条目），本期不做（残留概率极低 + per-gate 内存 ~100B）
 
 **并发模型与串行契约**（审查修订+安全补充）：agent 的 tool_calls 执行是**单 agent 内严格串行**——`agent.zig:369 for (tcs) |tc|` 顺序循环，每个工具（含 hook before 审批阻塞）完成才执行下一个，单回合内无并行执行路径（无 Thread/spawn）。server.zig 的线程是**连接级**并发（不同 HTTP 连接），**多个连接可同时运行多个 agent → 同一时刻进程内可能有多个 pending gate（每连接至多一个）**——原"同一时刻至多一个 pending gate"声明仅对单 agent 成立，已修正。前端侧：app.js 的 `evtSrc` 是**页面级单例**（切换会话时关闭旧流），一个页面同时只有一个 SSE 流 → 单 Modal 在**页面级**成立（不同标签页各自一个页面实例）。
@@ -127,7 +136,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - `handlePrompt`（SSE）：组装 `ApprovalCtx`（sse_state/agent/approval_map/mode 指针）→ `agent.tool_hooks.before = approvalBeforeHook`
 - `approvalBeforeHook(ctx, name, args)`：
   1. **主流程定稿（审查修订：补 approval_cache 进主流程）**：`mode==never` → 放行；`approval_allow` 归一化精确匹配命中 → 放行（用户显式信任声明最高优先）；**`approval_cache=true` 且 round cache 命中（name+args hash）→ 放行（审查修订：原流程漏掉此步，按此实现会丢失 cache 功能）；`approval.isRisky(mode, name, args)` 返回 null → 放行；否则进入审批（步骤2）——**写入时机：approved 决议后 `allowed.put(hash)`，存在 ApprovalCtx（per-连接），`approval_cache=false` 不查不写；**清理时机（审查修订）：cache 生命周期 = SSE 连接（回合）——ApprovalCtx 分配在 handlePrompt 的 request arena，连接结束 arena 释放，cache 随之自然清除，无需显式清理；跨回合不延续（每回合新 ApprovalCtx）****
-  2. 需要审批：id=`uuid_mod.v4`（**不可预测 UUID，非自增**——安全审查）→ **先发 SSE `approval_required`（`{"id","name","args","rule","deadline_ms"}`，用 sse.writer 直写 frame，deadline = 注册时刻 + 240_000），写失败 = 连接已断 → 不注册 gate、不进入 wait，直接返回 **messageFor(aborted, rule) 措辞**（审查修订：必须用 aborted 而非 denied——连接断开是系统中断不是用户拒绝，用 denied 会误导模型“用户拒绝”）并调 `agent.abort()`**（前端收不到审批请求，gate 只会挂到超时——发送失败必须在源头短路）→ 写成功后才注册 gate 到 map（**携带 session_id**）→ `gate.wait(240_000, &checkAbort, &keepaliveAlive, &reminderPing)` → 从 map 移除 → 按决议三态返回**区分措辞**（审查补充：denied/aborted 语义合并会让模型误把系统中断当用户拒绝，错误调整策略）：
+  2. 需要审批：id=`uuid_mod.v4`（**不可预测 UUID，非自增**——安全审查）→ **先发 SSE `approval_required`（`{"id","name","args","rule","deadline_ms"}`，用 sse.writer 直写 frame（**帧构造用 jsonw.escapeAlloc 组装而非 writeFrame 的 4096 栈缓冲**——源码验证：sse.zig:63 用 4096 bufPrint，长 args 会 `catch "{}"` 丢帧；`event: approval_required\ndata: {...}\n\n` 由 writeAll 直写，writeFrame 只适用于短 payload），deadline = 注册时刻 + 240_000），写失败 = 连接已断 → 不注册 gate、不进入 wait，直接返回 **messageFor(aborted, rule) 措辞**（审查修订：必须用 aborted 而非 denied——连接断开是系统中断不是用户拒绝，用 denied 会误导模型“用户拒绝”）并调 `agent.abort()`**（前端收不到审批请求，gate 只会挂到超时——发送失败必须在源头短路）→ 写成功后才注册 gate 到 map（**携带 session_id**）→ `gate.wait(240_000, &checkAbort, &keepaliveAlive, &reminderPing)` → 从 map 移除 → 按决议三态返回**区分措辞**（审查补充：denied/aborted 语义合并会让模型误把系统中断当用户拒绝，错误调整策略）：
      - `approved` → 返回 null（放行执行）
      - `denied`（用户主动拒绝）→ `"User denied this tool call ({rule}). This rejection is final for this command — do NOT retry it or work around it by rephrasing flags; adjust your approach."`（审查扩展：明确“对该命令最终拒绝 + 禁止换参数绕过”，对齐 dsh “rejected escalation is final for that command, never work around it”）
      - `timeout`（超时无响应 = 自动拒绝，非用户决策）→ `"Tool call auto-denied: approval timed out ({rule}). It was not explicitly rejected by the user — you may retry this exact command later or ask the user."`（审查扩展：明确“可安全重试同一命令”，与 denied 的“最终拒绝”区分——超时是系统状态不是用户意志）
@@ -185,8 +194,9 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 |------|------|
 | `src/approval.zig`（新增） | Mode/GateState/Gate（wait/resolve）+ isRisky 规则集（L1/L2 分级）+ **messageFor 三态措辞统一出口（CLI/Web 共用）**+ 单测 |
 | `src/config.zig` | `approval_mode` 字段（默认 risky）+ `approval_allow` 白名单数组 + `approval_cache` 开关（默认 true）+ TOML 解析 + 模板注释 |
-| `src/frontends/web/server.zig` | 进程级 approval_map + mutex（abort_map 同模式）+ **非回环绑定无鉴权拒绝启动门禁** |
+| `src/frontends/web/server.zig` | 进程级 approval_map + mutex（abort_map 同模式）+ **非回环绑定无鉴权拒绝启动门禁** + AgentLoop.init 注入 `system_prompt` 回调（Web 端此前未注册 SystemPromptCb——策略可见性节依赖它，实施时新增） |
 | `src/frontends/web/handler.zig` | approvalBeforeHook + ApprovalCtx + `POST /api/approval/:id` + `GET /api/preview`（JSON 四态）+ `GET /api/preview?raw=1`（原始字节）+ 路由 + serveIndex CSP header |
+| `src/frontends/web/error.zig` | ErrorCode 新增 `payload_too_large` 变体（→ `std.http.Status.payload_too_large` 413）——raw 端点超限错误码（源码验证：现有 ErrorCode 无 413，方案原文"413 Payload Too Large"需此变体） |
 | `src/frontends/web/app.js` | `approval_required` listener + approvalModal + previewModal + Preview 按钮（ToolRegistry read/edit 分支） |
 | `src/frontends/cli/App.zig` | `approvalCliHook`（isRisky → 拒绝措辞，reason=no_interactive）+ SystemPromptCb 策略段 |
 | `src/frontends/web/index.html` | `#approval-modal` + `#preview-modal` 结构 |

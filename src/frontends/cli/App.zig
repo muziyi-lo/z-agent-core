@@ -7,6 +7,7 @@ const registry_mod = @import("../../tool/registry.zig");
 const skill_tool = @import("../../tool/skill.zig");
 const session_mod = @import("../../core/session.zig");
 const agent_mod = @import("../../core/agent.zig");
+const approval_mod = @import("../../approval.zig");
 const render = @import("render.zig");
 const signal = @import("../../util/signal.zig");
 const session_ops = @import("../../session_ops.zig");
@@ -188,6 +189,10 @@ pub const App = struct {
             self.cfg.max_tool_rounds, self.project_root, self.model_context,
             .{
                 .system_prompt = .{ .context = self, .rebuild = spRebuild },
+                // N16 fail-closed: no interactive answerer exists on the CLI
+                // (REPL and --prompt single-shot), so risky/always commands are
+                // deterministically denied instead of silently executed.
+                .tool_hooks = .{ .context = self, .before = approvalCliHook },
                 .skills_dir = self.cfg.skills_dir,
             },
         );
@@ -827,11 +832,32 @@ pub const App = struct {
 
 fn spRebuild(ctx: ?*anyopaque) anyerror!void {
     const self: *App = @ptrCast(@alignCast(ctx.?));
-    if (self.single_prompt == null) return;
-    try self.session.append(.{
-        .role = .system,
-        .content = "Interaction mode: single-shot, no user interaction possible. Produce complete final output.",
-    });
+    if (self.single_prompt != null) {
+        try self.session.append(.{
+            .role = .system,
+            .content = "Interaction mode: single-shot, no user interaction possible. Produce complete final output.",
+        });
+    }
+    // N16: model-visible approval policy notice (idempotent by prefix scan —
+    // the rebuild runs before every turn).
+    const mode = approval_mod.Mode.fromString(self.cfg.approval_mode) orelse .risky;
+    const notice = approval_mod.policyNotice(mode) orelse return;
+    for (self.session.messages()) |m| {
+        if (m.role == .system and std.mem.startsWith(u8, m.content, approval_mod.POLICY_PREFIX)) return;
+    }
+    try self.session.append(.{ .role = .system, .content = notice });
+}
+
+/// N16 fail-closed CLI hook: no interactive answerer on the CLI, so any
+/// command that would require approval is denied with the unified wording
+/// (denied = final for that command). `approval_mode = "never"` explicitly
+/// opts out.
+fn approvalCliHook(ctx: ?*anyopaque, name: []const u8, args: []const u8) ?[]const u8 {
+    const self: *App = @ptrCast(@alignCast(ctx.?));
+    const mode = approval_mod.Mode.fromString(self.cfg.approval_mode) orelse .risky;
+    const rule = approval_mod.isRisky(mode, name, args) orelse return null;
+    log.biz_info(0, 0, "approval_denied", "reason=no_interactive tool={s} rule={s}", .{ name, rule });
+    return approval_mod.messageFor(self.allocator, .denied, rule) catch null;
 }
 
 fn shellName() []const u8 {
