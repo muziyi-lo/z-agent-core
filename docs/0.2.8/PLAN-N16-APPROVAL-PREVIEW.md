@@ -88,7 +88,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
   - gate id 用 **UUID v4**（`uuid_mod.v4`，项目已有）替代 `approval_{自增}`——**不可预测**，杜绝遍历猜测
   - **session 绑定**：gate 注册时记录 `session_id`；`POST /api/approval/:id` 请求体携带 `{allow, session_id}`，**session_id 不匹配 → 404**（与未知 id 同响应，不泄漏 gate 存在性）。**map 隔离等价性**（审查追问）：approval_map 保持全局平铺 + 每 gate 记录 session_id + POST 校验——校验失败 404 即隔离，安全性与"按 session 分桶"等价（分桶仅省一次无谓查找，复杂度更高无收益），保持平铺
   - 威胁模型：同源页面 CSRF 到 `127.0.0.1` 仍可**发送**请求（CORS 只禁读不禁发），但 id 为不可猜测 UUID → 无法定向到具体审批；完整 CSRF token 机制超出本期范围（本地单用户工具），登记为未来安全加固项
-  - **Web 服务器无鉴权（登记，暂缓）**：默认绑定回环，但 `--address 0.0.0.0` 暴露局域网后**无任何认证**——同网段可读会话/**`/api/preview` 读 project_root 内文件（图片 ≤5MB/文本 ≤64KB）**/耗 API 额度/bash 工具读 `.zagent/.env` 拿 API key/删会话（对比 opencode `--auth` token 有差距）。方向（未来立项）：preview 与全部 API 同受 Web 认证保护（认证缺失时 preview 暴露范围 = project_root 内可读文件，与 read 工具权限等价）：opencode 式启动打印随机 token URL + 登录端点换 httpOnly cookie + 全端点校验 + **非回环绑定无 token 拒绝启动**（防裸奔）；约束：`EventSource` 不能自定义 Authorization header，token 需走 URL 参数/cookie 通道
+  - **Web 服务器无鉴权（登记，暂缓）**：默认绑定回环，但 `--address 0.0.0.0` 暴露局域网后**无任何认证**——同网段可读会话/**`/api/preview` 读 project_root 内文件（图片 ≤5MB/文本 ≤64KB）**/耗 API 额度/bash 工具读 `.zagent/.env` 拿 API key/删会话（对比 opencode `--auth` token 有差距）。方向（未来立项）：preview 与全部 API 同受 Web 认证保护（认证缺失时 preview 暴露范围 = project_root 内可读文件，与 read 工具权限等价）：opencode 式启动打印随机 token URL。**本期安全门禁（审查修订：非回环绑定无鉴权是重大安全差距，不等待完整认证实现）：server 启动时检查 `--address`：非回环地址（非 127.0.0.1/::1/localhost）且无鉴权配置（目前恒无）→ **拒绝启动**，错误提示“binding to a non-loopback address requires authentication — use --address 127.0.0.1, or wait for the auth feature”。效果：`--address 0.0.0.0` 时本期直接禁用（fail-closed），preview/会话/API 暴露面不存在；待认证实现后解禁并解除此门禁） + 登录端点换 httpOnly cookie + 全端点校验 + **非回环绑定无 token 拒绝启动**（防裸奔）；约束：`EventSource` 不能自定义 Authorization header，token 需走 URL 参数/cookie 通道
   - 防御纵深：即使 id+session 均泄漏，allow:true 也仅放行**本次待审批工具**（规则判定在 core，风险面有限）
 - `approval_map` 用 StringHashMap 是 **id 寻址 + 重复 POST 幂等**的便利（`resolve` 幂等），并发多 gate 由多连接自然产生、各自独立
 - 串行契约是前端单 Modal（页面级）的**依赖**：若未来 agent 并行化工具执行（e.g. 多工具同轮并行），必须同步引入 Modal 队列（按 id 排队，一次展示一个）或按工具分组合并展示——方案文档在此登记该演进约束
@@ -185,7 +185,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 |------|------|
 | `src/approval.zig`（新增） | Mode/GateState/Gate（wait/resolve）+ isRisky 规则集（L1/L2 分级）+ **messageFor 三态措辞统一出口（CLI/Web 共用）**+ 单测 |
 | `src/config.zig` | `approval_mode` 字段（默认 risky）+ `approval_allow` 白名单数组 + `approval_cache` 开关（默认 true）+ TOML 解析 + 模板注释 |
-| `src/frontends/web/server.zig` | 进程级 approval_map + mutex（abort_map 同模式） |
+| `src/frontends/web/server.zig` | 进程级 approval_map + mutex（abort_map 同模式）+ **非回环绑定无鉴权拒绝启动门禁** |
 | `src/frontends/web/handler.zig` | approvalBeforeHook + ApprovalCtx + `POST /api/approval/:id` + `GET /api/preview`（JSON 四态）+ `GET /api/preview?raw=1`（原始字节）+ 路由 + serveIndex CSP header |
 | `src/frontends/web/app.js` | `approval_required` listener + approvalModal + previewModal + Preview 按钮（ToolRegistry read/edit 分支） |
 | `src/frontends/cli/App.zig` | `approvalCliHook`（isRisky → 拒绝措辞，reason=no_interactive）+ SystemPromptCb 策略段 |
