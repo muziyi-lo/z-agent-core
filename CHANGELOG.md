@@ -36,7 +36,7 @@
   - 附: N16 审查发现差异修正（error.zig 413 变体、Web 端补 SystemPromptCb 注入、writeFrame 4096 帧构造、实时钟统一）
 
 ### Changed
-- **config 模板注释澄清模型命名空间**（用户实测 AI 配置供应商误解）: `DEFAULT_TEMPLATE` 中 "Models are shared across providers" 与实现矛盾（`lookupModel` 按 `(provider, id)` 归属匹配，config.zig:336）——误导 AI 认为模型 id 全局唯一、跨 provider 需改名。修复: 注释重写为命名空间语义（**同一 id 可在不同 provider 下共存**，解析按 "provider/model_id" 在 provider 内查找；`provider = ""` 才是任意 provider 可用的共享池，此时才产生跨 provider 碰撞）+ ollama 示例补 `[[models]]` 块 + 跨 provider 同名案例。模板 TOML 解析验证通过（tomllib）
+- **config 模板注释澄清模型命名空间**（用户实测 AI 配置供应商误解）: `DEFAULT_TEMPLATE` 中 "Models are shared across providers" 与实现矛盾（`lookupModel` 按 `(provider, id)` 归属匹配，config.zig:524）——误导 AI 认为模型 id 全局唯一、跨 provider 需改名。修复: 注释重写为命名空间语义（**同一 id 可在不同 provider 下共存**，解析按 "provider/model_id" 在 provider 内查找；`provider = ""` 才是任意 provider 可用的共享池，此时才产生跨 provider 碰撞）+ ollama 示例补 `[[models]]` 块 + 跨 provider 同名案例。模板 TOML 解析验证通过（tomllib）
 
 ### Added
 - **Web 输入历史 + 导出对话**（`docs/0.2.8/PLAN-N15-WEB-FEATURES.md`，N15 2/5）:
