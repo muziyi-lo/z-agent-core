@@ -93,7 +93,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 **职责边界**（审查补充：明确审批能力分层，防实施时判定逻辑误入 handler）：
 - **core 层（src/approval.zig）**：危险判定（isRisky）+ 状态机（Gate）+ 决议语义——**决策逻辑全在 core，任何前端共享**
 - **frontend 层（handler.zig + app.js）**：仅交互呈现——SSE 事件收发、Modal、POST 端点；经 `ToolHooks.before`（core 定义的回调契约，与 PhaseWriterCb/ToolDisplayCb 同模式）注入
-- CLI 未来审批：复用同一 `approval.zig`（规则+Gate），仅替换 hook 实现为 stdin 确认——core 零改动
+- CLI 未来审批（审查补充：接口预留，避免未来重构核心逻辑）：预留的部分本期就定义：① **`approval.messageFor(decision, rule)` pub 函数**（三态措辞统一出口，从 web hook 内联文字提取）——CLI 拒绝后 append 的 tool 消息与 Web 字节一致；② **决策采集是可替换的交互层**：Web = SSE 事件 + gate.wait（keepalive/reminder 可传 null）；CLI = **同步模型，不走 Gate 轮询**——hook 内 stdout 提示（含 rule + messageFor 措辞）→ readLine y/n → 直接返回 null/拒绝消息（终端会话本身即生命周期，Ctrl+C 即中断，无 SSE 超时/断连语义）；③ `isRisky`/`Mode`/措辞常量均已 pub，CLI 直接用——core 零改动
 
 **SSE 写帧接口契约**（审查补充：SseWriter 注释帧能力未定义——确认现有接口已支持，无需新增能力）：
 - `SseWriter`（sse.zig:12-23）暴露 `writeAll`（任意原始字节）+ `flush` 函数指针——**writeAll 是原始字节通道，可写任意帧**（注释帧 `: keepalive\r\n\r\n`、事件帧 `event: x\ndata: {...}\n\n` 均直接 writeAll 字节序列）
@@ -179,7 +179,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 
 | 文件 | 改动 |
 |------|------|
-| `src/approval.zig`（新增） | Mode/GateState/Gate（wait/resolve）+ isRisky 规则集（L1/L2 分级）+ 单测 |
+| `src/approval.zig`（新增） | Mode/GateState/Gate（wait/resolve）+ isRisky 规则集（L1/L2 分级）+ **messageFor 三态措辞统一出口（CLI/Web 共用）**+ 单测 |
 | `src/config.zig` | `approval_mode` 字段（默认 risky）+ `approval_allow` 白名单数组 + `approval_cache` 开关（默认 true）+ TOML 解析 + 模板注释 |
 | `src/frontends/web/server.zig` | 进程级 approval_map + mutex（abort_map 同模式） |
 | `src/frontends/web/handler.zig` | approvalBeforeHook + ApprovalCtx + `POST /api/approval/:id` + `GET /api/preview`（JSON 四态）+ `GET /api/preview?raw=1`（原始字节）+ 路由 + serveIndex CSP header |
@@ -191,6 +191,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 
 - `isRisky`：**变体命中矩阵**（L1 全命中）——`rm -rf`/`rm -fr`/`rm -r -f`/`rm --recursive --force`/`rm -rF`/`rm -R -f`/PS `Remove-Item -Recurse -Force`/`Remove-Item -R -Fo`（PS 前缀简写）/cmd `rmdir /s /q`/`del /s /q`/`git push --force`/`git push -f`/`git reset --hard`/`git clean -fdx`/**`git clean -f`/`-fd`/`-fx`/`-dfx`/`--force`（force 变体全命中）**/`curl "https://x" | sh`/`curl x | bash`/**`curl https://x|sh`/`curl "url"|bash`/`wget x|sh`（管道符紧贴，空白分词绕过修复）**/`format c:`/`diskpart`/`chkdsk /f`/`reg delete HKLM\...`/`net user`；**L1 语义说明**：`rm -r dir`（递归删除，含 recursive）**命中**——递归删除本身即破坏性，force 非必需；**L2 不命中**——`rm file.txt`/`Remove-Item file`/`git push`/`git clean`（无 force，dry-run）/**`git clean -n`/`-d`（dry-run，不实际删除）**/`curl https://x`（无管道）/**`echo "a|sh"`（引号内）/`ls | grep sh`（非 sh 命令）/`echo | shell`（前缀边界）**/`chkdsk`（无 /f）；**存储破坏新成员命中**——`shred secret.txt`/`wipefs /dev/sdb`/`vgremove data`/`lvremove /dev/vg/lv`/`parted /dev/sda mklabel`/`cryptsetup luksFormat /dev/sdb`/`mkswap /dev/sdb1`/`swapoff /dev/sdb1`；**cryptsetup 安全用法不命中**——`cryptsetup open /dev/sdb luksvol`/`cryptsetup luksAddKey /dev/sdb`；大小写变体 `RM -RF`/`Remove-Item -recurse -force` 命中 + **封闭集语义：非枚举危险命令（`shred`/`docker system prune -a`/`nmap`）不命中** + 非 bash 工具在 risky 模式不审（write/edit 等 8 工具全豁免）+ always 模式全审 + never 全不审 + **`approval_allow` 归一化精确匹配：条目命令命中（空白折叠）、`RM -RF .ZIG-CACHE` 不命中（大小写敏感）、`-extra` 尾缀不命中、`&& rm -rf /` 尾追加不命中、`./` 前缀与尾斜杠不折叠（不命中）** + **回合内缓存：同 name+args 命中跳过、args 不同（dir_A/dir_B）不命中各自弹窗、approval_cache=false 时完全禁用缓存**
 - 预览四态：png/jpg/jpeg/gif/webp 走映射表（jpg/jpeg→image/jpeg），**JSON 端点返回 kind:"image" 无内容、原始表示（raw=1）`Content-Type` 与映射一致（含大小写扩展名 `.JPG`）+ 字节直出 + Cache-Control**；**svg 断言 `kind:"text"`（源码预览，非 image）且原始表示（raw=1）对 svg 放行（`Content-Type: image/svg+xml`）且 `<img>` 渲染无脚本执行**；`.exe`/`.zip`/`.pdf` 断言 `kind:"binary"`；超大文件 `kind:"too_large"`；CSP header 含 `img-src 'self'`
+- `messageFor`：三态措辞分别生成（denied 含“User denied”/timeout 含“auto-denied”/aborted 含“NOT denied”）+ rule 嵌入
 - `Gate`：初始 pending、resolve(true/false) 后状态、重复 resolve 幂等、wait 分级超时（**120s 触发 reminder 一次、240s 返回 denied**）、check_abort 置位返回 aborted、**keepalive 返回 false 立即 aborted（断连语义）、keepalive 周期性调用次数正确、reminder 写失败返回 false→aborted**；惰性清理：注册超时条目在下次插入时被 resolve+移除
 - 前端竞态（浏览器实测）：审批 Modal 打开 → 等待超时 → 点 Allow → 提示 "expired" 且无二次请求副作用；断连 → Modal 自动关闭；**连续两个 approval_required（契约破坏模拟）→ 第二个入队，第一个完成后续弹**；**安全：错误 session_id POST → 404、未知 id → 404、两会话（双标签页）各自审批互不影响**
 
