@@ -63,6 +63,8 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 
 - `#approval-modal`（modal-overlay 模式，confirmModal 先例）：消息区（工具名 + 危险规则）+ 参数 `<pre>` + Cancel/Allow 按钮
 - `approvalModal(detail)` Promise：Allow → `POST /api/approval/:id {allow:true}`；Cancel/Escape/遮罩 → `{allow:false}`
+- **竞态处理（审查补充）**：Gate 超时/断连被清理后用户才点 Allow → POST 404。Allow 分支捕获**非 2xx 响应**（404 或 500）→ 视为"审批已超时/已失效"：提示（`showStatus` 或 Modal 内换文案"This approval expired — the tool call was auto-denied"）并关闭 Modal，**不 resolve 为 allow**。已超时的 tool 消息后续会以 denied 形式出现在会话中，前端无需重发
+- **断连联动**：SSE `evtSrc.onerror`（app.js:1592 现有路径）→ 关闭当前审批 Modal（若有）+ 清 pending 状态——服务端已因 keepalive 写失败 abort，Modal 残留会误导用户
 - SSE listener `approval_required`：解析 detail → 弹 Modal。同一时刻仅一个审批（SSE 串行单工具流）；若有旧 pending Modal 则先拒绝再弹新的
 - 工具卡片流式期出现 pending 态（`tool_start` 到达后正常，审批在 tool_start 前——卡片此时尚未创建，无特殊渲染需求）
 
@@ -100,6 +102,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 
 - `isRisky`：bash 危险命令各规则命中（rm -rf/Remove-Item -Recurse/git push --force/curl|sh 等）+ 安全命令不误报（rm file、git push、Remove-Item 单文件）+ 非 bash 工具在 risky 模式不审 + always 模式全审 + never 全不审
 - `Gate`：初始 pending、resolve(true/false) 后状态、重复 resolve 幂等、wait 超时返回 denied、check_abort 置位返回 aborted、**keepalive 返回 false 立即 aborted（断连语义）、keepalive 周期性调用次数正确**
+- 前端竞态（浏览器实测）：审批 Modal 打开 → 等待 300s（或人工缩短验证）超时 → 点 Allow → 提示 "expired" 且无二次请求副作用；断连 → Modal 自动关闭
 
 ## 验证
 
