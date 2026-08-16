@@ -82,7 +82,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 **并发模型与串行契约**（审查修订+安全补充）：agent 的 tool_calls 执行是**单 agent 内严格串行**——`agent.zig:369 for (tcs) |tc|` 顺序循环，每个工具（含 hook before 审批阻塞）完成才执行下一个，单回合内无并行执行路径（无 Thread/spawn）。server.zig 的线程是**连接级**并发（不同 HTTP 连接），**多个连接可同时运行多个 agent → 同一时刻进程内可能有多个 pending gate（每连接至多一个）**——原"同一时刻至多一个 pending gate"声明仅对单 agent 成立，已修正。前端侧：app.js 的 `evtSrc` 是**页面级单例**（切换会话时关闭旧流），一个页面同时只有一个 SSE 流 → 单 Modal 在**页面级**成立（不同标签页各自一个页面实例）。
 - **安全模型（审查补充，安全关键）**：
   - gate id 用 **UUID v4**（`uuid_mod.v4`，项目已有）替代 `approval_{自增}`——**不可预测**，杜绝遍历猜测
-  - **session 绑定**：gate 注册时记录 `session_id`；`POST /api/approval/:id` 请求体携带 `{allow, session_id}`，**session_id 不匹配 → 404**（与未知 id 同响应，不泄漏 gate 存在性）
+  - **session 绑定**：gate 注册时记录 `session_id`；`POST /api/approval/:id` 请求体携带 `{allow, session_id}`，**session_id 不匹配 → 404**（与未知 id 同响应，不泄漏 gate 存在性）。**map 隔离等价性**（审查追问）：approval_map 保持全局平铺 + 每 gate 记录 session_id + POST 校验——校验失败 404 即隔离，安全性与"按 session 分桶"等价（分桶仅省一次无谓查找，复杂度更高无收益），保持平铺
   - 威胁模型：同源页面 CSRF 到 `127.0.0.1` 仍可**发送**请求（CORS 只禁读不禁发），但 id 为不可猜测 UUID → 无法定向到具体审批；完整 CSRF token 机制超出本期范围（本地单用户工具），登记为未来安全加固项
   - **Web 服务器无鉴权（登记，暂缓）**：默认绑定回环，但 `--address 0.0.0.0` 暴露局域网后**无任何认证**——同网段可读会话/耗 API 额度/bash 工具读 `.zagent/.env` 拿 API key/删会话（对比 opencode `--auth` token 有差距）。方向（未来立项）：opencode 式启动打印随机 token URL + 登录端点换 httpOnly cookie + 全端点校验 + **非回环绑定无 token 拒绝启动**（防裸奔）；约束：`EventSource` 不能自定义 Authorization header，token 需走 URL 参数/cookie 通道
   - 防御纵深：即使 id+session 均泄漏，allow:true 也仅放行**本次待审批工具**（规则判定在 core，风险面有限）
