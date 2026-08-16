@@ -60,7 +60,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - `handlePrompt`（SSE）：组装 `ApprovalCtx`（sse_state/agent/approval_map/mode 指针）→ `agent.tool_hooks.before = approvalBeforeHook`
 - `approvalBeforeHook(ctx, name, args)`：
   1. `approval.isRisky(mode, name, args)` 返回 null → 返回 null（放行，正常流程）
-  2. 需要审批：id=`approval_{全局自增}` → gate 注册 map → 发 SSE `approval_required`（`{"id","name","args","rule"}`，用 sse.writer 直写 frame）→ `gate.wait(300_000, &checkAbort, &keepaliveAlive)` → 从 map 移除 → 结果：approved → null；denied/timeout → 拒绝消息 `"User denied this tool call ({rule}). Adjust your approach."`（tool 消息，模型可见）；**aborted（含 SSE 断连）→ 调 `agent.abort()` 后返回拒绝消息**（abort 终止回合，拒绝消息兜底）
+  2. 需要审批：id=`approval_{全局自增}` → **先发 SSE `approval_required`（`{"id","name","args","rule"}`，用 sse.writer 直写 frame），写失败 = 连接已断 → 不注册 gate、不进入 wait，直接返回拒绝消息并调 `agent.abort()`**（前端收不到审批请求，gate 只会挂 300s 超时——发送失败必须在源头短路）→ 写成功后才注册 gate 到 map → `gate.wait(300_000, &checkAbort, &keepaliveAlive)` → 从 map 移除 → 结果：approved → null；denied/timeout → 拒绝消息 `"User denied this tool call ({rule}). Adjust your approach."`（tool 消息，模型可见）；**aborted（含 keepalive 断连）→ 调 `agent.abort()` 后返回拒绝消息**（abort 终止回合，拒绝消息兜底）
 - `POST /api/approval/:id` `{"allow":true|false}` → map 找 gate → `resolve` → 200；不存在 → 404。**无需通知机制**（agent 线程轮询 gate）
 - 事件时序：`approval_required` 先于 `tool_start`（hook 在 beginTool 之前，agent.zig:374→403）；审批通过后工具卡片正常流式
 
