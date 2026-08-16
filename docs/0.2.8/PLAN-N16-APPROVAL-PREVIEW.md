@@ -69,10 +69,14 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - **SSE 断连生命周期**（审查补充）：审批等待期间连接无写入，断连（关页面/网络中断）无法被写失败路径感知 → 会挂到超时。修复：`wait` 的 `keepalive` 回调每 ~1s 写一次 SSE 注释帧（`: keepalive\r\n\r\n`，复用 SseWriter 函数指针包装），**写失败 = TCP 已断** → 回调返回 false → `wait` 立即返回 aborted。hook 收到 aborted 后调 `agent.abort()`（同 sse.zig 现有"写失败→abort"语义，agent.zig:109）终止整个回合（SSE 已断，结果无法送达，继续无意义）→ runTurn 走 interrupted 收尾。副作用：心跳同时防止代理超时关闭空闲 SSE 连接。**为何不监听连接关闭事件**（审查追问）：单请求线程模型下连接线程被 `wait` 阻塞，无法 select 读端检测 EOF；写探测（keepalive）是该模型下唯一可靠且非侵入的断连检测，且复用现有 SseWriter 无新机制
 - **approval_map 惰性清理**（审查补充）：gate 记录 `registered_at`（单调时钟）。正常路径 `wait` 返回后立即移除；异常路径（wait 线程 panic 等）可能残留——**每次插入新 gate 前扫描 map 中 `registered_at` 已超时（≥240s+10s 缓冲）的条目，主动 `resolve(denied)` + 移除**（幂等，残留 wait 线程唤醒后发现状态非 pending 即返回）。串行契约下 map 常驻 0-1 个条目，扫描成本可忽略；不引入后台线程
 
-**并发模型与串行契约**（审查补充）：agent 的 tool_calls 执行是**严格串行**——`agent.zig:369 for (tcs) |tc|` 顺序循环，每个工具（含 hook before 审批阻塞）完成才执行下一个，回合内无任何并行执行路径（无 Thread/spawn）。server.zig 的线程是**连接级**并发（不同 HTTP 连接），与单回合内工具流无关。因此：
-- **同一时刻至多一个 pending gate**——前端"单 Modal"断言成立，无需 Modal 队列
-- `approval_map` 用 StringHashMap 是 **id 寻址 + 重复 POST 幂等**的便利（`resolve` 幂等），不代表支持并发 pending
-- 该串行契约是前端单 Modal 的**依赖**：若未来 agent 并行化工具执行（e.g. 多工具同轮并行），必须同步引入前端 Modal 队列（按 id 排队，一次展示一个）或按工具分组合并展示——方案文档在此登记该演进约束
+**并发模型与串行契约**（审查修订+安全补充）：agent 的 tool_calls 执行是**单 agent 内严格串行**——`agent.zig:369 for (tcs) |tc|` 顺序循环，每个工具（含 hook before 审批阻塞）完成才执行下一个，单回合内无并行执行路径（无 Thread/spawn）。server.zig 的线程是**连接级**并发（不同 HTTP 连接），**多个连接可同时运行多个 agent → 同一时刻进程内可能有多个 pending gate（每连接至多一个）**——原"同一时刻至多一个 pending gate"声明仅对单 agent 成立，已修正。前端侧：app.js 的 `evtSrc` 是**页面级单例**（切换会话时关闭旧流），一个页面同时只有一个 SSE 流 → 单 Modal 在**页面级**成立（不同标签页各自一个页面实例）。
+- **安全模型（审查补充，安全关键）**：
+  - gate id 用 **UUID v4**（`uuid_mod.v4`，项目已有）替代 `approval_{自增}`——**不可预测**，杜绝遍历猜测
+  - **session 绑定**：gate 注册时记录 `session_id`；`POST /api/approval/:id` 请求体携带 `{allow, session_id}`，**session_id 不匹配 → 404**（与未知 id 同响应，不泄漏 gate 存在性）
+  - 威胁模型：同源页面 CSRF 到 `127.0.0.1` 仍可**发送**请求（CORS 只禁读不禁发），但 id 为不可猜测 UUID → 无法定向到具体审批；完整 CSRF token 机制超出本期范围（本地单用户工具），登记为未来安全加固项
+  - 防御纵深：即使 id+session 均泄漏，allow:true 也仅放行**本次待审批工具**（规则判定在 core，风险面有限）
+- `approval_map` 用 StringHashMap 是 **id 寻址 + 重复 POST 幂等**的便利（`resolve` 幂等），并发多 gate 由多连接自然产生、各自独立
+- 串行契约是前端单 Modal（页面级）的**依赖**：若未来 agent 并行化工具执行（e.g. 多工具同轮并行），必须同步引入 Modal 队列（按 id 排队，一次展示一个）或按工具分组合并展示——方案文档在此登记该演进约束
 
 **职责边界**（审查补充：明确审批能力分层，防实施时判定逻辑误入 handler）：
 - **core 层（src/approval.zig）**：危险判定（isRisky）+ 状态机（Gate）+ 决议语义——**决策逻辑全在 core，任何前端共享**
@@ -97,12 +101,12 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - `handlePrompt`（SSE）：组装 `ApprovalCtx`（sse_state/agent/approval_map/mode 指针）→ `agent.tool_hooks.before = approvalBeforeHook`
 - `approvalBeforeHook(ctx, name, args)`：
   1. `approval.isRisky(mode, name, args)` 返回 null → 返回 null（放行，正常流程）
-  2. 需要审批：id=`approval_{全局自增}` → **先发 SSE `approval_required`（`{"id","name","args","rule"}`，用 sse.writer 直写 frame），写失败 = 连接已断 → 不注册 gate、不进入 wait，直接返回拒绝消息并调 `agent.abort()`**（前端收不到审批请求，gate 只会挂到超时——发送失败必须在源头短路）→ 写成功后才注册 gate 到 map → `gate.wait(240_000, &checkAbort, &keepaliveAlive, &reminderPing)` → 从 map 移除 → 按决议三态返回**区分措辞**（审查补充：denied/aborted 语义合并会让模型误把系统中断当用户拒绝，错误调整策略）：
+  2. 需要审批：id=`uuid_mod.v4`（**不可预测 UUID，非自增**——安全审查）→ **先发 SSE `approval_required`（`{"id","name","args","rule"}`，用 sse.writer 直写 frame），写失败 = 连接已断 → 不注册 gate、不进入 wait，直接返回拒绝消息并调 `agent.abort()`**（前端收不到审批请求，gate 只会挂到超时——发送失败必须在源头短路）→ 写成功后才注册 gate 到 map（**携带 session_id**）→ `gate.wait(240_000, &checkAbort, &keepaliveAlive, &reminderPing)` → 从 map 移除 → 按决议三态返回**区分措辞**（审查补充：denied/aborted 语义合并会让模型误把系统中断当用户拒绝，错误调整策略）：
      - `approved` → 返回 null（放行执行）
      - `denied`（用户主动拒绝）→ `"User denied this tool call ({rule}). Adjust your approach."`（模型应换方案不重试）
      - `timeout`（超时无响应 = 自动拒绝，非用户决策）→ `"Tool call auto-denied: approval timed out ({rule}). It was not explicitly rejected by the user."`（模型可重试或询问用户）
      - `aborted`（abort/SSE 断连，非用户决策）→ `"Tool call aborted: the connection was interrupted while awaiting approval ({rule}). It was NOT denied by the user."`，并调 `agent.abort()` 终止回合（SSE 已断，继续无意义）
-- `POST /api/approval/:id` `{"allow":true|false}` → map 找 gate → `resolve` → 200；不存在 → 404。**无需通知机制**（agent 线程轮询 gate）
+- `POST /api/approval/:id` `{"allow":true|false, "session_id":...}` → map 找 gate，**session_id 与 gate 记录不匹配 → 404**（与未知 id 同响应）→ 匹配则 `resolve` → 200。**无需通知机制**（agent 线程轮询 gate）
 - 事件时序：`approval_required` 先于 `tool_start`（hook 在 beginTool 之前，agent.zig:374→403）；审批通过后工具卡片正常流式
 - **SSE 写失败矩阵**（审查补充：直写 frame 依赖连接活跃，全部写点失败行为必须显式）：
   | 写点 | 写失败行为 |
@@ -117,7 +121,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 **前端**（app.js + index.html）：
 
 - `#approval-modal`（modal-overlay 模式，confirmModal 先例）：消息区（工具名 + 危险规则）+ 参数 `<pre>` + Cancel/Allow 按钮
-- `approvalModal(detail)` Promise：Allow → `POST /api/approval/:id {allow:true}`；Cancel/Escape/遮罩 → `{allow:false}`
+- `approvalModal(detail)` Promise：Allow → `POST /api/approval/:id {allow:true, session_id: currentId}`；Cancel/Escape/遮罩 → `{allow:false, session_id: currentId}`
 - **竞态处理（审查补充）**：Gate 超时/断连被清理后用户才点 Allow → POST 404。Allow 分支捕获**非 2xx 响应**（404 或 500）→ 视为"审批已超时/已失效"：提示（`showStatus` 或 Modal 内换文案"This approval expired — the tool call was auto-denied"）并关闭 Modal，**不 resolve 为 allow**。已超时的 tool 消息后续会以 denied 形式出现在会话中，前端无需重发
 - **断连联动**：SSE `evtSrc.onerror`（app.js:1592 现有路径）→ 关闭当前审批 Modal（若有）+ 清 pending 状态——服务端已因 keepalive 写失败 abort，Modal 残留会误导用户
 - SSE listener `approval_required`：解析 detail → 弹 Modal。同一时刻仅一个审批（**依据 agent 串行契约，见"并发模型"节**）；防御性兜底（审查修订：原"先拒绝旧再弹新"会打断用户审阅）：**新请求入队 `approvalQueue`，当前 Modal resolve 完成后弹下一个**——不打断审阅，队列深度上限 2（契约下正常为 0，排队即契约破坏信号）；注意排队请求的服务端 gate 在等待中消耗超时预算（240s），契约破坏时以超时兜底
@@ -166,7 +170,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 - `isRisky`：**变体命中矩阵**（L1 全命中）——`rm -rf`/`rm -fr`/`rm -r -f`/`rm --recursive --force`/`rm -rF`/`rm -R -f`/PS `Remove-Item -Recurse -Force`/`Remove-Item -R -Fo`（PS 前缀简写）/cmd `rmdir /s /q`/`del /s /q`/`git push --force`/`git push -f`/`git reset --hard`/`git clean -fdx`/`curl "https://x" | sh`/`curl x | bash`/`format c:`/`diskpart`/`chkdsk /f`/`reg delete HKLM\...`/`net user`；**L1 语义说明**：`rm -r dir`（递归删除，含 recursive）**命中**——递归删除本身即破坏性，force 非必需；**L2 不命中**——`rm file.txt`/`Remove-Item file`/`git push`/`git clean`/`curl https://x`（无管道）/`chkdsk`（无 /f）；大小写变体 `RM -RF`/`Remove-Item -recurse -force` 命中 + **封闭集语义：非枚举危险命令（`shred`/`docker system prune -a`/`nmap`）不命中** + 非 bash 工具在 risky 模式不审（write/edit 等 8 工具全豁免）+ always 模式全审 + never 全不审 + `approval_allow` 白名单豁免（含匹配、大小写不敏感）+ **回合内缓存：同 name+args 命中跳过、args 不同（dir_A/dir_B）不命中各自弹窗、approval_cache=false 时完全禁用缓存**
 - 预览四态：png/jpg/jpeg/gif/webp 走映射表（jpg/jpeg→image/jpeg），data_url 前缀与映射一致（含大小写扩展名 `.JPG`）；**svg 断言 `kind:"text"`（源码预览，非 image）**；`.exe`/`.zip`/`.pdf` 断言 `kind:"binary"`（拒渲染）；超大文件 `kind:"too_large"`
 - `Gate`：初始 pending、resolve(true/false) 后状态、重复 resolve 幂等、wait 分级超时（**120s 触发 reminder 一次、240s 返回 denied**）、check_abort 置位返回 aborted、**keepalive 返回 false 立即 aborted（断连语义）、keepalive 周期性调用次数正确、reminder 写失败返回 false→aborted**；惰性清理：注册超时条目在下次插入时被 resolve+移除
-- 前端竞态（浏览器实测）：审批 Modal 打开 → 等待超时 → 点 Allow → 提示 "expired" 且无二次请求副作用；断连 → Modal 自动关闭；**连续两个 approval_required（契约破坏模拟）→ 第二个入队，第一个完成后续弹**
+- 前端竞态（浏览器实测）：审批 Modal 打开 → 等待超时 → 点 Allow → 提示 "expired" 且无二次请求副作用；断连 → Modal 自动关闭；**连续两个 approval_required（契约破坏模拟）→ 第二个入队，第一个完成后续弹**；**安全：错误 session_id POST → 404、未知 id → 404、两会话（双标签页）各自审批互不影响**
 
 ## 验证
 
