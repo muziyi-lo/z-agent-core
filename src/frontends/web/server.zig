@@ -160,12 +160,27 @@ pub fn main(process: std.process.Init) !void {
         ew.interface.flush() catch |err| {
             log.errorLog("event=startup_gate_flush", "err={s}", .{@errorName(err)});
         };
-        return;
+        std.process.exit(1);
     }
 
     var state = init_mod.init(gpa, io, .{ .project_root = root_override }) catch |err| {
         init_mod.reportInitError(io, err, null, null);
-        return;
+        std.process.exit(1);
+    };
+
+    // N23: startup fail-fast for default_model (web has no --model, so this is
+    // the only check point). Without it the first request silently dies inside
+    // the connection handler (resolveModel catch return, server.zig).
+    _ = config_mod.resolveModel(&state.config, state.config.default_model) catch |err| {
+        var mbuf: [512]u8 = undefined;
+        var mw: Io.File.Writer = .init(.stderr(), io, &mbuf);
+        mw.interface.print("error: default_model \"{s}\" cannot be resolved ({s})\n", .{ state.config.default_model, @errorName(err) }) catch {};
+        mw.interface.flush() catch {};
+        const models_text = config_mod.formatAvailableModels(gpa, &state.config) catch "?";
+        defer gpa.free(models_text);
+        mw.interface.print("       available models: {s}\n", .{models_text}) catch {};
+        mw.interface.flush() catch {};
+        std.process.exit(1);
     };
 
     const sessions_dir = try std.fs.path.join(gpa, &.{ state.project_root, session_mod.sessions_subdir });

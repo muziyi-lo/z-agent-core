@@ -18,10 +18,24 @@ pub const ParseError = error{
     InvalidToml,
 };
 
+/// One syntax error with source position, filled through the `diags`
+/// out-parameter of parse(). The parser itself never writes to stderr —
+/// rendering the diagnostics is the caller's job (N23: single print point).
+pub const Diag = struct {
+    line: u32,
+    column: u32,
+    message: []const u8,
+};
+
+pub const DiagList = std.ArrayListAligned(Diag, null);
+
 /// Parse a TOML source string into a flat table.
 /// `[[providers]]` becomes an array under the key "providers".
 /// `[permissions]` becomes a table under the key "permissions".
-pub fn parse(allocator: std.mem.Allocator, source: []const u8) !std.StringArrayHashMapUnmanaged(Value) {
+/// On syntax errors, appends a position-carrying Diag and returns
+/// error.InvalidToml (first error only; collecting all errors would require
+/// an error-tolerant parser rework — F25 scope).
+pub fn parse(allocator: std.mem.Allocator, source: []const u8, diags: *DiagList) !std.StringArrayHashMapUnmanaged(Value) {
     var root = std.StringArrayHashMapUnmanaged(Value){};
     errdefer freeTable(allocator, &root);
 
@@ -42,7 +56,9 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !std.StringArrayH
     var ctx_array_index: usize = 0;
 
     var lines = std.mem.splitScalar(u8, source, '\n');
+    var line_no: u32 = 0;
     while (lines.next()) |raw_line| {
+        line_no += 1;
         const line = if (raw_line.len > 0 and raw_line[raw_line.len - 1] == '\r') raw_line[0 .. raw_line.len - 1] else raw_line;
         const trimmed = std.mem.trim(u8, line, " \t");
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
@@ -51,15 +67,23 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !std.StringArrayH
         const e_trimmed = std.mem.trim(u8, effective, " \t");
         if (e_trimmed.len == 0) continue;
 
+        // Column of the first non-whitespace character in the raw line
+        // (1-based, relative to the line without trailing \r).
+        const lead: u32 = @intCast(line.len - std.mem.trim(u8, line, " \t").len);
+
         // Table header: [table] or [[table_array]]
         if (e_trimmed[0] == '[') {
             if (e_trimmed.len > 1 and e_trimmed[1] == '[') {
                 // [[table_array]]
                 const close = std.mem.indexOfPos(u8, e_trimmed, 2, "]]") orelse {
+                    try diags.append(allocator, .{ .line = line_no, .column = lead + 1, .message = "unclosed [[table]] header" });
                     return error.InvalidToml;
                 };
                 const name = std.mem.trim(u8, e_trimmed[2..close], " \t");
-                if (name.len == 0) return error.InvalidToml;
+                if (name.len == 0) {
+                    try diags.append(allocator, .{ .line = line_no, .column = lead + 1, .message = "empty table name in [[table]] header" });
+                    return error.InvalidToml;
+                }
 
                 const name_dup = try allocator.dupe(u8, name);
                 errdefer allocator.free(name_dup);
@@ -83,10 +107,14 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !std.StringArrayH
             } else {
                 // [table]
                 const close = std.mem.indexOfScalar(u8, e_trimmed[1..], ']') orelse {
+                    try diags.append(allocator, .{ .line = line_no, .column = lead + 1, .message = "unclosed [table] header" });
                     return error.InvalidToml;
                 };
                 const name = std.mem.trim(u8, e_trimmed[1 .. 1 + close], " \t");
-                if (name.len == 0) return error.InvalidToml;
+                if (name.len == 0) {
+                    try diags.append(allocator, .{ .line = line_no, .column = lead + 1, .message = "empty table name in [table] header" });
+                    return error.InvalidToml;
+                }
 
                 const entry = try root.getOrPut(allocator, name);
                 if (!entry.found_existing) {
@@ -94,7 +122,10 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !std.StringArrayH
                     const t = std.StringArrayHashMapUnmanaged(Value){};
                     entry.value_ptr.* = Value{ .table = t };
                 }
-                if (entry.value_ptr.* != .table) return error.InvalidToml;
+                if (entry.value_ptr.* != .table) {
+                    try diags.append(allocator, .{ .line = line_no, .column = lead + 1, .message = "[table] header conflicts with an existing key" });
+                    return error.InvalidToml;
+                }
 
                 ctx_table_name = entry.key_ptr.*;
                 ctx_array_name = "";
@@ -104,15 +135,22 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !std.StringArrayH
 
         // key = value
         const eq_pos = findEquals(e_trimmed) orelse {
+            try diags.append(allocator, .{ .line = line_no, .column = lead + @as(u32, @intCast(e_trimmed.len)) + 1, .message = "expected key = value" });
             return error.InvalidToml;
         };
         const key = std.mem.trim(u8, e_trimmed[0..eq_pos], " \t");
-        if (key.len == 0) return error.InvalidToml;
+        if (key.len == 0) {
+            try diags.append(allocator, .{ .line = line_no, .column = lead + 1, .message = "empty key before '='" });
+            return error.InvalidToml;
+        }
 
         const val_raw = std.mem.trim(u8, e_trimmed[eq_pos + 1 ..], " \t");
-        if (val_raw.len == 0) return error.InvalidToml;
+        if (val_raw.len == 0) {
+            try diags.append(allocator, .{ .line = line_no, .column = lead + @as(u32, @intCast(eq_pos)) + 2, .message = "empty value after '='" });
+            return error.InvalidToml;
+        }
 
-        var val = try parseValue(allocator, val_raw);
+        var val = try parseValue(allocator, val_raw, diags, line_no, lead + @as(u32, @intCast(eq_pos)) + 2);
         errdefer freeValue(allocator, &val);
 
         // Assign to current context
@@ -233,7 +271,7 @@ fn stripInlineComment(line: []const u8) []const u8 {
 }
 
 /// Parse a string value with escape sequences.
-fn parseString(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
+fn parseString(allocator: std.mem.Allocator, s: []const u8, diags: *DiagList, line_no: u32, column: u32) ![]const u8 {
     var result = std.array_list.Managed(u8).init(allocator);
     errdefer result.deinit();
 
@@ -241,14 +279,20 @@ fn parseString(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
     while (i < s.len) {
         if (s[i] == '\\') {
             i += 1;
-            if (i >= s.len) return error.InvalidToml;
+            if (i >= s.len) {
+                try diags.append(allocator, .{ .line = line_no, .column = column, .message = "dangling escape at end of string" });
+                return error.InvalidToml;
+            }
             switch (s[i]) {
                 '"' => try result.append('"'),
                 '\\' => try result.append('\\'),
                 'n' => try result.append('\n'),
                 't' => try result.append('\t'),
                 'r' => try result.append('\r'),
-                else => return error.InvalidToml,
+                else => {
+                    try diags.append(allocator, .{ .line = line_no, .column = column, .message = "invalid escape sequence" });
+                    return error.InvalidToml;
+                },
             }
         } else {
             try result.append(s[i]);
@@ -259,19 +303,25 @@ fn parseString(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
 }
 
 /// Parse a TOML value from raw text (after stripping comment and whitespace).
-fn parseValue(allocator: std.mem.Allocator, raw: []const u8) !Value {
+fn parseValue(allocator: std.mem.Allocator, raw: []const u8, diags: *DiagList, line_no: u32, column: u32) !Value {
     const trimmed = std.mem.trim(u8, raw, " \t");
 
     // String
     if (trimmed.len >= 2 and trimmed[0] == '"') {
-        if (trimmed[trimmed.len - 1] != '"') return error.InvalidToml;
+        if (trimmed[trimmed.len - 1] != '"') {
+            try diags.append(allocator, .{ .line = line_no, .column = column, .message = "unclosed string" });
+            return error.InvalidToml;
+        }
         const content = trimmed[1 .. trimmed.len - 1];
-        return Value{ .string = try parseString(allocator, content) };
+        return Value{ .string = try parseString(allocator, content, diags, line_no, column) };
     }
 
     // Array
     if (trimmed.len >= 2 and trimmed[0] == '[') {
-        if (trimmed[trimmed.len - 1] != ']') return error.InvalidToml;
+        if (trimmed[trimmed.len - 1] != ']') {
+            try diags.append(allocator, .{ .line = line_no, .column = column, .message = "unclosed array" });
+            return error.InvalidToml;
+        }
         const inner = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t");
         if (inner.len == 0) return Value{ .array = &.{} };
 
@@ -310,7 +360,7 @@ fn parseValue(allocator: std.mem.Allocator, raw: []const u8) !Value {
                 pos = end + 1;
                 continue;
             }
-            const item = try parseValue(allocator, item_raw);
+            const item = try parseValue(allocator, item_raw, diags, line_no, column);
             try items.append(item);
             pos = end + 1;
         }
@@ -324,16 +374,27 @@ fn parseValue(allocator: std.mem.Allocator, raw: []const u8) !Value {
 
     // Integer
     if (trimmed.len > 0 and (trimmed[0] == '-' or std.ascii.isDigit(trimmed[0]))) {
-        const val = std.fmt.parseInt(i64, trimmed, 10) catch return error.InvalidToml;
+        const val = std.fmt.parseInt(i64, trimmed, 10) catch {
+            try diags.append(allocator, .{ .line = line_no, .column = column, .message = "invalid integer" });
+            return error.InvalidToml;
+        };
         return Value{ .integer = val };
     }
 
+    try diags.append(allocator, .{ .line = line_no, .column = column, .message = "unrecognized value" });
     return error.InvalidToml;
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Test helper: parse without caring about diagnostics (success-path tests).
+fn parseTest(allocator: std.mem.Allocator, source: []const u8) !std.StringArrayHashMapUnmanaged(Value) {
+    var diags = DiagList.empty;
+    defer diags.deinit(allocator);
+    return parse(allocator, source, &diags);
+}
 
 test "toml: parses simple key-value pairs" {
     const testing = std.testing;
@@ -346,7 +407,7 @@ test "toml: parses simple key-value pairs" {
         \\no = false
     ;
 
-    var result = try parse(allocator, toml);
+    var result = try parseTest(allocator, toml);
     defer freeTable(allocator, &result);
 
     try testing.expect(result.count() == 4);
@@ -367,7 +428,7 @@ test "toml: handles inline comments" {
         \\# whole line comment
     ;
 
-    var result = try parse(allocator, toml);
+    var result = try parseTest(allocator, toml);
     defer freeTable(allocator, &result);
 
     try testing.expect(result.count() == 2);
@@ -383,7 +444,7 @@ test "toml: parses string arrays" {
         \\models = ["a", "b", "c"]
     ;
 
-    var result = try parse(allocator, toml);
+    var result = try parseTest(allocator, toml);
     defer freeTable(allocator, &result);
 
     const arr = result.get("models").?.array;
@@ -407,7 +468,7 @@ test "toml: parses table array [[providers]]" {
         \\kind = "openai"
     ;
 
-    var result = try parse(allocator, toml);
+    var result = try parseTest(allocator, toml);
     defer freeTable(allocator, &result);
 
     const arr = result.get("providers").?.array;
@@ -428,7 +489,7 @@ test "toml: parses [table] section" {
         \\allow = ["Read", "Glob"]
     ;
 
-    var result = try parse(allocator, toml);
+    var result = try parseTest(allocator, toml);
     defer freeTable(allocator, &result);
 
     try testing.expect(std.mem.eql(u8, result.get("mode").?.string, "confirm"));
@@ -447,7 +508,7 @@ test "toml: handles escape sequences in strings" {
         \\quote = "say \"hi\""
     ;
 
-    var result = try parse(allocator, toml);
+    var result = try parseTest(allocator, toml);
     defer freeTable(allocator, &result);
 
     const text = result.get("text").?.string;
@@ -460,8 +521,13 @@ test "toml: error on invalid syntax" {
     const allocator = testing.allocator;
 
     const toml = "key = noquote";
-    const result = parse(allocator, toml);
+    var diags = DiagList.empty;
+    defer diags.deinit(allocator);
+    const result = parse(allocator, toml, &diags);
     try testing.expect(result == error.InvalidToml);
+    try testing.expect(diags.items.len == 1);
+    try testing.expectEqual(@as(u32, 1), diags.items[0].line);
+    try testing.expectEqualStrings("unrecognized value", diags.items[0].message);
 }
 
 test "toml: error on unclosed string" {
@@ -469,15 +535,34 @@ test "toml: error on unclosed string" {
     const allocator = testing.allocator;
 
     const toml = "key = \"unclosed";
-    const result = parse(allocator, toml);
+    var diags = DiagList.empty;
+    defer diags.deinit(allocator);
+    const result = parse(allocator, toml, &diags);
     try testing.expect(result == error.InvalidToml);
+    try testing.expect(diags.items.len == 1);
+    try testing.expectEqualStrings("unclosed string", diags.items[0].message);
+}
+
+test "toml: multi-line error reports correct line number" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const toml = "good = 1\n[broken";
+    var diags = DiagList.empty;
+    defer diags.deinit(allocator);
+    const result = parse(allocator, toml, &diags);
+    try testing.expect(result == error.InvalidToml);
+    try testing.expect(diags.items.len == 1);
+    try testing.expectEqual(@as(u32, 2), diags.items[0].line);
+    try testing.expectEqualStrings("unclosed [table] header", diags.items[0].message);
+    try testing.expect(diags.items[0].column == 1);
 }
 
 test "toml: empty source returns empty table" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var result = try parse(allocator, "");
+    var result = try parseTest(allocator, "");
     defer freeTable(allocator, &result);
     try testing.expect(result.count() == 0);
 }
@@ -486,7 +571,7 @@ test "toml: comment-only content" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var result = try parse(allocator, "# just a comment\n\n  # another\n");
+    var result = try parseTest(allocator, "# just a comment\n\n  # another\n");
     defer freeTable(allocator, &result);
     try testing.expect(result.count() == 0);
 }
@@ -526,7 +611,7 @@ test "toml: parses full config example" {
         \\deny = ["Bash(rm -rf *)"]
     ;
 
-    var result = try parse(allocator, toml);
+    var result = try parseTest(allocator, toml);
     defer freeTable(allocator, &result);
 
     try testing.expect(std.mem.eql(u8, result.get("default_model").?.string, "deepseek/deepseek-v4-flash"));
@@ -563,7 +648,7 @@ test "toml: [table] context persists until next header" {
         \\key = "other"
     ;
 
-    var result = try parse(allocator, toml);
+    var result = try parseTest(allocator, toml);
     defer freeTable(allocator, &result);
 
     try testing.expect(std.mem.eql(u8, result.get("top").?.string, "root"));

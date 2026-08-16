@@ -106,17 +106,13 @@ pub const App = struct {
         const init_mod = @import("../init.zig");
         var state = try init_mod.init(allocator, io, .{
             .api_key_override = null,
+            .model_override = model_override,
         });
         errdefer state.deinit();
 
         log.init(allocator, io, state.project_root);
         trace.init(allocator, io, state.project_root);
         timing.init(io);
-
-        if (model_override) |spec| {
-            const duped = try allocator.dupe(u8, spec);
-            state.config.default_model = duped;
-        }
 
         {
             var sbuf: [256]u8 = undefined;

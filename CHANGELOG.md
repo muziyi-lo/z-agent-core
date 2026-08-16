@@ -2,6 +2,13 @@
 
 ## [Unreleased] - 0.2.8 周期（未发布）
 
+### Added
+- **配置检查功能补全**（`docs/0.2.8/PLAN-N23-CONFIG-CHECK.md`，N23，5 新单测 + 全量 383）:
+  - **default_model 启动校验**（对齐 opencode ProviderModelNotFoundError 建议提示，fail-fast 超越其"仅运行时"）: 校验点=init.zig:85 启动必经路径（CLI/web 共享）；`--model` 覆盖前移至 init opts——校验用覆盖后值（配置 default_model 无效 + `--model` 有效可正常启动，修复覆盖被前置 resolve 误杀）；错误文本含可用模型列表（`formatAvailableModels`，动态分配）；web 新增 listen 前校验点（消除"启动正常、首请求静默断开"）
+  - **标量类型警告汇总块**: 8 个顶层标量键（default_model/max_tokens/max_tool_rounds/skills_dir/auto_title/approval_mode/approval_cache/base_prompt）值类型错误 → 单块输出（计数 + 逐条 expected/got + 回退默认）
+  - **TOML 语法错误行列定位**: toml.zig 新增 `Diag` out-param（line/column/message，无 stderr 副作用，解析器保持纯净）+ config.zig 单点渲染（`line N, column M` + 行内容 + caret，对齐 opencode parse.ts）；14 处错误返回点全覆盖
+  - **配置/init 错误非零退出码**: cli/main.zig（--list-models / App.init）+ server.zig（init 失败 / 非回环门禁 / 启动校验点）错误路径退出码 0→1——脚本/CI 可识别（此前错误恒 0）
+
 ### Fixed
 - **会话名 JSON 转义 bug**（真实事故）：会话名含反斜杠（如 prompt 带 `c:\path`）→ `/api/session` 返回损坏 JSON → 前端解析崩溃。修复 handler.zig 6 处 name 拼接（列表/分页/get/messages 端点）补 `jsonw.escapeAlloc` 转义
 - **`[models.compat]` TOML 平铺陷阱**（真实事故）：轻量 toml.zig 不支持嵌套表——`[models.compat]` 表头后的键（`input`/`thinking_format`）平铺到 root 丢失：`input=["text","image"]` 静默回退 `["text"]`（vision 失效）、compat override 永不生效。修复：启动检测 `models.compat` 键 → stderr 警告；模板移除真实表头改纯注释（明确 input 必须在 `[[models]]` 表内）；`--list-models` 输出 input 模态列（配置生效可见）。登记 F25（toml 嵌套表支持）

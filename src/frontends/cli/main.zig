@@ -103,7 +103,8 @@ pub fn main(process: std.process.Init) !void {
             var sbuf: [256]u8 = undefined;
             var sw: std.Io.File.Writer = .init(.stderr(), io, &sbuf);
             sw.interface.print("z-agent-core: error: cannot load config\n", .{}) catch {};
-            return;
+            // N23: config errors must be visible to scripts/CI — nonzero exit.
+            std.process.exit(1);
         };
         defer cfg.deinit();
 
@@ -130,7 +131,8 @@ pub fn main(process: std.process.Init) !void {
 
     var app = App.init(allocator, io, single_prompt, model_override, thinking_level) catch |err| {
         init_mod.reportInitError(io, err, null, model_override);
-        return;
+        // N23: init/config errors must be visible to scripts/CI — nonzero exit.
+        std.process.exit(1);
     };
     defer app.deinit();
     app.pipe_mode = !(std.Io.File.isTty(.stdout(), io) catch false);

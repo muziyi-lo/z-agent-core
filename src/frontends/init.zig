@@ -54,6 +54,10 @@ pub fn init(
     opts: struct {
         project_root: ?[]const u8 = null,
         api_key_override: ?[]const u8 = null,
+        /// --model override (N23): applied BEFORE the startup resolveModel check
+        /// so the validation uses the effective value — a broken config
+        /// default_model must not be killed by the pre-override resolve.
+        model_override: ?[]const u8 = null,
     },
 ) !FrontendState {
     const project_root = if (opts.project_root) |r|
@@ -69,6 +73,12 @@ pub fn init(
     var cfg = config_mod.Config.load(allocator, project_root, io) catch return error.ConfigLoadFailed;
     errdefer cfg.deinit();
 
+    // N23: --model override applied here (pre-resolve) so the startup check
+    // below validates the effective value, not the static config value.
+    if (opts.model_override) |spec| {
+        cfg.default_model = try allocator.dupe(u8, spec);
+    }
+
     var dotenv = config_mod.loadDotEnv(allocator, project_root, io) catch |err| blk: {
         var dbuf: [256]u8 = undefined;
         var dw: std.Io.File.Writer = .init(.stderr(), io, &dbuf);
@@ -82,7 +92,20 @@ pub fn init(
     var env_snapshot = try env.createMap(allocator);
     errdefer env_snapshot.deinit();
 
-    const model = config_mod.resolveModel(&cfg, cfg.default_model) catch return error.ModelResolveFailed;
+    // N23: startup fail-fast with available-model suggestions. Also the single
+    // place where a broken default_model (or an unresolvable --model override)
+    // surfaces — web gets its own check at listen time (server.zig).
+    const model = config_mod.resolveModel(&cfg, cfg.default_model) catch |err| {
+        var ebuf: [512]u8 = undefined;
+        var ew: std.Io.File.Writer = .init(.stderr(), io, &ebuf);
+        ew.interface.print("error: default_model \"{s}\" cannot be resolved ({s})\n", .{ cfg.default_model, @errorName(err) }) catch {};
+        ew.interface.flush() catch {};
+        const models_text = config_mod.formatAvailableModels(allocator, &cfg) catch "?";
+        defer allocator.free(models_text);
+        ew.interface.print("       available models: {s}\n", .{models_text}) catch {};
+        ew.interface.flush() catch {};
+        return error.ModelResolveFailed;
+    };
 
     const entry = for (cfg.providers) |p| {
         if (std.mem.eql(u8, p.name, model.provider)) break p;

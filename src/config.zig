@@ -17,6 +17,54 @@ const model_keys = [_][]const u8{ "id", "name", "provider", "context_window", "m
 /// Known per-provider keys (parseProviders consumers).
 const provider_keys = [_][]const u8{ "name", "api", "base_url", "api_key_env", "models" };
 
+/// Top-level scalar keys with their expected TOML type. A value present with
+/// the wrong type silently degrades to the default (getString/getInt/getBool
+/// return null) — warn loudly instead (N23).
+const ScalarKey = struct { key: []const u8, expected: []const u8 };
+const scalar_keys = [_]ScalarKey{
+    .{ .key = "default_model", .expected = "string" },
+    .{ .key = "max_tokens", .expected = "integer" },
+    .{ .key = "max_tool_rounds", .expected = "integer" },
+    .{ .key = "skills_dir", .expected = "string" },
+    .{ .key = "auto_title", .expected = "boolean" },
+    .{ .key = "approval_mode", .expected = "string" },
+    .{ .key = "approval_cache", .expected = "boolean" },
+    .{ .key = "base_prompt", .expected = "string" },
+};
+
+/// Warn once, aggregated, when any of the 8 top-level scalar keys holds a
+/// value of the wrong type (opencode issues-list style summary block).
+/// Values still fall back to defaults via the existing get* helpers.
+fn warnWrongTypes(io: Io, parsed: *const ConfigToml) void {
+    var bad: [scalar_keys.len]ScalarKey = undefined;
+    var count: usize = 0;
+    for (scalar_keys) |k| {
+        const v = parsed.get(k.key) orelse continue;
+        const ok = if (std.mem.eql(u8, k.expected, "string"))
+            v == .string
+        else if (std.mem.eql(u8, k.expected, "integer"))
+            v == .integer
+        else if (std.mem.eql(u8, k.expected, "boolean"))
+            v == .boolean
+        else
+            true;
+        if (!ok) {
+            bad[count] = k;
+            count += 1;
+        }
+    }
+    if (count == 0) return;
+
+    var warn_buf: [512]u8 = undefined;
+    var warn_w: Io.File.Writer = .init(.stderr(), io, &warn_buf);
+    warn_w.interface.print("z-agent-core: warning: {d} config key(s) have wrong type — using defaults:\n", .{count}) catch {};
+    for (bad[0..count]) |k| {
+        const got = if (parsed.get(k.key)) |v| @tagName(v) else "?";
+        warn_w.interface.print("       {s} (expected {s}, got {s})\n", .{ k.key, k.expected, got }) catch {};
+    }
+    warn_w.interface.flush() catch {};
+}
+
 /// Warn about keys in `table` that are not in `known`. This catches
 /// misspelled keys (`imput = [...]`) and misplaced keys before they silently
 /// degrade to defaults.
@@ -253,6 +301,23 @@ pub fn resolveModel(config: *const Config, spec: []const u8) !*const types.Model
     return error.ProviderNotFound;
 }
 
+/// Format "provider/model, provider/model" list of every configured model.
+/// Used in default_model resolution error text so the user can see what specs
+/// are actually selectable. Caller owns the returned slice.
+pub fn formatAvailableModels(allocator: std.mem.Allocator, config: *const Config) ![]const u8 {
+    var buf = std.ArrayListAligned(u8, null).empty;
+    errdefer buf.deinit(allocator);
+    for (config.providers) |p| {
+        for (p.models) |m| {
+            if (buf.items.len > 0) try buf.appendSlice(allocator, ", ");
+            try buf.appendSlice(allocator, p.name);
+            try buf.append(allocator, '/');
+            try buf.appendSlice(allocator, m.id);
+        }
+    }
+    return buf.toOwnedSlice(allocator);
+}
+
 fn validateConfig(config: *const Config, io: std.Io) !void {
     if (config.default_model.len == 0) return error.InvalidConfig_NoDefaultModel;
     for (config.providers) |p| {
@@ -293,7 +358,14 @@ fn validateConfig(config: *const Config, io: std.Io) !void {
 }
 
 fn parseConfigContent(a: std.mem.Allocator, io: Io, source: []const u8) !Config {
-    var parsed = try toml.parse(a, source);
+    // N23: TOML syntax errors are collected (position-carrying Diag) and
+    // rendered once here — toml.parse stays free of any I/O side effect.
+    var diags = toml.DiagList.empty;
+    defer diags.deinit(a);
+    var parsed = toml.parse(a, source, &diags) catch |err| {
+        renderTomlDiags(io, source, diags.items);
+        return err;
+    };
     defer toml.freeTable(a, &parsed);
 
     // N22: the lightweight TOML parser flattens nested tables — a
@@ -312,6 +384,10 @@ fn parseConfigContent(a: std.mem.Allocator, io: Io, source: []const u8) !Config 
     // Unknown top-level keys: warn instead of silently ignoring (a typo like
     // `imput` or `max_token` would otherwise look configured but do nothing).
     warnUnknownKeys(io, &parsed, &top_level_keys, "top-level config");
+
+    // Wrong-type scalar values silently fall back to defaults — warn loudly
+    // (aggregated, one block) so `default_model = 123` never looks configured.
+    warnWrongTypes(io, &parsed);
 
     const dm_raw = getString(parsed, "default_model") orelse "deepseek/deepseek-v4-pro";
     const max_tokens_val = getInt(parsed, "max_tokens") orelse 384000;
@@ -368,6 +444,36 @@ fn parseConfigContent(a: std.mem.Allocator, io: Io, source: []const u8) !Config 
         .approval_cache = approval_cache_val,
         ._arena = undefined,
     };
+}
+
+/// Render TOML syntax diagnostics once: error line, position, line content
+/// and a caret pointing at the column (opencode parse.ts format). This is the
+/// single print point — toml.zig itself never touches stderr (N23).
+fn renderTomlDiags(io: Io, source: []const u8, diags: []const toml.Diag) void {
+    var sbuf: [512]u8 = undefined;
+    var sw: Io.File.Writer = .init(.stderr(), io, &sbuf);
+    for (diags) |d| {
+        sw.interface.print("z-agent-core: error: invalid TOML at line {d}, column {d}: {s}\n", .{ d.line, d.column, d.message }) catch {};
+        var it = std.mem.splitScalar(u8, source, '\n');
+        var n: u32 = 0;
+        while (it.next()) |ln| {
+            n += 1;
+            if (n == d.line) {
+                const line_clean = if (ln.len > 0 and ln[ln.len - 1] == '\r') ln[0 .. ln.len - 1] else ln;
+                sw.interface.print("       Line {d}: {s}\n", .{ d.line, line_clean }) catch {};
+                if (d.column > 0 and d.column <= line_clean.len + 1) {
+                    sw.interface.print("       ", .{}) catch {};
+                    var i: u32 = 0;
+                    while (i < d.column - 1) : (i += 1) {
+                        sw.interface.writeByte(' ') catch {};
+                    }
+                    sw.interface.print("^\n", .{}) catch {};
+                }
+                break;
+            }
+        }
+    }
+    sw.interface.flush() catch {};
 }
 
 fn testParseConfig(allocator: std.mem.Allocator, source: []const u8) !Config {
@@ -900,6 +1006,36 @@ test "config: approval_allow type error degrades to empty" {
     try std.testing.expectEqualStrings("risky", config.approval_mode);
 }
 
+test "config: scalar wrong types warn and fall back to defaults" {
+    const allocator = std.testing.allocator;
+
+    var config = try testParseConfig(allocator,
+        \\default_model = 123
+        \\max_tokens = "big"
+        \\auto_title = "yes"
+    );
+    defer config.deinit();
+
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-pro", config.default_model);
+    try std.testing.expectEqual(@as(u32, 384000), config.max_tokens);
+    try std.testing.expect(config.auto_title);
+}
+
+test "config: scalar correct types parse without fallback" {
+    const allocator = std.testing.allocator;
+
+    var config = try testParseConfig(allocator,
+        \\default_model = "deepseek/deepseek-v4-flash"
+        \\max_tokens = 5000
+        \\auto_title = false
+    );
+    defer config.deinit();
+
+    try std.testing.expectEqualStrings("deepseek/deepseek-v4-flash", config.default_model);
+    try std.testing.expectEqual(@as(u32, 5000), config.max_tokens);
+    try std.testing.expect(!config.auto_title);
+}
+
 test "config: model params_json present" {
     const allocator = std.testing.allocator;
 
@@ -1065,7 +1201,67 @@ test "config: resolveModel no slash" {
     var config = try testParseConfig(allocator, DEFAULT_TEMPLATE);
     defer config.deinit();
 
-    try std.testing.expectError(error.InvalidModelSpec, resolveModel(&config, "invalid-spec"));
+    try std.testing.expectError(error.InvalidModelSpec, resolveModel(&config, "no-slash-here"));
+}
+
+test "config: formatAvailableModels lists all provider/model pairs" {
+    const allocator = std.testing.allocator;
+
+    var config = try testParseConfig(allocator,
+        \\[[providers]]
+        \\name = "p1"
+        \\api = "openai_compat"
+        \\base_url = "https://a.example.com"
+        \\api_key_env = "KEY_A"
+        \\models = ["a", "b"]
+        \\
+        \\[[models]]
+        \\id = "a"
+        \\name = "A"
+        \\provider = "p1"
+        \\context_window = 100000
+        \\max_tokens = 4096
+        \\input = ["text"]
+        \\
+        \\[[models]]
+        \\id = "b"
+        \\name = "B"
+        \\provider = "p1"
+        \\context_window = 100000
+        \\max_tokens = 4096
+        \\input = ["text"]
+        \\
+        \\[[providers]]
+        \\name = "p2"
+        \\api = "openai_compat"
+        \\base_url = "https://b.example.com"
+        \\api_key_env = "KEY_B"
+        \\models = ["c"]
+        \\
+        \\[[models]]
+        \\id = "c"
+        \\name = "C"
+        \\provider = "p2"
+        \\context_window = 100000
+        \\max_tokens = 4096
+        \\input = ["text"]
+    );
+    defer config.deinit();
+
+    const list = try formatAvailableModels(allocator, &config);
+    defer allocator.free(list);
+    try std.testing.expectEqualStrings("p1/a, p1/b, p2/c", list);
+}
+
+test "config: formatAvailableModels empty config yields empty list" {
+    const allocator = std.testing.allocator;
+
+    var config = try testParseConfig(allocator, "");
+    defer config.deinit();
+
+    const list = try formatAvailableModels(allocator, &config);
+    defer allocator.free(list);
+    try std.testing.expectEqualStrings("", list);
 }
 
 test "config: deinit cleans all duped strings" {
