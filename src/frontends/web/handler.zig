@@ -1271,6 +1271,22 @@ fn buildDonePayload(allocator: std.mem.Allocator, buf: []u8, new_msgs: u32, msgs
         try first_msg_json.appendSlice(allocator, "null");
     }
 
+    // N15-followup: surface the latest [Notice: system warning (max_rounds /
+    // StormBreaker / context) in the done frame. The streaming path has no
+    // system event, so the user would otherwise only see it after a reload.
+    var notice: ?[]const u8 = null;
+    {
+        var j: usize = msgs.len;
+        while (j > 0) {
+            j -= 1;
+            if (msgs[j].role == .system and std.mem.startsWith(u8, msgs[j].content, "[Notice:")) {
+                notice = try jsonw.escapeAlloc(allocator, msgs[j].content);
+                break;
+            }
+        }
+    }
+    defer if (notice) |n| allocator.free(n);
+
     if (has_usage) {
         var usage_buf: [256]u8 = undefined;
         const usage_json = if (cache_hit) |ch| blk: {
@@ -1278,7 +1294,13 @@ fn buildDonePayload(allocator: std.mem.Allocator, buf: []u8, new_msgs: u32, msgs
             break :blk try std.fmt.bufPrint(&usage_buf, "{{\"input\":{d},\"output\":{d},\"total\":{d},\"cache_hit\":{d},\"cache_miss\":{d}}}", .{ usage_input, usage_output, usage_total, ch, cm });
         } else try std.fmt.bufPrint(&usage_buf, "{{\"input\":{d},\"output\":{d},\"total\":{d}}}", .{ usage_input, usage_output, usage_total });
 
+        if (notice) |n| {
+            return try std.fmt.bufPrint(buf, "{{\"new_messages\":{d},\"usage\":{s},\"model\":\"{s}\",\"first_message\":{s},\"session_id\":\"{s}\",\"notice\":\"{s}\"}}", .{ new_msgs, usage_json, model, first_msg_json.items, session_id, n });
+        }
         return try std.fmt.bufPrint(buf, "{{\"new_messages\":{d},\"usage\":{s},\"model\":\"{s}\",\"first_message\":{s},\"session_id\":\"{s}\"}}", .{ new_msgs, usage_json, model, first_msg_json.items, session_id });
+    }
+    if (notice) |n| {
+        return try std.fmt.bufPrint(buf, "{{\"new_messages\":{d},\"usage\":null,\"model\":\"{s}\",\"first_message\":{s},\"session_id\":\"{s}\",\"notice\":\"{s}\"}}", .{ new_msgs, model, first_msg_json.items, session_id, n });
     }
     return try std.fmt.bufPrint(buf, "{{\"new_messages\":{d},\"usage\":null,\"model\":\"{s}\",\"first_message\":{s},\"session_id\":\"{s}\"}}", .{ new_msgs, model, first_msg_json.items, session_id });
 }
@@ -1546,4 +1568,41 @@ test "handler: ToolMeta JSON (types.writeJson) parseable for every variant" {
         const m = parsed.value.object.get("meta").?.object;
         try std.testing.expectEqualStrings(@tagName(meta), m.get("name").?.string);
     }
+}
+
+test "handler: buildDonePayload surfaces latest [Notice: system warning" {
+    const msgs = [_]types.Message{
+        .{ .id = 1, .role = .user, .content = "hi" },
+        .{ .id = 2, .role = .assistant, .content = "answer", .model = "m" },
+        .{ .id = 3, .role = .system, .content = "[Notice: tool call limit reached (3 rounds this turn). Stop calling tools now. Report your completed work and any remaining questions to the user.]" },
+    };
+
+    var tmp = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer tmp.deinit();
+    const a = tmp.allocator();
+
+    var buf: [4096]u8 = undefined;
+    const out = try buildDonePayload(a, &buf, 3, &msgs, "deepseek/x", "sess-1");
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, out, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("notice") != null);
+    try std.testing.expect(std.mem.startsWith(u8, parsed.value.object.get("notice").?.string, "[Notice: tool call limit reached"));
+}
+
+test "handler: buildDonePayload omits notice when absent" {
+    const msgs = [_]types.Message{
+        .{ .id = 1, .role = .user, .content = "hi" },
+        .{ .id = 2, .role = .assistant, .content = "answer", .model = "m" },
+    };
+
+    var tmp = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer tmp.deinit();
+    const a = tmp.allocator();
+
+    var buf: [4096]u8 = undefined;
+    const out = try buildDonePayload(a, &buf, 2, &msgs, "deepseek/x", "sess-1");
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, out, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("notice") == null);
+    try std.testing.expectEqual(@as(i64, 2), parsed.value.object.get("new_messages").?.integer);
 }

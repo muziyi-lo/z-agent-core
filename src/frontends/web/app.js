@@ -1670,6 +1670,13 @@ function sendPrompt(prompt) {
     });
     // context tool grouping
     wrapContextToolGroups(asst);
+    // done-frame notice: surface max_rounds / StormBreaker / context warnings
+    // that were appended server-side as [Notice: system messages (no SSE event
+    // exists for system, so they would only appear after a reload).
+    if (d.notice) {
+      addMessage({ role: 'system', content: d.notice }, 0, null, true);
+      scrollToBottom(msgs);
+    }
     document.getElementById('prompt-input').focus();
     scrollToBottom(msgs);
     document.getElementById('prompt-input').focus();

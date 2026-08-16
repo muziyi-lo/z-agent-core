@@ -33,6 +33,7 @@
   - 新增 `tests/frontend/test-tool-registry.mjs`（17 断言：webfetch/bash 幂等/meta 累积/edit diff/fallback/空 meta 降级）
 
 ### Fixed
+- **工具调用上限等警告无流式前端提醒**（用户指出，N16 审查附带）: `[Notice:` 警告（max_rounds/StormBreaker/context）此前只 append 到 session 无 SSE 推送——回合进行中用户看不到，reload 后才出现（既有渲染仅覆盖 reload 路径）。修复: `buildDonePayload` 扫描最新 `[Notice:` system 消息放入 done 帧 `notice` 字段（转义 + 无则省略），前端 done 处理用 `addMessage` 复用既有 `[Notice:` 渲染路径即时展示。新增 2 条 Zig 单测（notice 透出/省略 + JSON 合法性），All 327 tests
 - **侧边栏重复点击选中会话无处理 + 流式切换会话数据混入**（用户反馈）: ① `div.onclick` 直接调 `loadSession(s.id)` 无守卫——重复点击已选会话重复 GET + 全量重渲染 + 列表刷新。修复: `s.id === currentId` 时 no-op；② 侧边栏切换会话不关 `evtSrc`（`switchToSession` 有关闭，侧边栏路径遗漏）——流式中点击其他会话，旧 SSE 持续推送混入新会话渲染。修复: 切换前 `evtSrc.close()`。模型菜单重复点击选中项无副作用（本地变量 + 菜单关闭），不处理
 - **undo 按钮始终显示**（用户反馈）: `#undo-btn` 常驻 topbar 但多数会话无可撤销操作。修复: 按钮初始隐藏（`class="hidden"`），`loadSession` 后查询 `GET /history` 判断 undo 栈非空才显示（删除消息/截断/分支后自动出现，undo 或栈清空后隐藏）；API 失败安全降级隐藏。chrome-cdp 闭环验证: 无栈隐藏 → 删除消息显示 → undo 后隐藏
 - **移动端用户消息不可见（reload/发送均不显示）**（用户实测，移动端适配）: `.msg.user` 的 `margin-right:calc((100% - var(--msg-max-width)) / 2)` 在容器宽度 < 840px 时产生**负 margin**，用户气泡右边缘被推出视口（375px 屏时气泡 262px 中约 232px 在视口外），桌面窗口宽不触发。修复: 改为 `margin-right:calc((100% - min(100%, var(--msg-max-width))) / 2)`——桌面行为不变（min 取 840px），窄容器 min 取 100% → margin 0，气泡贴右正常显示。chrome-cdp 验证: 375px 容器内 `inside:true`（修复前右超 232px）
