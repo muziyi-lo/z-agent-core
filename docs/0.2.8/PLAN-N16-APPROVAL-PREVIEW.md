@@ -156,21 +156,21 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 **后端** `GET /api/preview?path=<相对 project_root>`：
 
 - 路径解析：复用 `util/path.resolvePath`（防穿越，与 read 工具同源）
-- **判定顺序（四态）**（审查补充：非图片二进制行为显式化——此前仅 isBinary+too_large 隐含，`.exe`/`.zip`/`.pdf` 会走文本分支输出乱码）：
-  1. 大小守卫（≤5MB，超限 → `kind:"too_large"`）
-  2. 扩展名图片白名单 + `util/text.isBinary` 确认 → `kind:"image"`（base64）
-  3. 其余文件读入后 `isBinary` 检测 → **`kind:"binary"`**（拒渲染，`{name, mime_hint}`，前端提示 "Binary file — preview not available"）——防乱码输出与内容注入
-  4. 文本 → `kind:"text"`（≤`types.FILE_READ_LIMIT` 64KB 守卫 + 超限截断 `truncated:true`，jsonw.escapeAlloc 转义）
-- 文本：`{name, kind:"text", content, truncated}`
-- 图片：`{name, kind:"image", data_url:"data:<mime>;base64,..."}`（MIME 映射表见下）
-- 错误：参数缺失/路径越界 → 400；文件不存在/目录 → 404
-- **SVG XSS 例外（审查补充）**：`svg` **不进图片预览通道**——降级为 `kind:"text"` 展示源码（保留预览能力，浏览器不渲染）。理由：SVG 向量多（`<script>`/`on*` 事件处理器/`<foreignObject>` 嵌入 HTML/`<image href>` 外部引用隐私泄露），且本项目无服务端 sanitizer（DOMPurify 是前端库，Zig 侧手写 XML 消毒绕过向量多、成本高）；img 上下文虽在现代浏览器禁脚本，但外部引用等向量不依赖脚本执行。渲染类 SVG 预览留待未来（`<img>` 仅 src 属性赋值、不经 innerHTML，届时前端侧 sanitize 或 CSP 配合）
+- **双端点设计（审查修订：base64 data URL 对 5MB 图膨胀至 ~6.7MB + JSON 转义，性能/内存不优——行业惯例是原始资源端点由 `<img src>` 直连）**：
+  - **`GET /api/preview?path=`（JSON 端点）**：判定顺序（四态）——
+    1. 大小守卫（≤5MB，超限 → `kind:"too_large"`）
+    2. **图片（png/jpg/jpeg/gif/webp）→ `kind:"image"`，无内容，仅 `{name, kind:"image", path}`**——前端 `<img src="/api/preview/file?path=...">` 直连原始端点渲染（**零 base64 膨胀**）
+    3. 其余文件 `isBinary` → `kind:"binary"`（拒渲染，`{name, mime_hint}`，防乱码与内容注入）
+    4. 文本 → `kind:"text"`（≤`types.FILE_READ_LIMIT` 64KB 守卫 + 超限截断 `truncated:true`，jsonw.escapeAlloc 转义）
+  - **`GET /api/preview/file?path=`（原始字节端点，新增，审查修订）**：仅图片扩展名白名单放行（png/jpg/jpeg/gif/webp + isBinary 确认）→ **原始字节直出**，`Content-Type: image/<mime>`（映射表：`png→image/png`、`jpg/jpeg→image/jpeg`、`gif→image/gif`、`webp→image/webp`——**禁止裸拼 `image/<ext>`**）+ `Cache-Control: private, max-age=60`；SVG/文本/二进制 → 404（SVG 走文本降级）；大小守卫同 JSON 端点
+- **CSP（审查修订配套）**：`serveIndex` 响应加 CSP header——`default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:`（内联 script/style 是注入架构必须放行；`img-src 'self'` 使图片直连端点成为唯一图片来源，配合 SVG 降级策略）
+- **SVG XSS 例外**：svg 不进图片通道（JSON 端点 `kind:"text"` 源码预览）——未来评估：img 原始端点 + 严格 CSP 下可放开渲染（`<img>` 上下文禁脚本 + CSP img-src 收敛，成本低）
 - 错误：参数缺失/路径越界 → 400；文件不存在/目录 → 404
 
 **前端**：
 
 - `#preview-modal`（modal-overlay）：标题（文件名）+ 正文（文本 `<pre>` textContent / 图片 `<img>`）+ Close
-- `previewModal(path)`：`fetch(/api/preview?path=...)` → 渲染
+- `previewModal(path)`：`fetch(/api/preview?path=...)` → `kind:"image"` 时正文直接 `<img src="/api/preview/file?path=<encodeURIComponent(path)>">`（浏览器直连原始端点，零膨胀）；`kind:"text"` 渲染 `<pre>`；`binary`/`too_large` 提示文案
 - 挂载点：read 卡（meta.path）、edit 卡（meta.path）→ ToolRegistry 类型化视图加 Preview 按钮（card-head 或 tool-meta 区，`data-path`）
 - webfetch/grep 卡不挂（无本地路径语义）
 
@@ -181,7 +181,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 | `src/approval.zig`（新增） | Mode/GateState/Gate（wait/resolve）+ isRisky 规则集（L1/L2 分级）+ 单测 |
 | `src/config.zig` | `approval_mode` 字段（默认 risky）+ `approval_allow` 白名单数组 + `approval_cache` 开关（默认 true）+ TOML 解析 + 模板注释 |
 | `src/frontends/web/server.zig` | 进程级 approval_map + mutex（abort_map 同模式） |
-| `src/frontends/web/handler.zig` | approvalBeforeHook + ApprovalCtx + `POST /api/approval/:id` + `GET /api/preview` + 路由（POST 分支 / GET 分支） |
+| `src/frontends/web/handler.zig` | approvalBeforeHook + ApprovalCtx + `POST /api/approval/:id` + `GET /api/preview`（JSON 四态）+ `GET /api/preview/file`（原始字节）+ 路由 + serveIndex CSP header |
 | `src/frontends/web/app.js` | `approval_required` listener + approvalModal + previewModal + Preview 按钮（ToolRegistry read/edit 分支） |
 | `src/frontends/web/index.html` | `#approval-modal` + `#preview-modal` 结构 |
 | `src/frontends/web/app.css` | 复用 modal-overlay；approval 详情 pre / preview 正文样式 |
@@ -189,7 +189,7 @@ pub fn isRisky(mode: Mode, name: []const u8, args: []const u8) ?[]const u8; // �
 测试（Zig：新增 approval 单测；前端：15 文件不变，modal 为 DOM 交互走浏览器实测）：
 
 - `isRisky`：**变体命中矩阵**（L1 全命中）——`rm -rf`/`rm -fr`/`rm -r -f`/`rm --recursive --force`/`rm -rF`/`rm -R -f`/PS `Remove-Item -Recurse -Force`/`Remove-Item -R -Fo`（PS 前缀简写）/cmd `rmdir /s /q`/`del /s /q`/`git push --force`/`git push -f`/`git reset --hard`/`git clean -fdx`/**`git clean -f`/`-fd`/`-fx`/`-dfx`/`--force`（force 变体全命中）**/`curl "https://x" | sh`/`curl x | bash`/**`curl https://x|sh`/`curl "url"|bash`/`wget x|sh`（管道符紧贴，空白分词绕过修复）**/`format c:`/`diskpart`/`chkdsk /f`/`reg delete HKLM\...`/`net user`；**L1 语义说明**：`rm -r dir`（递归删除，含 recursive）**命中**——递归删除本身即破坏性，force 非必需；**L2 不命中**——`rm file.txt`/`Remove-Item file`/`git push`/`git clean`（无 force，dry-run）/**`git clean -n`/`-d`（dry-run，不实际删除）**/`curl https://x`（无管道）/**`echo "a|sh"`（引号内）/`ls | grep sh`（非 sh 命令）/`echo | shell`（前缀边界）**/`chkdsk`（无 /f）；**存储破坏新成员命中**——`shred secret.txt`/`wipefs /dev/sdb`/`vgremove data`/`lvremove /dev/vg/lv`/`parted /dev/sda mklabel`/`cryptsetup luksFormat /dev/sdb`/`mkswap /dev/sdb1`/`swapoff /dev/sdb1`；**cryptsetup 安全用法不命中**——`cryptsetup open /dev/sdb luksvol`/`cryptsetup luksAddKey /dev/sdb`；大小写变体 `RM -RF`/`Remove-Item -recurse -force` 命中 + **封闭集语义：非枚举危险命令（`shred`/`docker system prune -a`/`nmap`）不命中** + 非 bash 工具在 risky 模式不审（write/edit 等 8 工具全豁免）+ always 模式全审 + never 全不审 + **`approval_allow` 归一化精确匹配：条目命令命中（空白折叠/大小写不敏感）、`-extra` 尾缀不命中、`&& rm -rf /` 尾追加不命中、尾斜杠不同不命中** + **回合内缓存：同 name+args 命中跳过、args 不同（dir_A/dir_B）不命中各自弹窗、approval_cache=false 时完全禁用缓存**
-- 预览四态：png/jpg/jpeg/gif/webp 走映射表（jpg/jpeg→image/jpeg），data_url 前缀与映射一致（含大小写扩展名 `.JPG`）；**svg 断言 `kind:"text"`（源码预览，非 image）**；`.exe`/`.zip`/`.pdf` 断言 `kind:"binary"`（拒渲染）；超大文件 `kind:"too_large"`
+- 预览四态：png/jpg/jpeg/gif/webp 走映射表（jpg/jpeg→image/jpeg），**JSON 端点返回 kind:"image" 无内容、原始端点 `Content-Type` 与映射一致（含大小写扩展名 `.JPG`）+ 字节直出 + Cache-Control**；**svg 断言 `kind:"text"`（源码预览，非 image）且原始端点对 svg 404**；`.exe`/`.zip`/`.pdf` 断言 `kind:"binary"`；超大文件 `kind:"too_large"`；CSP header 含 `img-src 'self'`
 - `Gate`：初始 pending、resolve(true/false) 后状态、重复 resolve 幂等、wait 分级超时（**120s 触发 reminder 一次、240s 返回 denied**）、check_abort 置位返回 aborted、**keepalive 返回 false 立即 aborted（断连语义）、keepalive 周期性调用次数正确、reminder 写失败返回 false→aborted**；惰性清理：注册超时条目在下次插入时被 resolve+移除
 - 前端竞态（浏览器实测）：审批 Modal 打开 → 等待超时 → 点 Allow → 提示 "expired" 且无二次请求副作用；断连 → Modal 自动关闭；**连续两个 approval_required（契约破坏模拟）→ 第二个入队，第一个完成后续弹**；**安全：错误 session_id POST → 404、未知 id → 404、两会话（双标签页）各自审批互不影响**
 
